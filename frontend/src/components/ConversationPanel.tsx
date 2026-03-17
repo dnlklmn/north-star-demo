@@ -3,6 +3,12 @@ import { Send } from 'lucide-react'
 import type { Message, AgentStatus, Validation } from '../types'
 import SoftOkBanner from './SoftOkBanner'
 
+interface ActionSuggestion {
+  action: string
+  label: string
+  reason: string
+}
+
 interface Props {
   messages: Message[]
   status: AgentStatus
@@ -11,6 +17,8 @@ interface Props {
   onSend: (message: string) => void
   onProceed: () => void
   onKeepRefining: () => void
+  actionSuggestions?: ActionSuggestion[]
+  onActionSuggestion?: (action: string) => void
 }
 
 export default function ConversationPanel({
@@ -21,6 +29,8 @@ export default function ConversationPanel({
   onSend,
   onProceed,
   onKeepRefining,
+  actionSuggestions = [],
+  onActionSuggestion,
 }: Props) {
   const [input, setInput] = useState('')
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; text: string } | null>(null)
@@ -159,6 +169,27 @@ export default function ConversationPanel({
           onKeepRefining={onKeepRefining}
           onProceed={onProceed}
         />
+      )}
+
+      {/* Action suggestions */}
+      {actionSuggestions.length > 0 && (
+        <div className="px-3 py-2 border-t border-border bg-muted/30">
+          <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide mb-1.5">
+            Suggested actions
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {actionSuggestions.map((suggestion, i) => (
+              <button
+                key={i}
+                onClick={() => onActionSuggestion?.(suggestion.action)}
+                className="px-2.5 py-1.5 text-xs bg-accent/10 text-accent rounded-lg hover:bg-accent/20 transition-colors text-left"
+                title={suggestion.reason}
+              >
+                {suggestion.label}
+              </button>
+            ))}
+          </div>
+        </div>
       )}
 
       {/* Input */}

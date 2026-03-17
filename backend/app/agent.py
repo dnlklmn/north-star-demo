@@ -48,11 +48,15 @@ class AgentResult:
         tool_calls: list[str] | None = None,
         suggestions: list[Suggestion] | None = None,
         suggested_stories: list[SuggestedStory] | None = None,
+        actions: list[dict] | None = None,
+        action_suggestions: list[dict] | None = None,
     ):
         self.message = message
         self.tool_calls = tool_calls or []
         self.suggestions = suggestions or []
         self.suggested_stories = suggested_stories or []
+        self.actions = actions or []
+        self.action_suggestions = action_suggestions or []
 
 
 async def run_agent_turn(
@@ -273,16 +277,30 @@ async def run_dataset_chat(
         charter, dataset_stats, user_message, state.input.conversation_history,
     )
 
-    # Check for dataset-action blocks
-    action_data = None
+    # Check for dataset-action blocks (can have multiple)
+    actions = []
     text = raw_text
-    if "```dataset-action" in text:
+    import json
+    while "```dataset-action" in text:
         try:
             start = text.index("```dataset-action") + len("```dataset-action")
             end = text.index("```", start)
-            import json
             action_data = json.loads(text[start:end].strip())
+            actions.append(action_data)
             text = text[:text.index("```dataset-action")] + text[end + 3:]
+        except (ValueError, json.JSONDecodeError):
+            break
+
+    # Check for suggestions block
+    action_suggestions = []
+    if "```suggestions" in text:
+        try:
+            start = text.index("```suggestions") + len("```suggestions")
+            end = text.index("```", start)
+            suggestions_data = json.loads(text[start:end].strip())
+            if isinstance(suggestions_data, list):
+                action_suggestions = suggestions_data
+            text = text[:text.index("```suggestions")] + text[end + 3:]
         except (ValueError, json.JSONDecodeError):
             pass
 
@@ -295,11 +313,12 @@ async def run_dataset_chat(
         turn_type="dataset_chat",
         input_snapshot={"user_message": user_message, "dataset_stats": dataset_stats},
         llm_calls=chat_calls,
-        parsed_output={"action": action_data} if action_data else None,
+        parsed_output={"actions": actions, "suggestions": action_suggestions} if actions or action_suggestions else None,
         agent_message=text,
     )
 
-    result = AgentResult(message=text)
+    result = AgentResult(message=text, actions=actions)
+    result.action_suggestions = action_suggestions
     return result
 
 

@@ -207,10 +207,22 @@ export async function updateSettings(fields: Partial<Settings>): Promise<Setting
   return res.json()
 }
 
+export interface AgentAction {
+  action: 'generate' | 'show_coverage' | 'auto_review' | 'export' | 'approve' | 'reject'
+  count?: number
+  example_id?: string
+}
+
+export interface ActionSuggestion {
+  action: string
+  label: string
+  reason: string
+}
+
 export async function datasetChat(
   datasetId: string,
   message: string
-): Promise<{ message: string; state: SessionState }> {
+): Promise<{ message: string; state: SessionState; actions?: AgentAction[]; action_suggestions?: ActionSuggestion[] }> {
   const res = await fetch(`${BASE}/datasets/${datasetId}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

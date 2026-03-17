@@ -499,21 +499,67 @@ You can help with:
 - Suggesting improvements to specific examples
 - Answering questions about the charter definitions
 
-Rules:
-- Be BRIEF. 1-3 sentences.
-- Use plain language — no technical jargon
-- When suggesting examples, be specific and concrete
-- Reference the charter definitions when explaining quality judgements
-- If the user asks to generate examples, describe what you'd generate and ask for confirmation
+## Available Actions
+You can execute actions in the app by including action blocks. Use these when the user asks you to DO something (not just explain).
 
-If you need to return structured data (examples to add, updates to make), use:
+**Generate examples:**
 ```dataset-action
-{{"action": "generate", "feature_areas": ["..."], "count": 2}}
+{{"action": "generate", "count": 2}}
 ```
-or
+Use when: user asks to "create examples", "generate more", "make some test cases", etc.
+- count: number of examples per scenario (default 2)
+
+**Show coverage map:**
 ```dataset-action
-{{"action": "review", "example_ids": ["..."]}}
-```"""
+{{"action": "show_coverage"}}
+```
+Use when: user asks about "gaps", "what's missing", "coverage", "which scenarios need examples"
+
+**Auto-review pending examples:**
+```dataset-action
+{{"action": "auto_review"}}
+```
+Use when: user asks to "review examples", "check examples", "judge the examples"
+
+**Export dataset:**
+```dataset-action
+{{"action": "export"}}
+```
+Use when: user asks to "export", "download", "save the dataset"
+
+**Approve an example:** (when discussing a specific example)
+```dataset-action
+{{"action": "approve", "example_id": "..."}}
+```
+
+**Reject an example:**
+```dataset-action
+{{"action": "reject", "example_id": "..."}}
+```
+
+## Suggesting Actions
+You can also suggest actions the user might want to take. Include a suggestions block:
+```suggestions
+[
+  {{"action": "generate", "label": "Generate examples", "reason": "No examples yet"}},
+  {{"action": "show_coverage", "label": "Check coverage", "reason": "See which scenarios need examples"}}
+]
+```
+
+Suggest actions when:
+- Dataset is empty → suggest "Generate examples"
+- Many pending items → suggest "Auto-review"
+- All reviewed → suggest "Check coverage" and "Export"
+- Coverage gaps exist → suggest "Generate more for gaps"
+
+## Rules:
+- Be BRIEF. 1-3 sentences max.
+- Use plain language — no technical jargon
+- When user asks you to DO something, include the action block AND a brief confirmation
+- Example: "I'll generate 3 examples per scenario for you." + action block
+- Don't ask for confirmation before acting — just do it
+- If the request is ambiguous, pick sensible defaults and act
+- Proactively suggest helpful next actions based on the dataset state"""
 
 
 def build_gap_analysis_prompt(charter: dict, dataset_stats: dict, examples: list[dict]) -> str:

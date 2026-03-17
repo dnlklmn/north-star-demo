@@ -95,6 +95,8 @@ export default function App() {
 
   // --- Dataset phase state ---
   const [dataset, setDataset] = useState<Dataset | null>(null)
+  const [actionSuggestions, setActionSuggestions] = useState<Array<{ action: string; label: string; reason: string }>>([])
+
   const [gapAnalysis, setGapAnalysis] = useState<GapAnalysis | null>(null)
   const [showCoverageMap, setShowCoverageMap] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
@@ -159,6 +161,84 @@ export default function App() {
     }
   }, [goals, storyGroups, sessionId])
 
+  // Execute an action from the agent
+  const executeAgentAction = useCallback(async (action: { action: string; count?: number; example_id?: string }) => {
+    if (!dataset) return
+
+    switch (action.action) {
+      case 'generate':
+        try {
+          const res = await synthesizeExamples(dataset.id, action.count ? { count_per_scenario: action.count } : undefined)
+          const fullDs = await getDataset(dataset.session_id)
+          setDataset(fullDs)
+          setMessages(prev => [...prev, { role: 'assistant', content: `Generated ${res.generated} examples.` }])
+        } catch (err) {
+          console.error('Failed to generate:', err)
+        }
+        break
+
+      case 'show_coverage':
+        try {
+          const gaps = await getGapAnalysis(dataset.id)
+          setGapAnalysis(gaps)
+          setShowCoverageMap(true)
+        } catch (err) {
+          console.error('Failed to get coverage:', err)
+        }
+        break
+
+      case 'auto_review':
+        try {
+          const res = await autoReviewExamples(dataset.id)
+          const fullDs = await getDataset(dataset.session_id)
+          setDataset(fullDs)
+          setMessages(prev => [...prev, { role: 'assistant', content: `Reviewed ${res.reviewed} examples.` }])
+        } catch (err) {
+          console.error('Failed to auto-review:', err)
+        }
+        break
+
+      case 'export':
+        try {
+          const data = await exportDataset(dataset.id)
+          const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+          const url = URL.createObjectURL(blob)
+          const a = document.createElement('a')
+          a.href = url
+          a.download = `dataset-v${dataset.version}.json`
+          a.click()
+          URL.revokeObjectURL(url)
+        } catch (err) {
+          console.error('Failed to export:', err)
+        }
+        break
+
+      case 'approve':
+        if (action.example_id) {
+          try {
+            await apiUpdateExample(dataset.id, action.example_id, { review_status: 'approved' })
+            const fullDs = await getDataset(dataset.session_id)
+            setDataset(fullDs)
+          } catch (err) {
+            console.error('Failed to approve:', err)
+          }
+        }
+        break
+
+      case 'reject':
+        if (action.example_id) {
+          try {
+            await apiUpdateExample(dataset.id, action.example_id, { review_status: 'rejected' })
+            const fullDs = await getDataset(dataset.session_id)
+            setDataset(fullDs)
+          } catch (err) {
+            console.error('Failed to reject:', err)
+          }
+        }
+        break
+    }
+  }, [dataset])
+
   const handleSend = useCallback(async (message: string, { background }: { background?: boolean } = {}) => {
     if (!sessionId) return
     setMessages(prev => [...prev, { role: 'user', content: message }])
@@ -169,6 +249,19 @@ export default function App() {
         const res = await datasetChat(dataset.id, message)
         setMessages(prev => [...prev, { role: 'assistant', content: res.message }])
         setState(res.state)
+
+        // Store action suggestions
+        setActionSuggestions(res.action_suggestions || [])
+
+        // Execute any actions the agent requested
+        if (res.actions && res.actions.length > 0) {
+          for (const action of res.actions) {
+            await executeAgentAction(action)
+          }
+          // Refresh dataset after actions
+          const fullDs = await getDataset(dataset.session_id)
+          setDataset(fullDs)
+        }
       } else {
         // Charter phase
         const res = await sendMessage(sessionId, message)
@@ -184,7 +277,7 @@ export default function App() {
     } finally {
       if (!background) setLoading(false)
     }
-  }, [sessionId, dataset])
+  }, [sessionId, dataset, executeAgentAction])
 
   // Debounced background send - batches multiple changes together
   const sendDebouncedBackground = useCallback((change: string) => {
@@ -394,14 +487,14 @@ export default function App() {
 
   // --- Dataset phase handlers ---
 
-  const handleSynthesize = useCallback(async () => {
+  const handleSynthesize = useCallback(async (count?: number) => {
     if (!dataset) {
       console.error('No dataset available')
       return
     }
     setLoading(true)
     try {
-      const res = await synthesizeExamples(dataset.id)
+      const res = await synthesizeExamples(dataset.id, count ? { count_per_scenario: count } : undefined)
       const fullDs = await getDataset(dataset.session_id)
       setDataset(fullDs)
       setMessages(prev => [
@@ -714,6 +807,11 @@ export default function App() {
             onSend={handleSend}
             onProceed={handleProceed}
             onKeepRefining={handleKeepRefining}
+            actionSuggestions={actionSuggestions}
+            onActionSuggestion={(action) => {
+              // Execute the suggested action directly
+              executeAgentAction({ action })
+            }}
           />
           {/* Settings gear icon */}
           <button

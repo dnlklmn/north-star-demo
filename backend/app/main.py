@@ -701,6 +701,8 @@ async def dataset_chat(dataset_id: str, req: SendMessageRequest):
     return {
         "message": result.message,
         "state": state.model_dump(),
+        "actions": result.actions,
+        "action_suggestions": result.action_suggestions,
     }
 
 
