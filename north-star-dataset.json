@@ -1,0 +1,523 @@
+[
+  {
+    "id": "ns_001",
+    "scenario": "sparse input, non-technical user, customer-facing AI (e-commerce chatbot)",
+    "coverage": ["sparse input", "non-technical user", "customer-facing feature", "single feature area", "no existing data"],
+    "input": {
+      "business_goals": "We want our chatbot to be more helpful and stop frustrating customers.",
+      "user_stories": "Customers use the chatbot to track orders and get help with returns."
+    },
+    "good_output": {
+      "coverage": {
+        "criteria": [
+          "Customer asks about an order that exists and has a clear status",
+          "Customer asks about an order that is delayed with no clear resolution",
+          "Customer initiates a return for an eligible item",
+          "Customer initiates a return for an ineligible item (outside return window, final sale)",
+          "Customer asks a question the chatbot cannot answer and needs to escalate"
+        ]
+      },
+      "balance": {
+        "criteria": [
+          "Escalation and failure scenarios should be over-represented — these are where customer frustration actually occurs and where the current chatbot is most likely failing",
+          "Ineligible return requests need dedicated coverage — the chatbot must handle these without making the customer feel accused or dismissed"
+        ]
+      },
+      "alignment": [
+        {
+          "feature_area": "order tracking",
+          "good": "The response states the current order status using the exact information available — 'Your order is out for delivery, expected by 6pm today' — without adding caveats or information not in the system",
+          "bad": "The response gives a vague status update — 'Your order is on its way' — when a specific status is available, or adds uncertainty that isn't supported by the data — 'It should arrive sometime today, we hope'"
+        },
+        {
+          "feature_area": "return initiation",
+          "good": "The response confirms whether the item is eligible for return, states the reason clearly if not, and if eligible, gives the next step in one sentence without asking the customer to repeat information already provided",
+          "bad": "The response asks the customer to provide information they already gave (order number, item name), or gives a generic 'we'll look into it' response instead of a clear eligible/ineligible determination"
+        },
+        {
+          "feature_area": "escalation",
+          "good": "The response acknowledges it cannot resolve the issue, explains what the human agent will be able to help with, and gives a realistic wait time if available — without making the customer re-explain their problem",
+          "bad": "The response apologises repeatedly without escalating, or escalates without context so the customer has to repeat everything to the human agent"
+        }
+      ],
+      "rot": {
+        "criteria": [
+          "When the return policy changes — eligible windows, eligible items, or return process steps",
+          "When the order tracking system changes and the status labels or data available to the chatbot change",
+          "When a new contact channel is added (e.g. live chat is replaced by a new tool) and the escalation path changes"
+        ]
+      },
+      "label": "good",
+      "label_reason": "Every alignment criterion is stated as observable behaviour — a non-technical person can read a chatbot response and make a clear yes/no call. Coverage scenarios are specific enough to generate concrete input/output pairs. Rot triggers are tied to real business events, not generic 'when things change'. The charter was produced from sparse input by probing for concrete failure examples rather than accepting 'more helpful' at face value."
+    },
+    "bad_output": {
+      "coverage": {
+        "criteria": [
+          "Various order tracking scenarios",
+          "Different types of return requests",
+          "Cases where the chatbot needs to escalate"
+        ]
+      },
+      "balance": {
+        "criteria": [
+          "Include a mix of easy and difficult scenarios",
+          "Cover edge cases"
+        ]
+      },
+      "alignment": [
+        {
+          "feature_area": "order tracking",
+          "good": "The response is helpful and accurate",
+          "bad": "The response is unhelpful or confusing"
+        },
+        {
+          "feature_area": "return initiation",
+          "good": "The response clearly guides the customer through the return process",
+          "bad": "The response fails to help the customer with their return"
+        },
+        {
+          "feature_area": "escalation",
+          "good": "The response appropriately escalates when needed",
+          "bad": "The response fails to escalate or escalates unnecessarily"
+        }
+      ],
+      "rot": {
+        "criteria": [
+          "When the business changes",
+          "When the product is updated"
+        ]
+      },
+      "label": "bad",
+      "violation": "alignment criteria stated as intent, not observable behaviour; coverage too generic; rot conditions generic",
+      "label_reason": "Alignment criteria are intent-level — 'helpful and accurate', 'clearly guides', 'appropriately escalates' — no two people will evaluate these the same way against a real chatbot response. Coverage scenarios are too generic to generate concrete examples. Rot triggers ('when the business changes') provide no actionable signal for when to update the dataset. This charter cannot drive a consistent eval."
+    }
+  },
+  {
+    "id": "ns_002",
+    "scenario": "detailed input, product-savvy user, decision-support AI, multiple feature areas",
+    "coverage": ["detailed input", "product-savvy user", "decision-support feature", "multiple feature areas", "production data exists"],
+    "input": {
+      "business_goals": "We're building an AI underwriting assistant for small business loans. We want to reduce the time an underwriter spends on a file from 4 hours to under 1 hour, while maintaining our current approval accuracy. We need to surface risk signals the underwriter might miss and make sure every decision is explainable for compliance.",
+      "user_stories": "As an underwriter, I want to see a risk summary for each application so I can focus my review on the areas that matter. As an underwriter, I want to know which data points are driving the risk score so I can validate or override them. As a compliance officer, I want every AI recommendation to be traceable to a specific data point in the file so I can audit it."
+    },
+    "good_output": {
+      "coverage": {
+        "criteria": [
+          "Application with strong financials and clean credit history — clear low-risk case",
+          "Application with strong revenue but high existing debt — mixed signals case",
+          "Application with limited trading history (under 2 years) — thin file case",
+          "Application where AI flags a risk signal the underwriter would likely miss on manual review",
+          "Application where the AI risk score conflicts with the underwriter's initial read",
+          "Application that requires a compliance audit trail — every data point cited must be present in the file"
+        ]
+      },
+      "balance": {
+        "criteria": [
+          "Mixed-signal applications should be over-represented — these are the cases where AI adds the most value and where errors are most costly",
+          "Thin file cases need dedicated coverage — limited trading history is common in small business lending and the AI must handle it without defaulting to rejection",
+          "Compliance audit scenarios must be represented in every feature area — traceability is a hard requirement, not an edge case"
+        ]
+      },
+      "alignment": [
+        {
+          "feature_area": "risk summary",
+          "good": "The summary identifies 2–4 specific risk signals with the data point that supports each — 'Debt service coverage ratio of 0.8 is below the 1.2 threshold; based on reported annual revenue of £240k and total debt obligations of £300k'",
+          "bad": "The summary gives a risk rating without citing the specific data points — 'High risk due to weak financials' — or cites data that is not present in the application file"
+        },
+        {
+          "feature_area": "score drivers",
+          "good": "Each score driver names the specific field, the value, and why it matters — 'Personal credit score: 580 (below 620 threshold) — this is weighted at 30% of the risk score'",
+          "bad": "Score drivers are described in general terms — 'creditworthiness' or 'financial stability' — without identifying the specific field or value that triggered them"
+        },
+        {
+          "feature_area": "compliance trail",
+          "good": "Every cited data point includes a reference to where it appears in the file — document name, field name, or page number — so an auditor can verify it without re-reading the full application",
+          "bad": "Citations are present but incomplete — 'based on financial statements' without specifying which statement, which year, or which line item"
+        }
+      ],
+      "rot": {
+        "criteria": [
+          "When the risk scoring model changes and the score driver weights or thresholds change",
+          "When lending policy changes and the approval criteria change — examples built on old thresholds will produce wrong labels",
+          "When new document types are added to the application file and the compliance trail needs to reference them",
+          "When regulatory requirements change and the auditability standard changes"
+        ]
+      },
+      "label": "good",
+      "label_reason": "Alignment criteria are specific and traceable — a compliance officer can read a real AI output and make a clear yes/no call on whether each criterion is met. Coverage scenarios map directly to the user stories provided. Rot triggers are tied to specific business and regulatory events. The charter reflects the detailed input accurately without losing specificity."
+    },
+    "bad_output": {
+      "coverage": {
+        "criteria": [
+          "Low risk applications",
+          "High risk applications",
+          "Applications requiring compliance review"
+        ]
+      },
+      "balance": {
+        "criteria": [
+          "Include a range of risk profiles",
+          "Cover compliance scenarios"
+        ]
+      },
+      "alignment": [
+        {
+          "feature_area": "risk summary",
+          "good": "The summary uses machine learning outputs to provide an accurate probabilistic risk assessment with high precision and recall metrics",
+          "bad": "The model underperforms on out-of-distribution inputs and produces hallucinated citations"
+        },
+        {
+          "feature_area": "score drivers",
+          "good": "The SHAP values are surfaced correctly and the feature importance ranking is consistent with the model's learned weights",
+          "bad": "The feature attribution is incorrect or the saliency map is misleading"
+        },
+        {
+          "feature_area": "compliance trail",
+          "good": "The system maintains a full audit log with traceable provenance for each inference",
+          "bad": "The audit log is incomplete or the provenance chain is broken"
+        }
+      ],
+      "rot": {
+        "criteria": [
+          "When the model is retrained",
+          "When the system architecture changes"
+        ]
+      },
+      "label": "bad",
+      "violation": "technical language throughout alignment criteria — not evaluable by a non-technical user",
+      "label_reason": "Alignment criteria are written in technical ML language — 'SHAP values', 'feature importance', 'saliency map', 'provenance chain', 'out-of-distribution inputs'. A compliance officer or underwriter cannot evaluate an AI output against these criteria. The rot triggers reference internal engineering events rather than business events visible to product and compliance stakeholders. This charter cannot be owned by a non-technical person."
+    }
+  },
+  {
+    "id": "ns_003",
+    "scenario": "conflicting input — business goals push automation, user stories push human control",
+    "coverage": ["detailed input", "conflicting input", "non-technical user", "customer-facing feature"],
+    "input": {
+      "business_goals": "We want to automate as much of our customer support as possible to reduce headcount costs. Target: resolve 80% of tickets without human involvement.",
+      "user_stories": "As a customer, I want to always be able to reach a human when I'm frustrated. As a support manager, I want to be notified when the AI is handling a sensitive complaint so I can intervene if needed."
+    },
+    "good_output": {
+      "coverage": {
+        "criteria": [
+          "Routine query that can be fully resolved without human involvement — the automation target case",
+          "Query that starts routine but escalates mid-conversation because the customer expresses frustration",
+          "Sensitive complaint (billing dispute, product safety, accessibility need) that triggers manager notification",
+          "Customer explicitly requests a human — must be honoured regardless of whether the AI could resolve the issue",
+          "Query where the AI resolves the issue but the customer remains unsatisfied"
+        ]
+      },
+      "balance": {
+        "criteria": [
+          "Escalation and frustration cases must be over-represented — the tension between the automation target and the human control requirement plays out here, and this is where the product will be tested hardest",
+          "The conflict between goals needs explicit representation: cases where honouring the user story (always reach a human) would count against the business goal (80% automation) — the charter cannot paper over this tradeoff"
+        ]
+      },
+      "alignment": [
+        {
+          "feature_area": "automated resolution",
+          "good": "The AI resolves the issue completely in the conversation — the customer receives a specific answer or confirmation, not a promise to follow up — and the conversation ends without requiring human involvement",
+          "bad": "The AI gives a partial answer and promises a follow-up, or resolves the issue but leaves the customer uncertain about whether it was actually resolved"
+        },
+        {
+          "feature_area": "escalation trigger",
+          "good": "When the customer expresses frustration (explicit or implicit — repeated questions, 'this is ridiculous', 'I've already told you'), the AI offers a human handoff within the same message, not in a follow-up",
+          "bad": "The AI continues attempting to resolve the issue after frustration is expressed, or offers a human handoff only after a second or third expression of frustration"
+        },
+        {
+          "feature_area": "manager notification",
+          "good": "The notification is sent before the AI responds to a sensitive complaint — not after — and includes the complaint category, the customer's message verbatim, and the AI's intended response so the manager can intervene",
+          "bad": "The notification is sent after the AI has already responded, or does not include enough context for the manager to make an intervention decision"
+        }
+      ],
+      "rot": {
+        "criteria": [
+          "When the definition of 'sensitive complaint' changes — new categories added or removed",
+          "When the automation target changes — the balance between automated resolution and escalation scenarios in the dataset should reflect the current target",
+          "When escalation routing changes and the human handoff process is different"
+        ]
+      },
+      "label": "good",
+      "label_reason": "The charter surfaces the conflict between business goals and user stories explicitly in the Balance section rather than resolving it artificially. The alignment criteria for escalation trigger are specific enough to evaluate — 'within the same message, not a follow-up' is a clear yes/no call. The charter captures a genuine product design tension and makes it testable."
+    },
+    "bad_output": {
+      "coverage": {
+        "criteria": [
+          "Queries that can be resolved automatically",
+          "Queries that require human escalation",
+          "Sensitive complaints"
+        ]
+      },
+      "balance": {
+        "criteria": [
+          "Balance automated and escalated cases",
+          "Include sensitive scenarios"
+        ]
+      },
+      "alignment": [
+        {
+          "feature_area": "automated resolution",
+          "good": "The AI resolves the customer's issue efficiently and effectively",
+          "bad": "The AI fails to resolve the issue or provides incorrect information"
+        },
+        {
+          "feature_area": "escalation",
+          "good": "The AI escalates appropriately when needed",
+          "bad": "The AI fails to escalate or escalates unnecessarily"
+        },
+        {
+          "feature_area": "manager notification",
+          "good": "Managers are notified of sensitive cases in a timely manner",
+          "bad": "Managers are not notified or are notified too late"
+        }
+      ],
+      "rot": {
+        "criteria": [
+          "When business requirements change",
+          "When the support process changes"
+        ]
+      },
+      "label": "bad",
+      "violation": "papers over the conflict in the input; alignment criteria are intent-level; rot is generic",
+      "label_reason": "The charter papers over the conflict between the automation target and the human control requirement — there is no acknowledgement of the tension in the Balance section. Alignment criteria are intent-level throughout — 'efficiently and effectively', 'appropriately', 'timely manner' — no two support managers will evaluate these the same way. The conflict in the input is the most important signal in this session and the charter ignores it."
+    }
+  },
+  {
+    "id": "ns_004",
+    "scenario": "partial input, internal tooling, single feature area, user who has never heard of evals",
+    "coverage": ["partial input", "non-technical user", "internal tooling", "single feature area", "no existing data", "user unfamiliar with evals"],
+    "input": {
+      "business_goals": "We want to save time in meetings by using AI to write summaries.",
+      "user_stories": "I don't really know what user stories are, but basically people need to be able to trust the summary enough to share it with people who weren't in the meeting."
+    },
+    "good_output": {
+      "coverage": {
+        "criteria": [
+          "Meeting with one clear decision and clear next steps — the easy case",
+          "Meeting with discussion but no clear decision reached — the ambiguous case",
+          "Meeting where the same point is discussed multiple times and needs to be deduplicated in the summary",
+          "Meeting with strong disagreement between participants — the summary must reflect the disagreement, not resolve it",
+          "Meeting where a participant says something informally that contradicts the official decision"
+        ]
+      },
+      "balance": {
+        "criteria": [
+          "Ambiguous and no-decision meetings should be over-represented — these are where summaries are most likely to mislead, and where a recipient who wasn't in the meeting is most at risk of acting on incorrect information",
+          "Disagreement cases need dedicated coverage — the risk of the AI smoothing over a genuine disagreement and presenting a false consensus is high and consequential"
+        ]
+      },
+      "alignment": [
+        {
+          "feature_area": "meeting summary",
+          "good": "The summary includes only what was said in the meeting — no inferences, no implied decisions, no smoothed-over disagreements. If no decision was reached, the summary says so explicitly. Every action item names the person responsible and a timeframe if one was stated.",
+          "bad": "The summary implies a decision was made when the meeting ended without one, attributes a statement to the wrong person, omits a stated action item, or presents a disagreement as a resolved consensus."
+        }
+      ],
+      "rot": {
+        "criteria": [
+          "When the expected output format changes — if teams start expecting summaries in a different structure (e.g. bullet points vs prose, or a new section added like 'risks raised')",
+          "When the meeting types change significantly — if the tool starts being used for a new kind of meeting (e.g. 1:1s vs all-hands) the coverage scenarios need updating"
+        ]
+      },
+      "label": "good",
+      "label_reason": "Produced a specific, usable charter from partial and informal input. The user's own words — 'trust the summary enough to share it with people who weren't in the meeting' — were translated into a precise alignment criterion: no inferences, no implied decisions, no smoothed disagreements. The coverage captures the hardest cases for this specific use. The charter was built without requiring the user to understand what an eval or criterion is."
+    },
+    "bad_output": {
+      "coverage": {
+        "criteria": [
+          "Different types of meetings",
+          "Meetings with various outcomes",
+          "Edge cases in meeting content"
+        ]
+      },
+      "balance": {
+        "criteria": [
+          "Cover a range of meeting types and complexity levels"
+        ]
+      },
+      "alignment": [
+        {
+          "feature_area": "meeting summary",
+          "good": "The summary is accurate, concise, and useful",
+          "bad": "The summary is inaccurate, too long, or missing important information"
+        }
+      ],
+      "rot": {
+        "criteria": [
+          "When the product changes"
+        ]
+      },
+      "label": "bad",
+      "violation": "failed to translate user's own language into observable criteria; all dimensions are generic; single alignment criterion is intent-level; rot is absent in any useful form",
+      "label_reason": "The user said people need to 'trust the summary enough to share it' — this is a precise and actionable constraint (no inferences, no false consensus, no missing decisions) that the bad charter ignores entirely. 'Accurate, concise, and useful' cannot be evaluated consistently. Coverage scenarios are generic placeholders. This charter could have been written without reading the input at all."
+    }
+  },
+  {
+    "id": "ns_005",
+    "scenario": "sparse input, product-savvy user, multiple feature areas, existing evals to improve",
+    "coverage": ["sparse input", "product-savvy user", "multiple feature areas", "existing evals", "decision-support feature"],
+    "input": {
+      "business_goals": "We have a content moderation AI and our evals are not catching the right things. We want to improve our eval setup.",
+      "user_stories": "As a trust and safety analyst, I want to know why a piece of content was flagged so I can decide whether to take action. As a policy team member, I want to know when the AI is uncertain so I can review edge cases myself."
+    },
+    "good_output": {
+      "coverage": {
+        "criteria": [
+          "Content that clearly violates policy — the easy case, should be flagged with high confidence",
+          "Content that is borderline — could be read as violating or not depending on context",
+          "Content that uses coded language or indirect references to violate policy",
+          "Content that appears to violate policy but has a legitimate context (satire, news reporting, education)",
+          "Content where the AI is uncertain — confidence is low and the policy team should review",
+          "Content in a language or dialect the model has less training data for"
+        ]
+      },
+      "balance": {
+        "criteria": [
+          "Borderline and context-dependent cases must be heavily over-represented — these are exactly what the existing evals are missing, and where human judgment is most needed",
+          "Uncertainty cases need dedicated coverage — the user story about knowing when the AI is uncertain is a hard requirement that the existing evals apparently don't test for",
+          "Coded language cases need dedicated coverage — these are the cases most likely to evade a naive eval"
+        ]
+      },
+      "alignment": [
+        {
+          "feature_area": "flag reasoning",
+          "good": "The reasoning names the specific policy that was potentially violated and quotes the specific part of the content that triggered the flag — 'this post may violate our harassment policy: the phrase [x] targets a named individual with a threat'",
+          "bad": "The reasoning names the policy category without quoting the specific content — 'flagged for potential harassment' — or cites a policy that does not apply to the content"
+        },
+        {
+          "feature_area": "uncertainty signal",
+          "good": "When confidence is below the threshold, the output explicitly says so and states what additional context would help a human reviewer make the call — 'uncertain: this could be satire or genuine incitement — the account history and linked content would help clarify'",
+          "bad": "The output makes a determination at low confidence without flagging the uncertainty, or flags uncertainty without giving the reviewer any guidance on what to look for"
+        }
+      ],
+      "rot": {
+        "criteria": [
+          "When the content policy changes — new categories added, existing categories redefined, or context rules updated",
+          "When the confidence threshold changes and what counts as 'uncertain' is redefined",
+          "When new content formats are introduced to the platform (e.g. short video, audio) and the moderation context changes",
+          "When coded language patterns evolve and the examples in the dataset no longer reflect current usage"
+        ]
+      },
+      "label": "good",
+      "label_reason": "The charter correctly identifies what the existing evals are missing — borderline cases, uncertainty signals, coded language — and makes these the focus of the coverage and balance. Alignment criteria are specific enough that a trust and safety analyst can evaluate a real AI output against them. The rot section correctly identifies coded language evolution as a fast-moving rot trigger, which is non-obvious and specific to this use case."
+    },
+    "bad_output": {
+      "coverage": {
+        "criteria": [
+          "Content that violates policy",
+          "Content that does not violate policy",
+          "Borderline content"
+        ]
+      },
+      "balance": {
+        "criteria": [
+          "Balance positive and negative examples",
+          "Include some edge cases"
+        ]
+      },
+      "alignment": [
+        {
+          "feature_area": "flag reasoning",
+          "good": "The model provides clear and accurate reasoning for its moderation decision",
+          "bad": "The model provides unclear or incorrect reasoning"
+        },
+        {
+          "feature_area": "uncertainty signal",
+          "good": "The model correctly identifies when it is uncertain and flags these cases for human review",
+          "bad": "The model fails to flag uncertain cases or flags too many cases unnecessarily"
+        }
+      ],
+      "rot": {
+        "criteria": [
+          "When the moderation policy changes",
+          "When new types of content appear"
+        ]
+      },
+      "label": "bad",
+      "violation": "coverage mirrors existing naive eval setup rather than improving on it; alignment criteria are intent-level; does not address what the user said was wrong with current evals",
+      "label_reason": "The user explicitly said the existing evals are not catching the right things. The bad charter reproduces the same structure as a naive eval setup — positive/negative/borderline — without addressing why the existing evals are failing. The alignment criteria ('clear and accurate', 'correctly identifies') are intent-level and produce the same inconsistent labelling the user is already experiencing. The charter fails its primary job: improving on what exists."
+    }
+  },
+  {
+    "id": "ns_006",
+    "scenario": "sparse input, user who has never heard of evals or charters, customer-facing AI",
+    "coverage": ["sparse input", "non-technical user", "user unfamiliar with evals", "customer-facing feature", "no existing data"],
+    "input": {
+      "business_goals": "We have an AI that helps people find the right insurance plan. Sometimes it gives bad advice and we get complaints.",
+      "user_stories": "I don't know what user stories are. People just need to get the right plan."
+    },
+    "good_output": {
+      "coverage": {
+        "criteria": [
+          "User with a simple, common situation — young and healthy, looking for basic coverage",
+          "User with a pre-existing condition that affects plan eligibility",
+          "User who underestimates their needs and the AI must surface what they haven't considered",
+          "User who provides conflicting information (e.g. says they don't need dental but mentions regular dental work)",
+          "User who asks which plan is 'best' without enough information for the AI to make a recommendation",
+          "User who is comparing two specific plans and needs help understanding the difference"
+        ]
+      },
+      "balance": {
+        "criteria": [
+          "Cases where the user underestimates their needs should be over-represented — these are the 'bad advice' cases the complaints are coming from, and they require the AI to push back rather than just confirm what the user said",
+          "Conflicting information cases need dedicated coverage — users frequently give inconsistent answers and the AI must surface the conflict rather than pick one answer arbitrarily"
+        ]
+      },
+      "alignment": [
+        {
+          "feature_area": "plan recommendation",
+          "good": "The recommendation names the specific plan and explains why it fits this user's stated situation in terms the user used — 'Based on the three prescriptions you mentioned, Plan B covers your medications while Plan A does not.' If the AI cannot make a recommendation with the information provided, it says so and asks for what it needs.",
+          "bad": "The recommendation names a plan without explaining why it fits this user's situation, uses insurance jargon the user didn't use, or makes a recommendation when there is not enough information to do so responsibly."
+        },
+        {
+          "feature_area": "needs surfacing",
+          "good": "When the user's stated needs appear incomplete, the AI asks one specific question that addresses the most likely gap — 'You mentioned regular dental work — does your current plan cover that?' — before making a recommendation.",
+          "bad": "The AI asks multiple questions at once, asks about needs the user has already addressed, or makes a recommendation without surfacing an obvious gap in the user's stated needs."
+        }
+      ],
+      "rot": {
+        "criteria": [
+          "When the plan catalogue changes — new plans added, existing plans changed, plans discontinued",
+          "When eligibility rules change for pre-existing conditions",
+          "When the regulatory environment changes and what the AI is permitted to recommend changes"
+        ]
+      },
+      "label": "good",
+      "label_reason": "The charter was built from a two-sentence input from a user who did not know what user stories or evals are. The alignment criteria were derived by translating 'bad advice and complaints' into specific failure modes — recommending without enough information, using jargon, missing obvious needs gaps. The charter is evaluable by a non-technical person. The rot section correctly identifies plan catalogue changes as the most frequent and consequential rot trigger for this use case."
+    },
+    "bad_output": {
+      "coverage": {
+        "criteria": [
+          "Users looking for different types of insurance plans",
+          "Users with various health situations",
+          "Users who need more information before a recommendation can be made"
+        ]
+      },
+      "balance": {
+        "criteria": [
+          "Cover a range of user profiles and needs"
+        ]
+      },
+      "alignment": [
+        {
+          "feature_area": "plan recommendation",
+          "good": "The AI provides an accurate and appropriate insurance recommendation that meets the user's needs",
+          "bad": "The AI provides an inaccurate or inappropriate recommendation"
+        },
+        {
+          "feature_area": "needs surfacing",
+          "good": "The AI proactively surfaces relevant considerations the user may not have thought of",
+          "bad": "The AI fails to surface important considerations"
+        }
+      ],
+      "rot": {
+        "criteria": [
+          "When insurance plans change",
+          "When regulations change"
+        ]
+      },
+      "label": "bad",
+      "violation": "alignment criteria are intent-level and circular; coverage too generic; failed to derive specific failure modes from the input",
+      "label_reason": "The user said the AI 'gives bad advice and we get complaints'. This is a precise signal — something specific is going wrong. The bad charter doesn't attempt to identify what that is. 'Accurate and appropriate recommendation' is circular — it defines good output as 'correct output' without saying what correct means. The same eval that failed before would fail again with this charter. Coverage scenarios are interchangeable with any recommendation AI, not specific to insurance."
+    }
+  }
+]

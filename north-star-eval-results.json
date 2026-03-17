@@ -1,0 +1,490 @@
+{
+  "accuracy": 100,
+  "correct": 12,
+  "total": 12,
+  "misclassified": 0,
+  "dimension_false_positives": {
+    "coverage": 0,
+    "balance": 0,
+    "alignment": 0,
+    "rot": 0
+  },
+  "results": [
+    {
+      "id": "ns_001",
+      "scenario": "sparse input, non-technical user, customer-facing AI (e-commerce chatbot)",
+      "coverage_tags": [
+        "sparse input",
+        "non-technical user",
+        "customer-facing feature",
+        "single feature area",
+        "no existing data"
+      ],
+      "good_output": {
+        "expected": "good",
+        "got": "good",
+        "correct": true,
+        "verdict": {
+          "overall": "good",
+          "dimensions": {
+            "coverage": {
+              "status": "pass",
+              "reason": "Each scenario is specific enough to generate concrete examples \u2014 order exists with clear status, delayed order, eligible return, ineligible return with specific reasons given, and escalation scenarios are all distinguishable situations."
+            },
+            "balance": {
+              "status": "pass",
+              "reason": "Over-representation decisions name specific scenario types (escalation/failure scenarios, ineligible return requests) with product-specific reasoning about where customer frustration occurs and current chatbot failures."
+            },
+            "alignment": {
+              "status": "pass",
+              "reason": "Good and bad are described as observable behaviours in the output text itself \u2014 specific phrasing examples, what information should or should not appear, and concrete anti-patterns a non-technical reviewer could identify.",
+              "failing_areas": []
+            },
+            "rot": {
+              "status": "pass",
+              "reason": "Update triggers are tied to specific business events a product manager would know about \u2014 return policy changes, order tracking system changes, and contact channel changes."
+            }
+          },
+          "violations": [],
+          "confidence": "high"
+        }
+      },
+      "bad_output": {
+        "expected": "bad",
+        "got": "bad",
+        "correct": true,
+        "verdict": {
+          "overall": "bad",
+          "dimensions": {
+            "coverage": {
+              "status": "fail",
+              "reason": "Scenarios are generic categories ('various order tracking scenarios', 'different types of return requests') without specifying distinct situations that would allow generating concrete examples."
+            },
+            "balance": {
+              "status": "fail",
+              "reason": "Guidance is entirely generic ('mix of easy and difficult', 'cover edge cases') without naming specific scenario types or explaining why they matter for this product."
+            },
+            "alignment": {
+              "status": "fail",
+              "reason": "All feature areas define good/bad using intent words ('helpful', 'accurate', 'appropriate', 'clearly') without describing observable behaviors that would allow consistent evaluation.",
+              "failing_areas": [
+                "order tracking",
+                "return initiation",
+                "escalation"
+              ]
+            },
+            "rot": {
+              "status": "fail",
+              "reason": "Triggers are completely generic ('when the business changes', 'when the product is updated') with no reference to specific events a product manager could act on."
+            }
+          },
+          "violations": [
+            "Coverage lists 'various order tracking scenarios' instead of specific situations like 'order delayed with no updated ETA' or 'order marked delivered but customer claims not received'",
+            "Coverage uses 'different types of return requests' instead of specifying scenarios like 'return outside window' or 'return for damaged item'",
+            "Balance says 'mix of easy and difficult' without defining what makes a scenario easy or difficult for this chatbot",
+            "Balance mentions 'edge cases' without identifying what the edge cases actually are",
+            "Order tracking alignment uses 'helpful and accurate' without defining what accurate looks like in observable terms",
+            "Return initiation alignment uses 'clearly guides' without specifying what steps or information must appear in the response",
+            "Escalation alignment uses 'appropriately escalates' without defining the observable criteria for when escalation is appropriate",
+            "Rot trigger 'when the business changes' is too vague to act on \u2014 should specify events like 'when return policy windows change' or 'when new order statuses are added'"
+          ],
+          "confidence": "high"
+        }
+      }
+    },
+    {
+      "id": "ns_002",
+      "scenario": "detailed input, product-savvy user, decision-support AI, multiple feature areas",
+      "coverage_tags": [
+        "detailed input",
+        "product-savvy user",
+        "decision-support feature",
+        "multiple feature areas",
+        "production data exists"
+      ],
+      "good_output": {
+        "expected": "good",
+        "got": "good",
+        "correct": true,
+        "verdict": {
+          "overall": "good",
+          "dimensions": {
+            "coverage": {
+              "status": "pass",
+              "reason": "Each scenario is specific enough to generate concrete examples \u2014 strong financials vs mixed signals vs thin files, plus explicit conflict cases and compliance audit requirements."
+            },
+            "balance": {
+              "status": "pass",
+              "reason": "Over-representation decisions name specific scenario types (mixed-signal, thin file, compliance) with product-specific reasons \u2014 AI value-add, error cost, and hard regulatory requirements."
+            },
+            "alignment": {
+              "status": "pass",
+              "reason": "Good and bad are defined as observable behaviours with specific examples \u2014 citing exact data points, field names, values, thresholds, and document references that a non-technical reviewer can verify.",
+              "failing_areas": []
+            },
+            "rot": {
+              "status": "pass",
+              "reason": "Triggers are tied to specific business events a product manager would know about \u2014 model changes, policy threshold changes, new document types, and regulatory updates."
+            }
+          },
+          "violations": [],
+          "confidence": "high"
+        }
+      },
+      "bad_output": {
+        "expected": "bad",
+        "got": "bad",
+        "correct": true,
+        "verdict": {
+          "overall": "bad",
+          "dimensions": {
+            "coverage": {
+              "status": "fail",
+              "reason": "Scenarios are generic categories ('low risk applications', 'high risk applications') without specifying what makes each distinct or what concrete situations they represent."
+            },
+            "balance": {
+              "status": "fail",
+              "reason": "Balance guidance is generic ('include a range of risk profiles', 'cover compliance scenarios') without naming specific scenario types or explaining why they matter for this particular product."
+            },
+            "alignment": {
+              "status": "fail",
+              "reason": "All three feature areas use technical ML language that a product manager could not evaluate and describe internal system behavior rather than observable output characteristics.",
+              "failing_areas": [
+                "risk summary",
+                "score drivers",
+                "compliance trail"
+              ]
+            },
+            "rot": {
+              "status": "fail",
+              "reason": "Triggers are generic technical events ('model is retrained', 'system architecture changes') rather than business or product events a product manager would know about."
+            }
+          },
+          "violations": [
+            "Coverage scenarios are abstract categories rather than specific situations a person could generate concrete examples for",
+            "Balance section provides no rationale for why certain scenarios should be over-represented or what makes them important for this product",
+            "Risk summary alignment uses ML terminology ('probabilistic risk assessment', 'precision and recall', 'out-of-distribution', 'hallucinated') that is not evaluable by a non-technical person",
+            "Score drivers alignment references technical concepts ('SHAP values', 'feature importance ranking', 'learned weights', 'saliency map') that require ML expertise to assess",
+            "Compliance trail alignment describes system internals ('audit log', 'provenance chain') rather than what a user would observe in the output",
+            "Rot triggers reference technical system events rather than business events a product manager would be aware of"
+          ],
+          "confidence": "high"
+        }
+      }
+    },
+    {
+      "id": "ns_003",
+      "scenario": "conflicting input \u2014 business goals push automation, user stories push human control",
+      "coverage_tags": [
+        "detailed input",
+        "conflicting input",
+        "non-technical user",
+        "customer-facing feature"
+      ],
+      "good_output": {
+        "expected": "good",
+        "got": "good",
+        "correct": true,
+        "verdict": {
+          "overall": "good",
+          "dimensions": {
+            "coverage": {
+              "status": "pass",
+              "reason": "Each scenario is specific and pictureable \u2014 routine resolution, mid-conversation escalation, sensitive complaints, explicit human requests, and resolved-but-unsatisfied cases are all distinct situations I could generate concrete examples for."
+            },
+            "balance": {
+              "status": "pass",
+              "reason": "Over-representation is tied to the specific product tension between automation targets and human control requirements, with explicit acknowledgment that goal conflicts need representation in the dataset."
+            },
+            "alignment": {
+              "status": "pass",
+              "reason": "Each feature area describes observable behaviors \u2014 'resolves completely in the conversation', 'offers human handoff within the same message', 'notification sent before the AI responds' \u2014 that a non-technical person could verify by reading the output.",
+              "failing_areas": []
+            },
+            "rot": {
+              "status": "pass",
+              "reason": "Update triggers are tied to specific business events a product manager would know about \u2014 changes to sensitive complaint definitions, automation targets, and escalation routing processes."
+            }
+          },
+          "violations": [],
+          "confidence": "high"
+        }
+      },
+      "bad_output": {
+        "expected": "bad",
+        "got": "bad",
+        "correct": true,
+        "verdict": {
+          "overall": "bad",
+          "dimensions": {
+            "coverage": {
+              "status": "fail",
+              "reason": "Scenarios are generic categories ('queries that can be resolved automatically', 'sensitive complaints') without specifying what makes each distinct or what concrete situations they represent."
+            },
+            "balance": {
+              "status": "fail",
+              "reason": "Balance guidance is generic ('balance automated and escalated cases', 'include sensitive scenarios') without naming specific scenario types or explaining why they matter for this product."
+            },
+            "alignment": {
+              "status": "fail",
+              "reason": "Good and bad are described as intent using vague terms ('efficiently', 'effectively', 'appropriately', 'timely') rather than observable behaviours a non-technical person could evaluate.",
+              "failing_areas": [
+                "automated resolution",
+                "escalation",
+                "manager notification"
+              ]
+            },
+            "rot": {
+              "status": "fail",
+              "reason": "Triggers are generic ('when business requirements change', 'when the support process changes') without specifying concrete events a product manager would know about."
+            }
+          },
+          "violations": [
+            "Coverage scenarios are abstract categories that could apply to any support system, not specific situations you could generate concrete examples for",
+            "Balance section says to 'balance' and 'include' without explaining which cases to over-represent or why they matter for failure detection",
+            "Automated resolution alignment uses 'efficiently and effectively' which are not observable \u2014 what does efficient look like in the output?",
+            "Escalation alignment uses 'appropriately' without defining what appropriate escalation looks like in observable terms",
+            "Manager notification uses 'timely manner' without specifying what timely means or how to observe it in output",
+            "Rot triggers are too vague to act on \u2014 which specific business requirements or process changes should trigger review?"
+          ],
+          "confidence": "high"
+        }
+      }
+    },
+    {
+      "id": "ns_004",
+      "scenario": "partial input, internal tooling, single feature area, user who has never heard of evals",
+      "coverage_tags": [
+        "partial input",
+        "non-technical user",
+        "internal tooling",
+        "single feature area",
+        "no existing data",
+        "user unfamiliar with evals"
+      ],
+      "good_output": {
+        "expected": "good",
+        "got": "good",
+        "correct": true,
+        "verdict": {
+          "overall": "good",
+          "dimensions": {
+            "coverage": {
+              "status": "pass",
+              "reason": "Each scenario describes a specific, distinguishable meeting situation where you can picture the exact input and the challenge it presents for summarization."
+            },
+            "balance": {
+              "status": "pass",
+              "reason": "Over-representation decisions name specific scenario types (ambiguous/no-decision meetings, disagreement cases) with clear reasoning tied to the product's failure modes \u2014 misleading recipients and false consensus."
+            },
+            "alignment": {
+              "status": "pass",
+              "reason": "Good and bad are defined as observable behaviors in the output text \u2014 presence/absence of explicit 'no decision' statements, correct attribution, inclusion of named owners and timeframes \u2014 that anyone could verify by reading the summary.",
+              "failing_areas": []
+            },
+            "rot": {
+              "status": "pass",
+              "reason": "Update triggers are tied to specific, knowable product events \u2014 output format changes and expansion to new meeting types \u2014 that a product manager would be aware of."
+            }
+          },
+          "violations": [],
+          "confidence": "high"
+        }
+      },
+      "bad_output": {
+        "expected": "bad",
+        "got": "bad",
+        "correct": true,
+        "verdict": {
+          "overall": "bad",
+          "dimensions": {
+            "coverage": {
+              "status": "fail",
+              "reason": "Scenarios are generic categories ('different types of meetings', 'edge cases') without specifying what makes each distinct \u2014 cannot generate concrete examples without making assumptions."
+            },
+            "balance": {
+              "status": "fail",
+              "reason": "Guidance is entirely generic ('range of meeting types and complexity levels') with no specific scenarios named or reasons tied to this particular product."
+            },
+            "alignment": {
+              "status": "fail",
+              "reason": "Good and bad are described using intent-based terms ('accurate', 'concise', 'useful') without observable behaviors that would let someone make a consistent yes/no call on actual output.",
+              "failing_areas": [
+                "meeting summary"
+              ]
+            },
+            "rot": {
+              "status": "fail",
+              "reason": "Trigger is entirely generic ('when the product changes') with no specific business or product events that would signal when to update examples."
+            }
+          },
+          "violations": [
+            "Coverage lists 'different types of meetings' without naming specific meeting scenarios (e.g., 'one-on-one performance review', 'project kickoff with 10+ attendees')",
+            "Coverage mentions 'edge cases' without specifying what those edge cases actually are",
+            "Balance provides no specific scenario types to over-represent and no product-specific reasoning for any weighting decisions",
+            "Alignment for 'meeting summary' uses circular definitions \u2014 'accurate' and 'useful' are not observable behaviors",
+            "Alignment does not describe what to look for in output (e.g., 'lists action items with assigned owners' vs. 'is useful')",
+            "Rot trigger 'when the product changes' could mean anything and gives no actionable guidance for when to review dataset"
+          ],
+          "confidence": "high"
+        }
+      }
+    },
+    {
+      "id": "ns_005",
+      "scenario": "sparse input, product-savvy user, multiple feature areas, existing evals to improve",
+      "coverage_tags": [
+        "sparse input",
+        "product-savvy user",
+        "multiple feature areas",
+        "existing evals",
+        "decision-support feature"
+      ],
+      "good_output": {
+        "expected": "good",
+        "got": "good",
+        "correct": true,
+        "verdict": {
+          "overall": "good",
+          "dimensions": {
+            "coverage": {
+              "status": "pass",
+              "reason": "Each scenario describes a specific, distinguishable situation \u2014 clear violations, borderline cases, coded language, legitimate context exceptions, uncertainty cases, and low-resource language content \u2014 all concrete enough to generate examples without guessing."
+            },
+            "balance": {
+              "status": "pass",
+              "reason": "Over-representation decisions name specific scenario types (borderline, uncertainty, coded language) with reasons tied to this product's needs \u2014 filling gaps in existing evals and addressing a hard requirement around uncertainty signaling."
+            },
+            "alignment": {
+              "status": "pass",
+              "reason": "Both feature areas define good and bad as observable behaviors \u2014 flag reasoning must quote specific content and name the policy, uncertainty signals must state what additional context would help \u2014 a reviewer could make consistent yes/no calls.",
+              "failing_areas": []
+            },
+            "rot": {
+              "status": "pass",
+              "reason": "Update triggers are tied to specific, knowable business events \u2014 policy changes, threshold redefinitions, new content formats, and evolving coded language patterns \u2014 all things a product manager would be aware of."
+            }
+          },
+          "violations": [],
+          "confidence": "high"
+        }
+      },
+      "bad_output": {
+        "expected": "bad",
+        "got": "bad",
+        "correct": true,
+        "verdict": {
+          "overall": "bad",
+          "dimensions": {
+            "coverage": {
+              "status": "fail",
+              "reason": "Scenarios are generic categories ('content that violates policy', 'borderline content') without specifying what types of violations, what makes content borderline, or what the actual policy covers."
+            },
+            "balance": {
+              "status": "fail",
+              "reason": "Guidance is entirely generic ('balance positive and negative examples', 'include some edge cases') without naming specific scenario types or explaining why they matter for this moderation system."
+            },
+            "alignment": {
+              "status": "fail",
+              "reason": "Both feature areas use intent-based language ('clear', 'accurate', 'correct') without defining observable behaviors that would let someone consistently evaluate an actual output.",
+              "failing_areas": [
+                "flag reasoning",
+                "uncertainty signal"
+              ]
+            },
+            "rot": {
+              "status": "fail",
+              "reason": "Triggers are generic ('when the moderation policy changes', 'when new types of content appear') without specifying what policy elements or content types to monitor."
+            }
+          },
+          "violations": [
+            "Coverage lists abstract categories instead of specific, concrete scenarios \u2014 cannot picture what 'borderline content' or 'content that violates policy' actually looks like",
+            "Balance section provides no product-specific rationale for over-representation decisions",
+            "Flag reasoning alignment uses 'clear and accurate' without defining what clear or accurate reasoning looks like in the output",
+            "Uncertainty signal alignment uses 'correctly identifies' without defining what correct identification means observably",
+            "Rot triggers do not name specific policy areas or content categories that would signal a need for review"
+          ],
+          "confidence": "high"
+        }
+      }
+    },
+    {
+      "id": "ns_006",
+      "scenario": "sparse input, user who has never heard of evals or charters, customer-facing AI",
+      "coverage_tags": [
+        "sparse input",
+        "non-technical user",
+        "user unfamiliar with evals",
+        "customer-facing feature",
+        "no existing data"
+      ],
+      "good_output": {
+        "expected": "good",
+        "got": "good",
+        "correct": true,
+        "verdict": {
+          "overall": "good",
+          "dimensions": {
+            "coverage": {
+              "status": "pass",
+              "reason": "Each scenario describes a specific, concrete situation where you can picture the user and what makes the case distinct \u2014 from the healthy user seeking basic coverage to the user giving conflicting dental information."
+            },
+            "balance": {
+              "status": "pass",
+              "reason": "Over-representation decisions name specific scenario types (underestimated needs, conflicting information) and give product-specific reasons tied to the actual complaint pattern the team is addressing."
+            },
+            "alignment": {
+              "status": "pass",
+              "reason": "Both feature areas define good and bad as observable behaviors in the output \u2014 quoting user language, naming specific plans with explanations, asking one question at a time \u2014 that a non-technical person could consistently evaluate.",
+              "failing_areas": []
+            },
+            "rot": {
+              "status": "pass",
+              "reason": "Update triggers are tied to specific business events a product manager would know about \u2014 plan catalogue changes, eligibility rule changes, and regulatory changes affecting what can be recommended."
+            }
+          },
+          "violations": [],
+          "confidence": "high"
+        }
+      },
+      "bad_output": {
+        "expected": "bad",
+        "got": "bad",
+        "correct": true,
+        "verdict": {
+          "overall": "bad",
+          "dimensions": {
+            "coverage": {
+              "status": "fail",
+              "reason": "Scenarios are generic categories ('different types of insurance plans', 'various health situations') without specifying what makes each distinct \u2014 you cannot picture a concrete input/output example."
+            },
+            "balance": {
+              "status": "fail",
+              "reason": "Guidance is entirely generic ('cover a range of user profiles and needs') without naming specific scenario types or explaining why they matter for this insurance product."
+            },
+            "alignment": {
+              "status": "fail",
+              "reason": "Both feature areas define good/bad using intent words ('accurate', 'appropriate', 'relevant', 'important') without describing observable behaviors a non-technical person could consistently evaluate.",
+              "failing_areas": [
+                "plan recommendation",
+                "needs surfacing"
+              ]
+            },
+            "rot": {
+              "status": "fail",
+              "reason": "Triggers are too generic ('when insurance plans change', 'when regulations change') without specifying which plan attributes or which regulatory domains would require dataset review."
+            }
+          },
+          "violations": [
+            "Coverage lists category labels rather than specific scenarios \u2014 'various health situations' could mean anything from pregnancy to chronic illness to pre-existing conditions",
+            "Balance provides no specific guidance on which cases should be over-represented or why",
+            "Plan recommendation alignment uses 'accurate and appropriate' without defining what accuracy or appropriateness looks like in the output",
+            "Needs surfacing alignment uses 'relevant' and 'important' without specifying what considerations count or how to recognize them",
+            "Rot triggers do not specify which plan changes (premiums, coverage limits, network changes, deductibles) or which regulations (state, federal, specific compliance areas) matter"
+          ],
+          "confidence": "high"
+        }
+      }
+    }
+  ]
+}
