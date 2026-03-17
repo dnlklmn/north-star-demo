@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { ChevronRight, Circle, RefreshCw, Sparkles } from 'lucide-react'
-import type { Charter, Validation, DimensionStatus, AlignmentEntry, Suggestion } from '../types'
+import type { Charter, Validation, DimensionStatus, AlignmentEntry, Suggestion, TaskDefinition } from '../types'
 
 interface Props {
   charter: Charter
@@ -8,6 +8,7 @@ interface Props {
   activeCriteria: string[]
   onEditCriterion?: (dimension: string, index: number, value: string) => void
   onEditAlignment?: (index: number, field: 'good' | 'bad', value: string) => void
+  onEditTask?: (field: keyof TaskDefinition, value: string) => void
   suggestions?: Suggestion[]
   onAcceptSuggestion?: (suggestion: Suggestion) => void
   onDismissSuggestion?: (suggestion: Suggestion) => void
@@ -28,6 +29,7 @@ export default function CharterPanel({
   activeCriteria,
   onEditCriterion,
   onEditAlignment,
+  onEditTask,
   suggestions = [],
   onAcceptSuggestion,
   onDismissSuggestion,
@@ -99,6 +101,10 @@ export default function CharterPanel({
         </div>
       ) : (
         <div className="flex-1 overflow-y-auto p-4 bg-surface space-y-3">
+          <TaskSection
+            task={charter.task}
+            onEdit={onEditTask}
+          />
           <DimensionSection
             name="Coverage"
             description="Input scenarios to test"
@@ -160,6 +166,120 @@ function completionLabel(status: DimensionStatus | string, validationStatus: str
   if (s === 'fail') return 'needs work'
   // Fallback: show criteria count when validation hasn't run yet
   return `${criteriaCount} item${criteriaCount !== 1 ? 's' : ''}`
+}
+
+function TaskSection({
+  task,
+  onEdit,
+}: {
+  task: TaskDefinition
+  onEdit?: (field: keyof TaskDefinition, value: string) => void
+}) {
+  const [expanded, setExpanded] = useState(true)
+  const hasContent = task.input_description || task.output_description
+
+  return (
+    <div className="border border-border rounded-lg bg-surface-raised">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center justify-between p-3 hover:bg-muted/50 transition-colors rounded-t-lg"
+      >
+        <div className="flex items-center gap-2">
+          <ChevronRight
+            className={`w-3.5 h-3.5 text-muted-foreground transition-transform ${expanded ? 'rotate-90' : ''}`}
+          />
+          <div>
+            <h3 className="text-sm font-medium text-foreground text-left">Task Definition</h3>
+            <p className="text-xs text-muted-foreground text-left">What your app receives and produces</p>
+          </div>
+        </div>
+        {hasContent && (
+          <span className="text-xs text-success">defined</span>
+        )}
+      </button>
+
+      {expanded && (
+        <div className="px-3 pb-3 space-y-2">
+          <TaskField
+            label="Input"
+            placeholder="What does your app receive? (e.g., 'business goals + user stories')"
+            value={task.input_description}
+            onSave={v => onEdit?.('input_description', v)}
+          />
+          <TaskField
+            label="Output"
+            placeholder="What does your app produce? (e.g., 'structured charter JSON')"
+            value={task.output_description}
+            onSave={v => onEdit?.('output_description', v)}
+          />
+          {(task.sample_input || task.sample_output) && (
+            <div className="mt-2 pt-2 border-t border-border space-y-2">
+              {task.sample_input && (
+                <div className="text-xs">
+                  <span className="font-medium text-muted-foreground">Sample input:</span>
+                  <div className="mt-1 p-2 bg-muted/50 rounded text-foreground/80 whitespace-pre-wrap">
+                    {task.sample_input}
+                  </div>
+                </div>
+              )}
+              {task.sample_output && (
+                <div className="text-xs">
+                  <span className="font-medium text-muted-foreground">Sample output:</span>
+                  <div className="mt-1 p-2 bg-muted/50 rounded text-foreground/80 whitespace-pre-wrap">
+                    {task.sample_output}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function TaskField({
+  label,
+  placeholder,
+  value,
+  onSave,
+}: {
+  label: string
+  placeholder: string
+  value: string
+  onSave?: (value: string) => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [text, setText] = useState(value)
+
+  const handleBlur = () => {
+    setEditing(false)
+    if (text !== value && onSave) onSave(text)
+  }
+
+  return (
+    <div className="pl-2">
+      <span className="text-xs font-medium text-muted-foreground">{label}:</span>
+      {editing ? (
+        <textarea
+          value={text}
+          onChange={e => setText(e.target.value)}
+          onBlur={handleBlur}
+          autoFocus
+          placeholder={placeholder}
+          className="w-full mt-1 border border-accent rounded px-2 py-1 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-accent text-xs"
+          rows={2}
+        />
+      ) : (
+        <div
+          onClick={() => onSave && setEditing(true)}
+          className={`mt-0.5 text-xs ${value ? 'text-foreground/80' : 'text-muted-foreground italic'} ${onSave ? 'cursor-pointer hover:bg-accent/5 rounded px-1 -mx-1 py-0.5' : ''}`}
+        >
+          {value || placeholder}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function SuggestionRow({

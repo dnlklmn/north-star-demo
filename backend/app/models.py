@@ -35,6 +35,14 @@ class ValidationStatus(str, Enum):
 
 # --- Charter models ---
 
+class TaskDefinition(BaseModel):
+    """Defines what the app receives and produces."""
+    input_description: str = ""  # What the app receives (e.g., "business goals + user stories")
+    output_description: str = ""  # What the app produces (e.g., "structured charter JSON")
+    sample_input: Optional[str] = None  # Example input
+    sample_output: Optional[str] = None  # Example output
+
+
 class DimensionCriteria(BaseModel):
     criteria: list[str] = Field(default_factory=list)
     status: DimensionStatus = DimensionStatus.pending
@@ -48,6 +56,7 @@ class AlignmentEntry(BaseModel):
 
 
 class Charter(BaseModel):
+    task: TaskDefinition = Field(default_factory=TaskDefinition)
     coverage: DimensionCriteria = Field(default_factory=DimensionCriteria)
     balance: DimensionCriteria = Field(default_factory=DimensionCriteria)
     alignment: list[AlignmentEntry] = Field(default_factory=list)
@@ -139,6 +148,7 @@ class ProceedResponse(BaseModel):
 
 class PatchCharterRequest(BaseModel):
     """Partial charter update — only include fields being edited."""
+    task: Optional[TaskDefinition] = None
     coverage: Optional[DimensionCriteria] = None
     balance: Optional[DimensionCriteria] = None
     alignment: Optional[list[AlignmentEntry]] = None

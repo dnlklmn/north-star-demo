@@ -89,6 +89,12 @@ Conversation so far:
 
 Return a JSON object with this exact structure:
 {{
+  "task": {{
+    "input_description": "what the app receives (e.g., 'business goals + user stories as freeform text')",
+    "output_description": "what the app produces (e.g., 'structured charter JSON with coverage, alignment sections')",
+    "sample_input": "optional: a brief example of typical input",
+    "sample_output": "optional: a brief example of typical output"
+  }},
   "coverage": {{
     "criteria": ["list of specific coverage scenarios"]
   }},
@@ -360,6 +366,7 @@ SECTION_4_CONVERSATION = """## Conversation rules
 # --- Dataset phase prompts ---
 
 def build_synthesize_examples_prompt(charter: dict, feature_areas: list[str] | None = None, coverage_criteria: list[str] | None = None, count: int = 2) -> str:
+    task = charter.get("task", {})
     coverage = charter.get("coverage", {}).get("criteria", [])
     balance = charter.get("balance", {}).get("criteria", [])
     alignment = charter.get("alignment", [])
@@ -372,8 +379,28 @@ def build_synthesize_examples_prompt(charter: dict, feature_areas: list[str] | N
         if a.get("feature_area") in target_areas:
             alignment_context += f"\n### {a['feature_area']}\nGood: {a.get('good', '')}\nBad: {a.get('bad', '')}\n"
 
+    # Build task definition section
+    task_section = ""
+    if task.get("input_description") or task.get("output_description"):
+        task_section = f"""## Task Definition (what the app does)
+
+**Input format**: {task.get('input_description') or 'Not specified'}
+**Output format**: {task.get('output_description') or 'Not specified'}
+"""
+        if task.get("sample_input"):
+            task_section += f"""
+**Sample input**:
+{task.get('sample_input')}
+"""
+        if task.get("sample_output"):
+            task_section += f"""
+**Sample output**:
+{task.get('sample_output')}
+"""
+
     return f"""Generate labeled examples for a dataset based on this charter.
 
+{task_section}
 ## Charter context
 
 ### Coverage criteria (input scenarios to represent):
@@ -393,8 +420,8 @@ For each coverage criterion × feature area combination, generate {count} exampl
 
 Each example must have:
 - **feature_area**: which feature area this tests
-- **input**: a concrete, specific scenario (not generic — include names, numbers, specifics)
-- **expected_output**: what the AI would actually say/produce
+- **input**: a concrete, specific scenario matching the INPUT FORMAT above (not generic — include specifics)
+- **expected_output**: what the AI would actually produce, matching the OUTPUT FORMAT above
 - **coverage_tags**: which coverage criteria this hits
 - **label**: "good" or "bad"
 - **label_reason**: one sentence explaining why this output is good or bad per the alignment definition
@@ -414,6 +441,8 @@ Return ONLY valid JSON:
 }}
 
 CRITICAL RULES:
+- Inputs must match the INPUT FORMAT specified in the task definition
+- Expected outputs must match the OUTPUT FORMAT specified in the task definition
 - Inputs must be SPECIFIC scenarios with concrete details (names, numbers, dates, situations)
 - Expected outputs must be realistic — what the AI would actually produce, not a summary of what it should do
 - Good outputs must match the alignment "good" definition exactly
@@ -423,6 +452,7 @@ CRITICAL RULES:
 
 
 def build_review_examples_prompt(charter: dict, examples: list[dict]) -> str:
+    task = charter.get("task", {})
     alignment = charter.get("alignment", [])
     coverage = charter.get("coverage", {}).get("criteria", [])
 
@@ -432,9 +462,18 @@ def build_review_examples_prompt(charter: dict, examples: list[dict]) -> str:
 
     examples_text = json.dumps(examples, indent=2)
 
+    # Build task context
+    task_context = ""
+    if task.get("input_description") or task.get("output_description"):
+        task_context = f"""## Task Definition
+**Input format**: {task.get('input_description') or 'Not specified'}
+**Output format**: {task.get('output_description') or 'Not specified'}
+
+"""
+
     return f"""Review these dataset examples against the charter definitions.
 
-## Charter alignment definitions:
+{task_context}## Charter alignment definitions:
 {alignment_context}
 
 ## Charter coverage criteria:
@@ -467,6 +506,7 @@ Be conservative: if you're unsure whether an example matches the alignment defin
 
 
 def build_dataset_chat_prompt(charter: dict, dataset_stats: dict, user_message: str, conversation_history: list[dict]) -> str:
+    task = charter.get("task", {})
     alignment = charter.get("alignment", [])
     coverage = charter.get("coverage", {}).get("criteria", [])
 
@@ -474,11 +514,20 @@ def build_dataset_chat_prompt(charter: dict, dataset_stats: dict, user_message: 
     for a in alignment:
         alignment_context += f"- **{a.get('feature_area', '')}**: good = {a.get('good', '')[:80]}... | bad = {a.get('bad', '')[:80]}...\n"
 
+    # Build task context
+    task_context = ""
+    if task.get("input_description") or task.get("output_description"):
+        task_context = f"""### Task Definition (what the app does)
+**Input**: {task.get('input_description') or 'Not specified'}
+**Output**: {task.get('output_description') or 'Not specified'}
+
+"""
+
     return f"""You are helping a user build and curate a dataset for evaluating their AI feature. You helped them build the charter that defines quality — now you're helping them create examples that match it.
 
 ## Charter summary
 
-### Feature areas:
+{task_context}### Feature areas:
 {alignment_context}
 
 ### Coverage criteria:

@@ -19,6 +19,7 @@ const EMPTY_STATE: SessionState = {
   session_id: '',
   input: { business_goals: null, user_stories: null, conversation_history: [] },
   charter: {
+    task: { input_description: '', output_description: '', sample_input: null, sample_output: null },
     coverage: { criteria: [], status: 'pending' },
     balance: { criteria: [], status: 'pending' },
     alignment: [],
@@ -375,6 +376,18 @@ export default function App() {
       console.error('Failed to save alignment edit:', err)
     }
   }, [sessionId, state.charter.alignment])
+
+  const handleEditTask = useCallback(async (field: 'input_description' | 'output_description' | 'sample_input' | 'sample_output', value: string) => {
+    if (!sessionId) return
+    const task = { ...state.charter.task, [field]: value }
+
+    try {
+      const res = await patchCharter(sessionId, { task })
+      setState(prev => ({ ...prev, ...res.state }))
+    } catch (err) {
+      console.error('Failed to save task edit:', err)
+    }
+  }, [sessionId, state.charter.task])
 
   // Use a ref to track latest charter state for rapid updates
   const charterRef = useRef(state.charter)
@@ -739,6 +752,7 @@ export default function App() {
               activeCriteria={activeCriteria}
               onEditCriterion={handleEditCriterion}
               onEditAlignment={handleEditAlignment}
+              onEditTask={handleEditTask}
               suggestions={suggestions}
               onAcceptSuggestion={handleAcceptSuggestion}
               onDismissSuggestion={handleDismissSuggestion}

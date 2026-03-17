@@ -16,7 +16,15 @@ export interface AlignmentEntry {
   status: DimensionStatus
 }
 
+export interface TaskDefinition {
+  input_description: string
+  output_description: string
+  sample_input?: string | null
+  sample_output?: string | null
+}
+
 export interface Charter {
+  task: TaskDefinition
   coverage: DimensionCriteria
   balance: DimensionCriteria
   alignment: AlignmentEntry[]
