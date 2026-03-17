@@ -34,9 +34,15 @@ from .models import (
     CreateExampleRequest,
     CreateSessionRequest,
     CreateSessionResponse,
+    DetectedField,
+    DetectSchemaRequest,
+    DetectSchemaResponse,
     EnrichRequest,
     FinalizeResponse,
     ImportExamplesRequest,
+    ImportFromUrlRequest,
+    ImportFromUrlResponse,
+    InferSchemaResponse,
     PatchCharterRequest,
     ProceedResponse,
     SendMessageRequest,
@@ -44,6 +50,7 @@ from .models import (
     SessionState,
     Settings,
     SynthesizeRequest,
+    TaskDefinition,
     UpdateExampleRequest,
     UpdateSettingsRequest,
 )
@@ -51,6 +58,9 @@ from .tools import (
     call_synthesize_examples,
     call_review_examples,
     call_gap_analysis,
+    call_detect_schema,
+    call_infer_schema,
+    call_import_from_url,
 )
 
 load_dotenv(Path(__file__).parent.parent / ".env", override=True)
@@ -755,3 +765,150 @@ async def update_settings(req: UpdateSettingsRequest):
 async def get_judge_results(session_id: str | None = None):
     judgements = await db.get_judgements(session_id=session_id)
     return {"judgements": judgements}
+
+
+# --- Schema Detection Endpoints ---
+
+@app.post("/sessions/{session_id}/detect-schema", response_model=DetectSchemaResponse)
+async def detect_schema(session_id: str, req: DetectSchemaRequest):
+    """Detect schema from pasted sample data."""
+    # Verify session exists
+    state, _ = await _load_state(session_id)
+
+    result, call_meta = await call_detect_schema(req.content, req.content_type)
+
+    # Parse fields from result
+    fields = [
+        DetectedField(
+            name=f.get("name", ""),
+            type=f.get("type", "string"),
+            example=f.get("example"),
+        )
+        for f in result.get("fields", [])
+    ]
+
+    # Log the turn
+    await db.create_turn(
+        session_id=session_id,
+        turn_type="detect_schema",
+        input_snapshot={"content_preview": req.content[:500], "content_type": req.content_type},
+        llm_calls=call_meta,
+        parsed_output=result,
+    )
+
+    return DetectSchemaResponse(
+        input_description=result.get("input_description", ""),
+        output_description=result.get("output_description", ""),
+        detected_format=result.get("detected_format", "freeform_text"),
+        fields=fields,
+        sample_input=result.get("sample_input", req.content),
+    )
+
+
+@app.post("/sessions/{session_id}/import-from-url", response_model=ImportFromUrlResponse)
+async def import_from_url(session_id: str, req: ImportFromUrlRequest):
+    """Import schema from a URL (JSON data, OpenAPI spec, or docs)."""
+    import httpx
+
+    # Verify session exists
+    state, _ = await _load_state(session_id)
+
+    # Fetch URL content
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(req.url, follow_redirects=True)
+            response.raise_for_status()
+            content = response.text
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch URL: {str(e)}")
+
+    # Detect content type
+    content_type = response.headers.get("content-type", "")
+    if req.url_type != "auto":
+        detected_type = req.url_type
+    elif "application/json" in content_type or req.url.endswith(".json"):
+        # Check if it looks like OpenAPI
+        if '"openapi"' in content or '"swagger"' in content:
+            detected_type = "openapi"
+        else:
+            detected_type = "json_data"
+    elif "text/html" in content_type:
+        detected_type = "html_docs"
+    else:
+        detected_type = "json_data"  # Default
+
+    result, call_meta = await call_import_from_url(content, req.url, detected_type)
+
+    # Parse task definition from result
+    task_data = result.get("task", {})
+    task = TaskDefinition(
+        input_description=task_data.get("input_description", ""),
+        output_description=task_data.get("output_description", ""),
+        sample_input=task_data.get("sample_input"),
+        sample_output=task_data.get("sample_output"),
+    )
+
+    # Log the turn
+    await db.create_turn(
+        session_id=session_id,
+        turn_type="import_from_url",
+        input_snapshot={"url": req.url, "url_type": req.url_type, "detected_type": detected_type},
+        llm_calls=call_meta,
+        parsed_output=result,
+    )
+
+    return ImportFromUrlResponse(
+        task=task,
+        source_url=req.url,
+        detected_type=result.get("detected_type", detected_type),
+    )
+
+
+@app.post("/datasets/{dataset_id}/infer-schema", response_model=InferSchemaResponse)
+async def infer_schema_from_examples(dataset_id: str):
+    """Infer schema from existing dataset examples."""
+    dataset = await db.get_dataset(dataset_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    examples = await db.get_examples(dataset_id)
+    if len(examples) < 3:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Need at least 3 examples to infer schema (have {len(examples)})"
+        )
+
+    charter = dataset["charter_snapshot"]
+
+    # Prepare examples for inference (just input/output)
+    examples_for_inference = [
+        {"input": ex["input"], "expected_output": ex["expected_output"], "feature_area": ex["feature_area"]}
+        for ex in examples
+    ]
+
+    result, call_meta = await call_infer_schema(examples_for_inference, charter)
+
+    # Parse task definition from result
+    task_data = result.get("task", {})
+    task = TaskDefinition(
+        input_description=task_data.get("input_description", ""),
+        output_description=task_data.get("output_description", ""),
+        sample_input=task_data.get("sample_input"),
+        sample_output=task_data.get("sample_output"),
+    )
+
+    # Log the turn
+    await db.create_turn(
+        session_id=dataset["session_id"],
+        turn_type="infer_schema",
+        input_snapshot={"example_count": len(examples)},
+        llm_calls=call_meta,
+        parsed_output=result,
+    )
+
+    return InferSchemaResponse(
+        task=task,
+        confidence=result.get("confidence", "medium"),
+        example_count=len(examples),
+        pattern_notes=result.get("pattern_notes", ""),
+    )

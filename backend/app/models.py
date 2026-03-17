@@ -271,3 +271,53 @@ class CharterRow(BaseModel):
     finalised_at: Optional[datetime] = None
     charter: dict
     weak_criteria: list[dict] = Field(default_factory=list)
+
+
+# --- Schema detection models ---
+
+class DetectedField(BaseModel):
+    """A field detected in sample data."""
+    name: str
+    type: str  # "string" | "number" | "boolean" | "array" | "object"
+    example: Optional[str] = None
+
+
+class DetectSchemaRequest(BaseModel):
+    """Request to detect schema from pasted content."""
+    content: str  # Raw pasted content
+    content_type: str = "auto"  # "json" | "csv" | "text" | "auto"
+
+
+class DetectSchemaResponse(BaseModel):
+    """Response with detected schema information."""
+    input_description: str  # Generated description of the input
+    output_description: str = ""  # If output sample provided
+    detected_format: str  # "json_object" | "json_array" | "csv" | "freeform_text"
+    fields: list[DetectedField] = Field(default_factory=list)
+    sample_input: str  # Cleaned sample
+
+
+class ImportFromUrlRequest(BaseModel):
+    """Request to import schema from a URL."""
+    url: str
+    url_type: str = "auto"  # "json" | "openapi" | "auto"
+
+
+class ImportFromUrlResponse(BaseModel):
+    """Response with task definition from URL import."""
+    task: TaskDefinition
+    source_url: str
+    detected_type: str  # "json_data" | "openapi" | "html_docs"
+
+
+class InferSchemaRequest(BaseModel):
+    """Request to infer schema from existing examples."""
+    pass  # No parameters needed - uses dataset examples
+
+
+class InferSchemaResponse(BaseModel):
+    """Response with inferred schema from examples."""
+    task: TaskDefinition
+    confidence: str  # "high" | "medium" | "low"
+    example_count: int
+    pattern_notes: str  # What patterns were detected

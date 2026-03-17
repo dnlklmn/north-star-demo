@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { ChevronRight, Circle, RefreshCw, Sparkles } from 'lucide-react'
-import type { Charter, Validation, DimensionStatus, AlignmentEntry, Suggestion, TaskDefinition } from '../types'
+import { ChevronRight, Circle, RefreshCw, Sparkles, Upload, Link, FileText, Wand2, X, Loader2 } from 'lucide-react'
+import type { Charter, Validation, DimensionStatus, AlignmentEntry, Suggestion, TaskDefinition, DetectSchemaResponse, ImportFromUrlResponse } from '../types'
 
 interface Props {
   charter: Charter
@@ -21,6 +21,10 @@ interface Props {
   onHeaderClick?: () => void
   isFocused?: boolean
   isCompact?: boolean
+  // Schema detection props
+  onDetectSchema?: (content: string, contentType: string) => Promise<DetectSchemaResponse>
+  onImportFromUrl?: (url: string) => Promise<ImportFromUrlResponse>
+  onApplyDetectedSchema?: (task: Partial<TaskDefinition>) => void
 }
 
 export default function CharterPanel({
@@ -42,6 +46,9 @@ export default function CharterPanel({
   onHeaderClick,
   isFocused,
   isCompact,
+  onDetectSchema,
+  onImportFromUrl,
+  onApplyDetectedSchema,
 }: Props) {
   const isEmpty = !charter.coverage.criteria.length
     && !charter.balance.criteria.length
@@ -104,6 +111,9 @@ export default function CharterPanel({
           <TaskSection
             task={charter.task}
             onEdit={onEditTask}
+            onDetectSchema={onDetectSchema}
+            onImportFromUrl={onImportFromUrl}
+            onApplyDetectedSchema={onApplyDetectedSchema}
           />
           <DimensionSection
             name="Coverage"
@@ -168,15 +178,84 @@ function completionLabel(status: DimensionStatus | string, validationStatus: str
   return `${criteriaCount} item${criteriaCount !== 1 ? 's' : ''}`
 }
 
+type ImportSource = 'paste' | 'url' | 'manual' | null
+
 function TaskSection({
   task,
   onEdit,
+  onDetectSchema,
+  onImportFromUrl,
+  onApplyDetectedSchema,
 }: {
   task: TaskDefinition
   onEdit?: (field: keyof TaskDefinition, value: string) => void
+  onDetectSchema?: (content: string, contentType: string) => Promise<DetectSchemaResponse>
+  onImportFromUrl?: (url: string) => Promise<ImportFromUrlResponse>
+  onApplyDetectedSchema?: (task: Partial<TaskDefinition>) => void
 }) {
   const [expanded, setExpanded] = useState(true)
+  const [importSource, setImportSource] = useState<ImportSource>(null)
+  const [importing, setImporting] = useState(false)
+  const [importError, setImportError] = useState<string | null>(null)
+  const [pasteContent, setPasteContent] = useState('')
+  const [urlInput, setUrlInput] = useState('')
+  const [detectedResult, setDetectedResult] = useState<{ input_description: string; sample_input: string } | null>(null)
+
   const hasContent = task.input_description || task.output_description
+  const canImport = onDetectSchema || onImportFromUrl
+
+  const handleDetectFromPaste = async () => {
+    if (!onDetectSchema || !pasteContent.trim()) return
+    setImporting(true)
+    setImportError(null)
+    try {
+      const result = await onDetectSchema(pasteContent, 'auto')
+      setDetectedResult({
+        input_description: result.input_description,
+        sample_input: result.sample_input,
+      })
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : 'Failed to detect schema')
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const handleImportFromUrl = async () => {
+    if (!onImportFromUrl || !urlInput.trim()) return
+    setImporting(true)
+    setImportError(null)
+    try {
+      const result = await onImportFromUrl(urlInput)
+      onApplyDetectedSchema?.(result.task)
+      setImportSource(null)
+      setUrlInput('')
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : 'Failed to import from URL')
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const handleApplyDetected = () => {
+    if (detectedResult && onApplyDetectedSchema) {
+      onApplyDetectedSchema({
+        input_description: detectedResult.input_description,
+        sample_input: detectedResult.sample_input,
+      })
+      setImportSource(null)
+      setPasteContent('')
+      setDetectedResult(null)
+    }
+  }
+
+  const handleCancelImport = () => {
+    setImportSource(null)
+    setPasteContent('')
+    setUrlInput('')
+    setDetectedResult(null)
+    setImportError(null)
+  }
 
   return (
     <div className="border border-border rounded-lg bg-surface-raised">
@@ -200,37 +279,164 @@ function TaskSection({
 
       {expanded && (
         <div className="px-3 pb-3 space-y-2">
-          <TaskField
-            label="Input"
-            placeholder="What does your app receive? (e.g., 'business goals + user stories')"
-            value={task.input_description}
-            onSave={v => onEdit?.('input_description', v)}
-          />
-          <TaskField
-            label="Output"
-            placeholder="What does your app produce? (e.g., 'structured charter JSON')"
-            value={task.output_description}
-            onSave={v => onEdit?.('output_description', v)}
-          />
-          {(task.sample_input || task.sample_output) && (
-            <div className="mt-2 pt-2 border-t border-border space-y-2">
-              {task.sample_input && (
-                <div className="text-xs">
-                  <span className="font-medium text-muted-foreground">Sample input:</span>
-                  <div className="mt-1 p-2 bg-muted/50 rounded text-foreground/80 whitespace-pre-wrap">
-                    {task.sample_input}
-                  </div>
-                </div>
+          {/* Import Source Selector */}
+          {canImport && !importSource && (
+            <div className="flex items-center gap-2 py-2 border-b border-border mb-2">
+              <span className="text-xs text-muted-foreground">Import from:</span>
+              <button
+                onClick={() => setImportSource('paste')}
+                className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/10 rounded transition-colors"
+              >
+                <FileText className="w-3 h-3" />
+                Paste data
+              </button>
+              <button
+                onClick={() => setImportSource('url')}
+                className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/10 rounded transition-colors"
+              >
+                <Link className="w-3 h-3" />
+                URL
+              </button>
+              <button
+                onClick={() => setImportSource('manual')}
+                className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/10 rounded transition-colors"
+              >
+                <Wand2 className="w-3 h-3" />
+                Describe manually
+              </button>
+            </div>
+          )}
+
+          {/* Import Panel: Paste */}
+          {importSource === 'paste' && (
+            <div className="p-3 bg-accent/5 rounded-lg border border-accent/20 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium text-foreground">Paste sample data</span>
+                <button onClick={handleCancelImport} className="text-muted-foreground hover:text-foreground">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <textarea
+                value={pasteContent}
+                onChange={e => setPasteContent(e.target.value)}
+                placeholder="Paste a sample of your input data (JSON, CSV, or plain text)..."
+                className="w-full h-32 border border-border rounded px-3 py-2 bg-background text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+              />
+              {importError && (
+                <p className="text-xs text-danger">{importError}</p>
               )}
-              {task.sample_output && (
-                <div className="text-xs">
-                  <span className="font-medium text-muted-foreground">Sample output:</span>
-                  <div className="mt-1 p-2 bg-muted/50 rounded text-foreground/80 whitespace-pre-wrap">
-                    {task.sample_output}
+              {detectedResult ? (
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground">Detected format:</p>
+                  <p className="text-sm text-foreground">{detectedResult.input_description}</p>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleApplyDetected}
+                      className="px-3 py-1.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90"
+                    >
+                      Apply
+                    </button>
+                    <button
+                      onClick={() => setDetectedResult(null)}
+                      className="px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground"
+                    >
+                      Try again
+                    </button>
                   </div>
                 </div>
+              ) : (
+                <button
+                  onClick={handleDetectFromPaste}
+                  disabled={importing || !pasteContent.trim()}
+                  className="flex items-center gap-2 px-3 py-1.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90 disabled:opacity-50"
+                >
+                  {importing && <Loader2 className="w-3 h-3 animate-spin" />}
+                  Detect format
+                </button>
               )}
             </div>
+          )}
+
+          {/* Import Panel: URL */}
+          {importSource === 'url' && (
+            <div className="p-3 bg-accent/5 rounded-lg border border-accent/20 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium text-foreground">Import from URL</span>
+                <button onClick={handleCancelImport} className="text-muted-foreground hover:text-foreground">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <input
+                type="url"
+                value={urlInput}
+                onChange={e => setUrlInput(e.target.value)}
+                placeholder="https://api.example.com/schema.json or OpenAPI spec URL..."
+                className="w-full border border-border rounded px-3 py-2 bg-background text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-accent"
+              />
+              <p className="text-xs text-muted-foreground">
+                Supports JSON data, OpenAPI/Swagger specs, or API documentation pages.
+              </p>
+              {importError && (
+                <p className="text-xs text-danger">{importError}</p>
+              )}
+              <button
+                onClick={handleImportFromUrl}
+                disabled={importing || !urlInput.trim()}
+                className="flex items-center gap-2 px-3 py-1.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90 disabled:opacity-50"
+              >
+                {importing && <Loader2 className="w-3 h-3 animate-spin" />}
+                Import
+              </button>
+            </div>
+          )}
+
+          {/* Import Panel: Manual (just shows the fields) */}
+          {importSource === 'manual' && (
+            <div className="p-3 bg-accent/5 rounded-lg border border-accent/20 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium text-foreground">Describe your format</span>
+                <button onClick={handleCancelImport} className="text-muted-foreground hover:text-foreground">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <p className="text-xs text-muted-foreground mb-2">
+                Fill in the fields below to describe what your app receives and produces.
+              </p>
+            </div>
+          )}
+
+          {/* Regular fields - always shown unless in paste/url import mode */}
+          {(importSource === null || importSource === 'manual') && (
+            <>
+              <TaskField
+                label="Input"
+                placeholder="What does your app receive? (e.g., 'business goals + user stories')"
+                value={task.input_description}
+                onSave={v => onEdit?.('input_description', v)}
+              />
+              <TaskField
+                label="Output"
+                placeholder="What does your app produce? (e.g., 'structured charter JSON')"
+                value={task.output_description}
+                onSave={v => onEdit?.('output_description', v)}
+              />
+              <div className="mt-2 pt-2 border-t border-border space-y-2">
+                <TaskField
+                  label="Sample input"
+                  placeholder="Paste an example of what your app actually receives..."
+                  value={task.sample_input || ''}
+                  onSave={v => onEdit?.('sample_input', v)}
+                  multiline
+                />
+                <TaskField
+                  label="Sample output"
+                  placeholder="Paste an example of what your app actually produces..."
+                  value={task.sample_output || ''}
+                  onSave={v => onEdit?.('sample_output', v)}
+                  multiline
+                />
+              </div>
+            </>
           )}
         </div>
       )}
@@ -243,37 +449,73 @@ function TaskField({
   placeholder,
   value,
   onSave,
+  multiline = false,
 }: {
   label: string
   placeholder: string
   value: string
   onSave?: (value: string) => void
+  multiline?: boolean
 }) {
   const [editing, setEditing] = useState(false)
   const [text, setText] = useState(value)
 
-  const handleBlur = () => {
+  const handleSave = () => {
     setEditing(false)
     if (text !== value && onSave) onSave(text)
+  }
+
+  const handleCancel = () => {
+    setText(value)
+    setEditing(false)
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      handleSave()
+    }
+    if (e.key === 'Escape') {
+      handleCancel()
+    }
   }
 
   return (
     <div className="pl-2">
       <span className="text-xs font-medium text-muted-foreground">{label}:</span>
       {editing ? (
-        <textarea
-          value={text}
-          onChange={e => setText(e.target.value)}
-          onBlur={handleBlur}
-          autoFocus
-          placeholder={placeholder}
-          className="w-full mt-1 border border-accent rounded px-2 py-1 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-accent text-xs"
-          rows={2}
-        />
+        <div className="mt-1">
+          <textarea
+            value={text}
+            onChange={e => setText(e.target.value)}
+            onKeyDown={handleKeyDown}
+            autoFocus
+            placeholder={placeholder}
+            className="w-full border border-accent rounded px-2 py-1 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-accent text-xs"
+            rows={multiline ? 4 : 2}
+          />
+          <div className="flex gap-1.5 mt-1">
+            <button
+              onClick={handleSave}
+              className="px-2 py-0.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90"
+            >
+              Save
+            </button>
+            <button
+              onClick={handleCancel}
+              className="px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground"
+            >
+              Cancel
+            </button>
+            <span className="text-[10px] text-muted-foreground ml-auto self-center">
+              Enter to save · Esc to cancel
+            </span>
+          </div>
+        </div>
       ) : (
         <div
           onClick={() => onSave && setEditing(true)}
-          className={`mt-0.5 text-xs ${value ? 'text-foreground/80' : 'text-muted-foreground italic'} ${onSave ? 'cursor-pointer hover:bg-accent/5 rounded px-1 -mx-1 py-0.5' : ''}`}
+          className={`mt-0.5 text-xs whitespace-pre-wrap ${value ? 'text-foreground/80' : 'text-muted-foreground italic'} ${onSave ? 'cursor-pointer hover:bg-accent/5 rounded px-1 -mx-1 py-0.5' : ''}`}
         >
           {value || placeholder}
         </div>

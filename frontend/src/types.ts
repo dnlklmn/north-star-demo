@@ -167,3 +167,32 @@ export interface GapAnalysis {
   coverage_matrix: Record<string, Record<string, number>>
   summary: string
 }
+
+// --- Schema detection types ---
+
+export interface DetectedField {
+  name: string
+  type: 'string' | 'number' | 'boolean' | 'array' | 'object'
+  example?: string | null
+}
+
+export interface DetectSchemaResponse {
+  input_description: string
+  output_description: string
+  detected_format: 'json_object' | 'json_array' | 'csv' | 'freeform_text'
+  fields: DetectedField[]
+  sample_input: string
+}
+
+export interface ImportFromUrlResponse {
+  task: TaskDefinition
+  source_url: string
+  detected_type: 'json_data' | 'openapi' | 'html_docs'
+}
+
+export interface InferSchemaResponse {
+  task: TaskDefinition
+  confidence: 'high' | 'medium' | 'low'
+  example_count: number
+  pattern_notes: string
+}

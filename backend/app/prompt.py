@@ -389,13 +389,20 @@ def build_synthesize_examples_prompt(charter: dict, feature_areas: list[str] | N
 """
         if task.get("sample_input"):
             task_section += f"""
-**Sample input**:
+**Sample input** (MATCH THIS FORMAT EXACTLY):
+```
 {task.get('sample_input')}
+```
+IMPORTANT: Generated inputs must match this sample's structure, length, and level of detail.
+Do NOT add extra context, metrics, dates, or details not present in the sample.
 """
         if task.get("sample_output"):
             task_section += f"""
-**Sample output**:
+**Sample output** (MATCH THIS FORMAT EXACTLY):
+```
 {task.get('sample_output')}
+```
+IMPORTANT: Generated outputs must match this sample's structure and format.
 """
 
     return f"""Generate labeled examples for a dataset based on this charter.
@@ -664,6 +671,123 @@ Return ONLY valid JSON:
   "coverage_matrix": {{"criterion": {{"feature_area": count}}}},
   "summary": "2-3 sentence summary of the dataset's completeness"
 }}"""
+
+
+# --- Schema detection prompts ---
+
+def build_detect_schema_prompt(content: str, content_type: str = "auto") -> str:
+    """Build prompt for detecting schema from pasted sample data."""
+    type_hint = ""
+    if content_type != "auto":
+        type_hint = f"\nThe user indicated the content type is: {content_type}"
+
+    return f"""Analyze the following sample data and detect its schema/structure.
+{type_hint}
+
+Sample content:
+```
+{content}
+```
+
+Your job is to:
+1. Detect the format (JSON object, JSON array, CSV, or freeform text)
+2. If structured (JSON/CSV), identify the fields and their types
+3. Generate a clear, human-readable description of what this data represents
+
+Return ONLY valid JSON:
+{{
+  "detected_format": "json_object" | "json_array" | "csv" | "freeform_text",
+  "input_description": "A clear description of what this input represents (e.g., 'A customer support ticket with subject, body, and priority fields')",
+  "output_description": "",
+  "fields": [
+    {{"name": "field_name", "type": "string|number|boolean|array|object", "example": "sample value"}}
+  ],
+  "sample_input": "The cleaned/formatted sample for use as a template"
+}}
+
+Rules:
+- input_description should be 1-2 sentences describing what this data IS, not technical details
+- For JSON, list top-level fields. For nested objects, use "object" type
+- For CSV, list column names as fields
+- For freeform text, fields can be empty or contain semantic sections if apparent
+- sample_input should be the cleaned version of the input (formatted JSON, trimmed text, etc.)
+- Keep descriptions in plain language a non-technical person would understand"""
+
+
+def build_infer_schema_prompt(examples: list[dict], charter: dict) -> str:
+    """Build prompt for inferring schema from existing dataset examples."""
+    # Format examples for the prompt
+    examples_text = json.dumps(examples[:10], indent=2)  # Limit to 10 examples
+
+    alignment = charter.get("alignment", [])
+    feature_areas = [a.get("feature_area", "") for a in alignment]
+
+    return f"""Analyze these dataset examples to infer the input/output format for this application.
+
+Feature areas in the charter: {json.dumps(feature_areas)}
+
+Examples from the dataset:
+{examples_text}
+
+Based on these examples, determine:
+1. What format do the inputs follow? (structure, typical content, length)
+2. What format do the outputs follow?
+3. Are there consistent patterns across examples?
+
+Return ONLY valid JSON:
+{{
+  "task": {{
+    "input_description": "Description of the input format based on patterns observed",
+    "output_description": "Description of the output format based on patterns observed",
+    "sample_input": "A representative sample input based on the examples",
+    "sample_output": "A representative sample output based on the examples"
+  }},
+  "confidence": "high" | "medium" | "low",
+  "example_count": {len(examples)},
+  "pattern_notes": "What patterns were detected (e.g., 'All inputs are JSON with customer_id and query fields, outputs are structured responses with answer and confidence')"
+}}
+
+Rules:
+- Use "high" confidence if examples are consistent and patterns are clear
+- Use "medium" if there's some variation but a general pattern exists
+- Use "low" if examples are very diverse or patterns are unclear
+- sample_input/output should be realistic examples that represent the typical format
+- Keep descriptions in plain language"""
+
+
+def build_import_url_prompt(content: str, url: str, detected_type: str) -> str:
+    """Build prompt for extracting schema from URL content."""
+    return f"""Extract the input/output schema from this content fetched from: {url}
+
+Detected content type: {detected_type}
+
+Content:
+```
+{content[:8000]}
+```
+
+Based on this content, determine the task definition:
+- If this is an OpenAPI/Swagger spec, extract request/response schemas from the endpoints
+- If this is JSON data, infer the schema from the structure
+- If this is documentation (HTML/Markdown), extract example inputs and outputs
+
+Return ONLY valid JSON:
+{{
+  "task": {{
+    "input_description": "What the app receives (inferred from the spec/data/docs)",
+    "output_description": "What the app produces (inferred from the spec/data/docs)",
+    "sample_input": "A concrete example of the input format",
+    "sample_output": "A concrete example of the output format (if available)"
+  }},
+  "detected_type": "json_data" | "openapi" | "html_docs",
+  "notes": "Any additional context about what was found"
+}}
+
+Rules:
+- For OpenAPI specs, focus on the most relevant/common endpoint
+- For JSON data, treat it as sample input and describe its structure
+- For documentation, extract any code examples or sample data
+- Keep descriptions clear and in plain language"""
 
 
 def _format_examples(examples: list[dict]) -> str:

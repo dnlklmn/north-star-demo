@@ -1,4 +1,4 @@
-import type { CreateSessionResponse, SendMessageResponse, SessionState, Charter, Dataset, Example, GapAnalysis, Settings } from './types'
+import type { CreateSessionResponse, SendMessageResponse, SessionState, Charter, Dataset, Example, GapAnalysis, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse, TaskDefinition } from './types'
 
 const BASE = '/api'
 
@@ -229,5 +229,45 @@ export async function datasetChat(
     body: JSON.stringify({ message }),
   })
   if (!res.ok) throw new Error(`Failed to chat: ${res.status}`)
+  return res.json()
+}
+
+// --- Schema Detection API ---
+
+export async function detectSchema(
+  sessionId: string,
+  content: string,
+  contentType: 'json' | 'csv' | 'text' | 'auto' = 'auto'
+): Promise<DetectSchemaResponse> {
+  const res = await fetch(`${BASE}/sessions/${sessionId}/detect-schema`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content, content_type: contentType }),
+  })
+  if (!res.ok) throw new Error(`Failed to detect schema: ${res.status}`)
+  return res.json()
+}
+
+export async function importFromUrl(
+  sessionId: string,
+  url: string,
+  urlType: 'json' | 'openapi' | 'auto' = 'auto'
+): Promise<ImportFromUrlResponse> {
+  const res = await fetch(`${BASE}/sessions/${sessionId}/import-from-url`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url, url_type: urlType }),
+  })
+  if (!res.ok) throw new Error(`Failed to import from URL: ${res.status}`)
+  return res.json()
+}
+
+export async function inferSchemaFromExamples(
+  datasetId: string
+): Promise<InferSchemaResponse> {
+  const res = await fetch(`${BASE}/datasets/${datasetId}/infer-schema`, {
+    method: 'POST',
+  })
+  if (!res.ok) throw new Error(`Failed to infer schema: ${res.status}`)
   return res.json()
 }

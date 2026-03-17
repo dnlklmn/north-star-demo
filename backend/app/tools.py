@@ -34,6 +34,9 @@ from .prompt import (
     build_review_examples_prompt,
     build_dataset_chat_prompt,
     build_gap_analysis_prompt,
+    build_detect_schema_prompt,
+    build_infer_schema_prompt,
+    build_import_url_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -243,6 +246,35 @@ async def call_gap_analysis(charter: dict, dataset_stats: dict, examples: list[d
     """Analyze dataset gaps against charter. Returns (gap analysis, call metadata list)."""
     await _refresh_settings()
     prompt = build_gap_analysis_prompt(charter, dataset_stats, examples)
+    text, meta = _call_llm(prompt, max_tokens=2048)
+    data = _extract_json(text)
+    return data, [meta]
+
+
+# --- Schema detection tools ---
+
+async def call_detect_schema(content: str, content_type: str = "auto") -> tuple[dict, list[dict]]:
+    """Detect schema from pasted content. Returns (schema data, call metadata list)."""
+    await _refresh_settings()
+    prompt = build_detect_schema_prompt(content, content_type)
+    text, meta = _call_llm(prompt, max_tokens=2048)
+    data = _extract_json(text)
+    return data, [meta]
+
+
+async def call_infer_schema(examples: list[dict], charter: dict) -> tuple[dict, list[dict]]:
+    """Infer schema from existing examples. Returns (inferred schema, call metadata list)."""
+    await _refresh_settings()
+    prompt = build_infer_schema_prompt(examples, charter)
+    text, meta = _call_llm(prompt, max_tokens=2048)
+    data = _extract_json(text)
+    return data, [meta]
+
+
+async def call_import_from_url(content: str, url: str, detected_type: str) -> tuple[dict, list[dict]]:
+    """Extract schema from URL content. Returns (schema data, call metadata list)."""
+    await _refresh_settings()
+    prompt = build_import_url_prompt(content, url, detected_type)
     text, meta = _call_llm(prompt, max_tokens=2048)
     data = _extract_json(text)
     return data, [meta]
