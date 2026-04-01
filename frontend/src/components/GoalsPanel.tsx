@@ -128,14 +128,14 @@ export default function GoalsPanel({
             </p>
           </div>
 
-          {/* AI suggestions */}
-          {(goalSuggestions.length > 0 || suggestionsLoading) && (
-            <div className="pl-7">
-              <div className="flex items-center gap-1.5 mb-2">
-                <Sparkles className="w-3.5 h-3.5 text-accent" />
-                <span className="text-xs font-medium text-muted-foreground">Suggested goals</span>
-                {suggestionsLoading && <Loader2 className="w-3 h-3 text-muted-foreground animate-spin" />}
-              </div>
+          {/* AI suggestions — always visible */}
+          <div className="pl-7">
+            <div className="flex items-center gap-1.5 mb-2">
+              <Sparkles className={`w-3.5 h-3.5 ${goalSuggestions.length > 0 || suggestionsLoading ? 'text-accent' : 'text-muted-foreground/40'}`} />
+              <span className="text-xs font-medium text-muted-foreground">Suggested goals</span>
+              {suggestionsLoading && <Loader2 className="w-3 h-3 text-muted-foreground animate-spin" />}
+            </div>
+            {goalSuggestions.length > 0 ? (
               <div className="space-y-1.5">
                 {goalSuggestions.map((suggestion, i) => (
                   <div key={i} className="flex items-start gap-2 py-1.5 px-2.5 bg-accent/5 border border-accent/20 rounded-lg">
@@ -157,8 +157,20 @@ export default function GoalsPanel({
                   </div>
                 ))}
               </div>
-            </div>
-          )}
+            ) : suggestionsLoading ? (
+              <div className="py-3 px-2.5 border border-dashed border-border rounded-lg">
+                <p className="text-xs text-muted-foreground">Generating suggestions based on your goals...</p>
+              </div>
+            ) : nonEmptyGoals.length === 0 ? (
+              <div className="py-3 px-2.5 border border-dashed border-border/50 rounded-lg">
+                <p className="text-xs text-muted-foreground/60">Add a goal and press Enter to get AI suggestions</p>
+              </div>
+            ) : (
+              <div className="py-3 px-2.5 border border-dashed border-border/50 rounded-lg">
+                <p className="text-xs text-muted-foreground/60">Press Enter on a goal to get suggestions</p>
+              </div>
+            )}
+          </div>
 
           {/* Define users button */}
           <div className="pt-4 pl-7">
