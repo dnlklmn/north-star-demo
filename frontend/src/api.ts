@@ -66,6 +66,26 @@ export async function patchCharter(
   return res.json()
 }
 
+export async function validateCharter(
+  sessionId: string
+): Promise<{ validation: import('./types').Validation; state: SessionState }> {
+  const res = await fetch(`${BASE}/sessions/${sessionId}/validate`, {
+    method: 'POST',
+  })
+  if (!res.ok) throw new Error(`Failed to validate: ${res.status}`)
+  return res.json()
+}
+
+export async function suggestForCharter(
+  sessionId: string
+): Promise<{ suggestions: import('./types').Suggestion[]; suggested_stories: import('./types').SuggestedStory[] }> {
+  const res = await fetch(`${BASE}/sessions/${sessionId}/suggest`, {
+    method: 'POST',
+  })
+  if (!res.ok) throw new Error(`Failed to suggest: ${res.status}`)
+  return res.json()
+}
+
 export async function finalizeCharter(
   sessionId: string
 ): Promise<{ charter_id: string; session_id: string; charter: Charter }> {

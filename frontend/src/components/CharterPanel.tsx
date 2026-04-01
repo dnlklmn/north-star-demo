@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ChevronRight, Circle, RefreshCw, Sparkles, Upload, Link, FileText, Wand2, X, Loader2 } from 'lucide-react'
+import { ChevronRight, Circle, RefreshCw, Sparkles, Upload, Link, FileText, Wand2, X, Loader2, ShieldCheck, Plus } from 'lucide-react'
 import type { Charter, Validation, DimensionStatus, AlignmentEntry, Suggestion, TaskDefinition, DetectSchemaResponse, ImportFromUrlResponse } from '../types'
 
 interface Props {
@@ -7,6 +7,7 @@ interface Props {
   validation: Validation
   activeCriteria: string[]
   onEditCriterion?: (dimension: string, index: number, value: string) => void
+  onAddCriterion?: (dimension: string, value: string) => void
   onEditAlignment?: (index: number, field: 'good' | 'bad', value: string) => void
   onEditTask?: (field: keyof TaskDefinition, value: string) => void
   suggestions?: Suggestion[]
@@ -18,6 +19,8 @@ interface Props {
   hasSession?: boolean
   canGenerate?: boolean
   inputChanged?: boolean
+  onValidate?: () => void
+  onSuggest?: () => void
   onHeaderClick?: () => void
   isFocused?: boolean
   isCompact?: boolean
@@ -32,6 +35,7 @@ export default function CharterPanel({
   validation,
   activeCriteria,
   onEditCriterion,
+  onAddCriterion,
   onEditAlignment,
   onEditTask,
   suggestions = [],
@@ -46,6 +50,8 @@ export default function CharterPanel({
   onHeaderClick,
   isFocused,
   isCompact,
+  onValidate,
+  onSuggest,
   onDetectSchema,
   onImportFromUrl,
   onApplyDetectedSchema,
@@ -69,15 +75,39 @@ export default function CharterPanel({
         }`}
       >
         <h2 className="text-sm font-semibold text-foreground">Charter</h2>
-        {hasSession && !isEmpty && onRegenerate && inputChanged && !isCompact && (
-          <button
-            onClick={(e) => { e.stopPropagation(); onRegenerate(); }}
-            disabled={loading}
-            className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 disabled:opacity-50"
-          >
-            <RefreshCw className="w-3 h-3" />
-            Regenerate
-          </button>
+        {hasSession && !isEmpty && !isCompact && (
+          <div className="flex items-center gap-2">
+            {onSuggest && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onSuggest(); }}
+                disabled={loading}
+                className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 disabled:opacity-50"
+              >
+                <Sparkles className="w-3 h-3" />
+                Suggest
+              </button>
+            )}
+            {onValidate && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onValidate(); }}
+                disabled={loading}
+                className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 disabled:opacity-50"
+              >
+                <ShieldCheck className="w-3 h-3" />
+                Validate
+              </button>
+            )}
+            {onRegenerate && inputChanged && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onRegenerate(); }}
+                disabled={loading}
+                className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 disabled:opacity-50"
+              >
+                <RefreshCw className="w-3 h-3" />
+                Regenerate
+              </button>
+            )}
+          </div>
         )}
       </div>
 
@@ -123,6 +153,7 @@ export default function CharterPanel({
             validationStatus={validation.coverage}
             activeCriteria={activeCriteria}
             onEdit={onEditCriterion ? (i, v) => onEditCriterion('coverage', i, v) : undefined}
+            onAdd={onAddCriterion ? (v) => onAddCriterion('coverage', v) : undefined}
             suggestions={coverageSuggestions}
             onAcceptSuggestion={onAcceptSuggestion}
             onDismissSuggestion={onDismissSuggestion}
@@ -135,6 +166,7 @@ export default function CharterPanel({
             validationStatus={validation.balance}
             activeCriteria={activeCriteria}
             onEdit={onEditCriterion ? (i, v) => onEditCriterion('balance', i, v) : undefined}
+            onAdd={onAddCriterion ? (v) => onAddCriterion('balance', v) : undefined}
             suggestions={balanceSuggestions}
             onAcceptSuggestion={onAcceptSuggestion}
             onDismissSuggestion={onDismissSuggestion}
@@ -156,6 +188,7 @@ export default function CharterPanel({
             validationStatus={validation.rot}
             activeCriteria={activeCriteria}
             onEdit={onEditCriterion ? (i, v) => onEditCriterion('rot', i, v) : undefined}
+            onAdd={onAddCriterion ? (v) => onAddCriterion('rot', v) : undefined}
             suggestions={rotSuggestions}
             onAcceptSuggestion={onAcceptSuggestion}
             onDismissSuggestion={onDismissSuggestion}
@@ -570,6 +603,7 @@ function DimensionSection({
   validationStatus,
   activeCriteria,
   onEdit,
+  onAdd,
   suggestions = [],
   onAcceptSuggestion,
   onDismissSuggestion,
@@ -581,13 +615,24 @@ function DimensionSection({
   validationStatus: string
   activeCriteria: string[]
   onEdit?: (index: number, value: string) => void
+  onAdd?: (value: string) => void
   suggestions?: Suggestion[]
   onAcceptSuggestion?: (s: Suggestion) => void
   onDismissSuggestion?: (s: Suggestion) => void
 }) {
   const [expanded, setExpanded] = useState(true)
+  const [adding, setAdding] = useState(false)
+  const [newValue, setNewValue] = useState('')
   const hasSuggestions = suggestions.length > 0
   const label = completionLabel(status, validationStatus, criteria.length)
+
+  const handleAdd = () => {
+    if (newValue.trim() && onAdd) {
+      onAdd(newValue.trim())
+      setNewValue('')
+      setAdding(false)
+    }
+  }
 
   return (
     <div className="border border-border rounded-lg bg-surface-raised">
@@ -645,6 +690,36 @@ function DimensionSection({
               onDismiss={onDismissSuggestion}
             />
           ))}
+          {onAdd && (
+            adding ? (
+              <div className="pl-2 pt-1">
+                <textarea
+                  value={newValue}
+                  onChange={e => setNewValue(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleAdd() }
+                    if (e.key === 'Escape') { setNewValue(''); setAdding(false) }
+                  }}
+                  autoFocus
+                  placeholder={`Add a ${name.toLowerCase()} criterion...`}
+                  className="w-full text-sm border border-accent rounded px-2 py-1 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-accent"
+                  rows={2}
+                />
+                <div className="flex gap-1.5 mt-1">
+                  <button onClick={handleAdd} className="px-2 py-0.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90">Add</button>
+                  <button onClick={() => { setNewValue(''); setAdding(false) }} className="px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground">Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={() => setAdding(true)}
+                className="flex items-center gap-1 pl-2 pt-1 text-xs text-muted-foreground hover:text-foreground"
+              >
+                <Plus className="w-3 h-3" />
+                Add criterion
+              </button>
+            )
+          )}
         </div>
       )}
     </div>

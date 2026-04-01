@@ -1,7 +1,9 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
+import { MessageSquare, Settings, X } from 'lucide-react'
 import type { Message, SessionState, AgentStatus, StoryGroup, Suggestion, SuggestedStory, Dataset, Example, GapAnalysis } from './types'
 import {
-  createSession, getSession, sendMessage, proceedToReview, patchCharter, finalizeCharter,
+  createSession, getSession, sendMessage, patchCharter, finalizeCharter,
+  validateCharter, suggestForCharter,
   createDataset, getDataset, synthesizeExamples, updateExample as apiUpdateExample,
   deleteExample as apiDeleteExample, autoReviewExamples, getGapAnalysis, exportDataset,
   datasetChat,
@@ -13,7 +15,7 @@ import ExampleReview from './components/ExampleReview'
 import CoverageMap from './components/CoverageMap'
 import SettingsPanel from './components/SettingsPanel'
 
-type FocusedColumn = 'input' | 'charter' | 'examples'
+type ActiveTab = 'input' | 'charter' | 'examples'
 
 const EMPTY_STATE: SessionState = {
   session_id: '',
@@ -52,31 +54,15 @@ function formatStoryGroups(groups: StoryGroup[]): string {
 }
 
 export default function App() {
+  // --- Navigation ---
+  const [activeTab, setActiveTab] = useState<ActiveTab>('input')
+  const [showAssistant, setShowAssistant] = useState(false)
+
   // --- Shared state ---
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [state, setState] = useState<SessionState>(EMPTY_STATE)
   const [messages, setMessages] = useState<Message[]>([])
   const [loading, setLoading] = useState(false)
-  // Track open columns: [mostRecent, secondMostRecent] - always show 2 columns
-  const [openColumns, setOpenColumns] = useState<[FocusedColumn, FocusedColumn]>(['input', 'charter'])
-
-  // Select a column - opens it and closes the least recently used
-  const selectColumn = useCallback((column: FocusedColumn) => {
-    setOpenColumns(prev => {
-      if (prev[0] === column) return prev // Already most recent
-      if (prev[1] === column) return [column, prev[0]] // Swap order
-      return [column, prev[0]] // New column, drop the oldest
-    })
-  }, [])
-
-  // Check if a column is currently open
-  const isColumnOpen = useCallback((column: FocusedColumn) => {
-    return openColumns.includes(column)
-  }, [openColumns])
-
-  // --- UI animation states ---
-  const [showCharter, setShowCharter] = useState(false)
-  const [showAgent, setShowAgent] = useState(false)
 
   // --- Charter phase state ---
   const [activeCriteria, setActiveCriteria] = useState<string[]>([])
@@ -90,10 +76,6 @@ export default function App() {
   // --- Input change tracking for regenerate button ---
   const [savedInput, setSavedInput] = useState<{ goals: string; stories: string } | null>(null)
 
-  // --- Debounced background messages ---
-  const pendingChangesRef = useRef<string[]>([])
-  const debounceTimerRef = useRef<number | null>(null)
-
   // --- Dataset phase state ---
   const [dataset, setDataset] = useState<Dataset | null>(null)
   const [actionSuggestions, setActionSuggestions] = useState<Array<{ action: string; label: string; reason: string }>>([])
@@ -104,6 +86,10 @@ export default function App() {
 
   const status: AgentStatus = state.agent_status
   const hasCharter = !!(state.charter.coverage.criteria.length || state.charter.alignment.length)
+
+  // Tab availability
+  const charterAvailable = hasCharter || loading
+  const examplesAvailable = !!dataset
 
   // Check if input has changed since charter was generated
   const inputChanged = useMemo(() => {
@@ -118,9 +104,7 @@ export default function App() {
     const storiesText = formatStoryGroups(storyGroups)
     if (!goals.trim() && !storiesText) return
 
-    // Show charter column with loading state
-    setShowCharter(true)
-    selectColumn('charter')
+    setActiveTab('charter')
     setLoading(true)
 
     try {
@@ -137,10 +121,7 @@ export default function App() {
         setState(session.state as SessionState)
         setSuggestions(res.suggestions || [])
         setSuggestedStories(res.suggested_stories || [])
-        // Save input snapshot for regenerate button logic
         setSavedInput({ goals: goals.trim(), stories: storiesText })
-        // Show agent after charter is loaded
-        setTimeout(() => setShowAgent(true), 300)
       } else {
         const updateMsg = `I've updated my input.\n\nBusiness goals: ${goals.trim()}\n\nUser stories:\n${storiesText}\n\nPlease regenerate the document with this updated input.`
         const res = await sendMessage(sessionId, updateMsg, { regenerate: true })
@@ -152,7 +133,6 @@ export default function App() {
         setState(res.state)
         setSuggestions(res.suggestions || [])
         setSuggestedStories(res.suggested_stories || [])
-        // Save input snapshot for regenerate button logic
         setSavedInput({ goals: goals.trim(), stories: storiesText })
       }
     } catch (err) {
@@ -240,31 +220,24 @@ export default function App() {
     }
   }, [dataset])
 
-  const handleSend = useCallback(async (message: string, { background }: { background?: boolean } = {}) => {
+  const handleSend = useCallback(async (message: string) => {
     if (!sessionId) return
     setMessages(prev => [...prev, { role: 'user', content: message }])
-    if (!background) setLoading(true)
+    setLoading(true)
     try {
       if (dataset) {
-        // Dataset phase - use dataset chat
         const res = await datasetChat(dataset.id, message)
         setMessages(prev => [...prev, { role: 'assistant', content: res.message }])
         setState(res.state)
-
-        // Store action suggestions
         setActionSuggestions(res.action_suggestions || [])
-
-        // Execute any actions the agent requested
         if (res.actions && res.actions.length > 0) {
           for (const action of res.actions) {
             await executeAgentAction(action)
           }
-          // Refresh dataset after actions
           const fullDs = await getDataset(dataset.session_id)
           setDataset(fullDs)
         }
       } else {
-        // Charter phase
         const res = await sendMessage(sessionId, message)
         setMessages(prev => [...prev, { role: 'assistant', content: res.message }])
         setState(res.state)
@@ -276,77 +249,9 @@ export default function App() {
       console.error('Failed to send message:', err)
       setMessages(prev => [...prev, { role: 'assistant', content: 'Something went wrong. Please try again.' }])
     } finally {
-      if (!background) setLoading(false)
-    }
-  }, [sessionId, dataset, executeAgentAction])
-
-  // Debounced background send - batches multiple changes together
-  const sendDebouncedBackground = useCallback((change: string) => {
-    pendingChangesRef.current.push(change)
-
-    // Clear existing timer
-    if (debounceTimerRef.current) {
-      window.clearTimeout(debounceTimerRef.current)
-    }
-
-    // Set new timer - send all pending changes after 1 second of no activity
-    debounceTimerRef.current = window.setTimeout(async () => {
-      const changes = pendingChangesRef.current
-      pendingChangesRef.current = []
-      debounceTimerRef.current = null
-
-      if (changes.length === 0 || !sessionId) return
-
-      // Combine all changes into one message
-      const combinedMessage = changes.length === 1
-        ? changes[0]
-        : `Multiple changes:\n${changes.map(c => `- ${c}`).join('\n')}`
-
-      try {
-        if (dataset) {
-          const res = await datasetChat(dataset.id, combinedMessage)
-          setMessages(prev => [...prev, { role: 'assistant', content: res.message }])
-          setState(res.state)
-        } else {
-          const res = await sendMessage(sessionId, combinedMessage)
-          setMessages(prev => [...prev, { role: 'assistant', content: res.message }])
-          setState(res.state)
-          setActiveCriteria([])
-          setSuggestions(res.suggestions || [])
-          setSuggestedStories(res.suggested_stories || [])
-        }
-      } catch (err) {
-        console.error('Failed to send batched message:', err)
-      }
-    }, 1000)
-  }, [sessionId, dataset])
-
-  // Cleanup debounce timer on unmount
-  useEffect(() => {
-    return () => {
-      if (debounceTimerRef.current) {
-        window.clearTimeout(debounceTimerRef.current)
-      }
-    }
-  }, [])
-
-  const handleProceed = useCallback(async () => {
-    if (!sessionId) return
-    setLoading(true)
-    try {
-      const res = await proceedToReview(sessionId)
-      setState(res.state)
-    } catch (err) {
-      console.error('Failed to proceed:', err)
-    } finally {
       setLoading(false)
     }
-  }, [sessionId])
-
-  const handleKeepRefining = useCallback(async () => {
-    if (!sessionId) return
-    await handleSend("Let's keep refining.")
-  }, [sessionId, handleSend])
+  }, [sessionId, dataset, executeAgentAction])
 
   const handleEditCriterion = useCallback(async (dimension: string, index: number, value: string) => {
     if (!sessionId) return
@@ -389,6 +294,49 @@ export default function App() {
     }
   }, [sessionId, state.charter.task])
 
+  const handleAddCriterion = useCallback(async (dimension: string, value: string) => {
+    if (!sessionId) return
+    const dim = dimension as 'coverage' | 'balance' | 'rot'
+    const currentCharter = charterRef.current
+    const newCriteria = [...currentCharter[dim].criteria, value]
+    const newDim = { ...currentCharter[dim], criteria: newCriteria }
+    charterRef.current = { ...charterRef.current, [dim]: newDim }
+    setState(prev => ({
+      ...prev,
+      charter: { ...prev.charter, [dim]: newDim }
+    }))
+    patchCharter(sessionId, { [dim]: newDim }).catch(err => {
+      console.error('Failed to add criterion:', err)
+    })
+  }, [sessionId])
+
+  const handleValidate = useCallback(async () => {
+    if (!sessionId) return
+    setLoading(true)
+    try {
+      const res = await validateCharter(sessionId)
+      setState(prev => ({ ...prev, validation: res.validation }))
+    } catch (err) {
+      console.error('Failed to validate:', err)
+    } finally {
+      setLoading(false)
+    }
+  }, [sessionId])
+
+  const handleSuggest = useCallback(async () => {
+    if (!sessionId) return
+    setLoading(true)
+    try {
+      const res = await suggestForCharter(sessionId)
+      setSuggestions(prev => [...prev, ...res.suggestions])
+      setSuggestedStories(prev => [...prev, ...res.suggested_stories])
+    } catch (err) {
+      console.error('Failed to get suggestions:', err)
+    } finally {
+      setLoading(false)
+    }
+  }, [sessionId])
+
   // Use a ref to track latest charter state for rapid updates
   const charterRef = useRef(state.charter)
   useEffect(() => {
@@ -398,10 +346,8 @@ export default function App() {
   const handleAcceptSuggestion = useCallback(async (suggestion: Suggestion) => {
     if (!sessionId) return
 
-    // Use ref to get latest charter state
     const currentCharter = charterRef.current
 
-    // Optimistically update the UI immediately
     if (suggestion.section === 'alignment' && suggestion.good && suggestion.bad) {
       const newEntry = {
         feature_area: suggestion.text,
@@ -410,13 +356,11 @@ export default function App() {
         status: 'pending' as const,
       }
       const newAlignment = [...currentCharter.alignment, newEntry]
-      // Update ref immediately for subsequent rapid calls
       charterRef.current = { ...charterRef.current, alignment: newAlignment }
       setState(prev => ({
         ...prev,
         charter: { ...prev.charter, alignment: newAlignment }
       }))
-      // Patch in background
       patchCharter(sessionId, { alignment: newAlignment }).catch(err => {
         console.error('Failed to accept suggestion:', err)
       })
@@ -424,27 +368,21 @@ export default function App() {
       const dim = suggestion.section as 'coverage' | 'balance' | 'rot'
       const newCriteria = [...currentCharter[dim].criteria, suggestion.text]
       const newDim = { ...currentCharter[dim], criteria: newCriteria }
-      // Update ref immediately for subsequent rapid calls
       charterRef.current = { ...charterRef.current, [dim]: newDim }
       setState(prev => ({
         ...prev,
         charter: { ...prev.charter, [dim]: newDim }
       }))
-      // Patch in background
       patchCharter(sessionId, { [dim]: newDim }).catch(err => {
         console.error('Failed to accept suggestion:', err)
       })
     }
 
     setSuggestions(prev => prev.filter(s => s !== suggestion))
-
-    const label = suggestion.section === 'alignment' ? suggestion.text : `"${suggestion.text}"`
-    sendDebouncedBackground(`${label} added to ${suggestion.section}.`)
-  }, [sessionId, sendDebouncedBackground])
+  }, [sessionId])
 
   const handleDismissSuggestion = useCallback((suggestion: Suggestion) => {
     setSuggestions(prev => prev.filter(s => s !== suggestion))
-    // Dismissals are tracked but don't need to be sent to AI unless you want feedback
   }, [])
 
   const handleAcceptStory = useCallback((story: SuggestedStory) => {
@@ -461,36 +399,23 @@ export default function App() {
       return [...prev, { role: story.who, stories: [{ what: story.what, why: story.why }] }]
     })
     setSuggestedStories(prev => prev.filter(s => s !== story))
-
-    const storyText = `As a ${story.who}, I want to ${story.what}${story.why ? ` in order to ${story.why}` : ''}`
-    sendDebouncedBackground(`New user story added: ${storyText}`)
-  }, [sendDebouncedBackground])
+  }, [])
 
   const handleDismissStory = useCallback((story: SuggestedStory) => {
     setSuggestedStories(prev => prev.filter(s => s !== story))
   }, [])
 
-  // --- Phase transition: charter → dataset ---
+  // --- Phase transition: charter -> dataset ---
 
   const handleStartDataset = useCallback(async () => {
     if (!sessionId) return
     setLoading(true)
     try {
-      // Finalize charter first
       await finalizeCharter(sessionId)
-
-      // Create dataset
       await createDataset(sessionId)
-
-      // Reload with examples
       const fullDs = await getDataset(sessionId)
       setDataset(fullDs)
-      selectColumn('examples')
-
-      setMessages(prev => [
-        ...prev,
-        { role: 'assistant', content: "Charter finalized. Let's build the dataset — you can import existing data or I can generate examples from the charter." },
-      ])
+      setActiveTab('examples')
     } catch (err) {
       console.error('Failed to start dataset:', err)
     } finally {
@@ -501,25 +426,14 @@ export default function App() {
   // --- Dataset phase handlers ---
 
   const handleSynthesize = useCallback(async (count?: number) => {
-    if (!dataset) {
-      console.error('No dataset available')
-      return
-    }
+    if (!dataset) return
     setLoading(true)
     try {
-      const res = await synthesizeExamples(dataset.id, count ? { count_per_scenario: count } : undefined)
+      await synthesizeExamples(dataset.id, count ? { count_per_scenario: count } : undefined)
       const fullDs = await getDataset(dataset.session_id)
       setDataset(fullDs)
-      setMessages(prev => [
-        ...prev,
-        { role: 'assistant', content: `Generated ${res.generated} examples. Review them and approve, edit, or reject.` },
-      ])
     } catch (err) {
       console.error('Failed to synthesize:', err)
-      setMessages(prev => [
-        ...prev,
-        { role: 'assistant', content: 'Failed to generate examples. Please check the backend logs.' },
-      ])
     } finally {
       setLoading(false)
     }
@@ -551,13 +465,9 @@ export default function App() {
     if (!dataset) return
     setLoading(true)
     try {
-      const res = await autoReviewExamples(dataset.id)
+      await autoReviewExamples(dataset.id)
       const fullDs = await getDataset(dataset.session_id)
       setDataset(fullDs)
-      setMessages(prev => [
-        ...prev,
-        { role: 'assistant', content: `Reviewed ${res.reviewed} examples. Check the judge verdicts and approve or reject.` },
-      ])
     } catch (err) {
       console.error('Failed to auto-review:', err)
     } finally {
@@ -609,7 +519,6 @@ export default function App() {
         let examples: Array<{ input: string; expected_output: string; feature_area?: string; label?: string }>
 
         if (file.name.endsWith('.csv')) {
-          // Simple CSV parsing
           const lines = text.split('\n').filter(l => l.trim())
           const headers = lines[0].split(',').map(h => h.trim().toLowerCase())
           examples = lines.slice(1).map(line => {
@@ -629,13 +538,9 @@ export default function App() {
         }
 
         const { importExamples } = await import('./api')
-        const res = await importExamples(dataset.id, examples)
+        await importExamples(dataset.id, examples)
         const fullDs = await getDataset(dataset.session_id)
         setDataset(fullDs)
-        setMessages(prev => [
-          ...prev,
-          { role: 'assistant', content: `Imported ${res.imported} examples. They're all pending review.` },
-        ])
       } catch (err) {
         console.error('Failed to import:', err)
       } finally {
@@ -647,199 +552,172 @@ export default function App() {
 
   // --- Render ---
 
-  // Initial state: only input column visible
-  const isInitialState = !showCharter
-
-  // Collapsed column component
-  const CollapsedColumn = ({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) => (
-    <div
-      onClick={onClick}
-      className="w-12 flex-shrink-0 border-r border-border bg-surface hover:bg-muted/50 cursor-pointer flex flex-col items-center pt-4 gap-1"
-      title={label}
-    >
-      {icon}
-      <span className="text-[10px] text-muted-foreground writing-mode-vertical" style={{ writingMode: 'vertical-rl', textOrientation: 'mixed' }}>
-        {label}
-      </span>
-    </div>
-  )
-
-  // Icons for collapsed columns
-  const InputIcon = (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-muted-foreground">
-      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-    </svg>
-  )
-
-  const CharterIcon = (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-muted-foreground">
-      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-      <polyline points="14 2 14 8 20 8" />
-      <line x1="16" y1="13" x2="8" y2="13" />
-      <line x1="16" y1="17" x2="8" y2="17" />
-      <polyline points="10 9 9 9 8 9" />
-    </svg>
-  )
-
-  const ExamplesIcon = (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-muted-foreground">
-      <line x1="8" y1="6" x2="21" y2="6" />
-      <line x1="8" y1="12" x2="21" y2="12" />
-      <line x1="8" y1="18" x2="21" y2="18" />
-      <line x1="3" y1="6" x2="3.01" y2="6" />
-      <line x1="3" y1="12" x2="3.01" y2="12" />
-      <line x1="3" y1="18" x2="3.01" y2="18" />
-    </svg>
-  )
-
   return (
-    <div className="h-screen flex bg-background">
-      {/* Column 1: Input */}
-      {isInitialState ? (
-        // Initial state: Input takes full width, content centered
-        <div className="flex-1 min-w-0 bg-surface flex justify-center">
-          <div className="w-full max-w-xl">
-            <InputColumn
-              goals={goals}
-              storyGroups={storyGroups}
-              onGoalsChange={setGoals}
-              onStoryGroupsChange={setStoryGroups}
-              suggestedStories={suggestedStories}
-              onAcceptStory={handleAcceptStory}
-              onDismissStory={handleDismissStory}
-              onHeaderClick={() => {}}
-              isFocused={true}
-              onGenerate={handleSubmitIntake}
-              canGenerate={!!goals.trim()}
-              loading={loading}
-              showGenerateButton={true}
-            />
-          </div>
-        </div>
-      ) : isColumnOpen('input') ? (
-        // Input expanded
-        <div className="flex-1 min-w-0 border-r border-border bg-surface">
-          <InputColumn
-            goals={goals}
-            storyGroups={storyGroups}
-            onGoalsChange={setGoals}
-            onStoryGroupsChange={setStoryGroups}
-            suggestedStories={suggestedStories}
-            onAcceptStory={handleAcceptStory}
-            onDismissStory={handleDismissStory}
-            onHeaderClick={() => selectColumn('input')}
-            isFocused={openColumns[0] === 'input'}
-            onGenerate={handleSubmitIntake}
-            canGenerate={!!goals.trim()}
-            loading={loading}
-            showGenerateButton={false}
+    <div className="h-screen flex flex-col bg-background">
+      {/* Tab bar */}
+      <div className="h-11 border-b border-border bg-surface-raised flex items-center justify-between px-2 flex-shrink-0">
+        <div className="flex items-center gap-1">
+          <TabButton
+            label="Input"
+            active={activeTab === 'input'}
+            onClick={() => setActiveTab('input')}
+          />
+          <TabButton
+            label="Charter"
+            active={activeTab === 'charter'}
+            onClick={() => setActiveTab('charter')}
+            disabled={!charterAvailable}
+            badge={suggestions.length > 0 ? `+${suggestions.length}` : undefined}
+          />
+          <TabButton
+            label="Examples"
+            active={activeTab === 'examples'}
+            onClick={() => setActiveTab('examples')}
+            disabled={!examplesAvailable}
+            badge={dataset ? `${dataset.examples?.length || 0}` : undefined}
           />
         </div>
-      ) : (
-        // Input collapsed
-        <CollapsedColumn icon={InputIcon} label="Input" onClick={() => selectColumn('input')} />
-      )}
-
-      {/* Column 2: Charter */}
-      {showCharter && (
-        isColumnOpen('charter') ? (
-          // Charter expanded
-          <div className="flex-1 min-w-0 flex flex-col border-r border-border">
-            <CharterPanel
-              charter={state.charter}
-              validation={state.validation}
-              activeCriteria={activeCriteria}
-              onEditCriterion={handleEditCriterion}
-              onEditAlignment={handleEditAlignment}
-              onEditTask={handleEditTask}
-              suggestions={suggestions}
-              onAcceptSuggestion={handleAcceptSuggestion}
-              onDismissSuggestion={handleDismissSuggestion}
-              onGenerate={handleSubmitIntake}
-              onRegenerate={handleSubmitIntake}
-              loading={loading}
-              hasSession={!!sessionId}
-              canGenerate={!!goals.trim()}
-              inputChanged={inputChanged}
-              onHeaderClick={() => selectColumn('charter')}
-              isFocused={openColumns[0] === 'charter'}
-              isCompact={false}
-            />
-            {hasCharter && !dataset && (
-              <div className="p-4 border-t border-border bg-surface-raised">
-                <button
-                  onClick={handleStartDataset}
-                  disabled={loading}
-                  className="w-full py-2.5 bg-success text-white rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-50 transition-opacity"
-                >
-                  {loading ? 'Starting...' : 'Finalize & start dataset'}
-                </button>
-              </div>
-            )}
-          </div>
-        ) : (
-          // Charter collapsed
-          <CollapsedColumn icon={CharterIcon} label="Charter" onClick={() => selectColumn('charter')} />
-        )
-      )}
-
-      {/* Column 3: Examples */}
-      {dataset && (
-        isColumnOpen('examples') ? (
-          // Examples expanded
-          <div className="flex-1 min-w-0 flex flex-col border-r border-border">
-            <ExampleReview
-              examples={dataset.examples || []}
-              charter={state.charter}
-              loading={loading}
-              onUpdateExample={handleUpdateExample}
-              onDeleteExample={handleDeleteExample}
-              onImport={handleImport}
-              onSynthesize={handleSynthesize}
-              onAutoReview={handleAutoReview}
-              onExport={handleExport}
-              onShowCoverageMap={handleShowCoverageMap}
-              onHeaderClick={() => selectColumn('examples')}
-              isFocused={openColumns[0] === 'examples'}
-            />
-          </div>
-        ) : (
-          // Examples collapsed
-          <CollapsedColumn icon={ExamplesIcon} label="Examples" onClick={() => selectColumn('examples')} />
-        )
-      )}
-
-      {/* Agent sidebar - appears after charter is generated */}
-      {showAgent && (
-        <div className="w-96 flex-shrink-0 bg-agent relative">
-          <ConversationPanel
-            messages={messages}
-            status={status}
-            validation={state.validation}
-            loading={loading}
-            onSend={handleSend}
-            onProceed={handleProceed}
-            onKeepRefining={handleKeepRefining}
-            actionSuggestions={actionSuggestions}
-            onActionSuggestion={(action) => {
-              // Execute the suggested action directly
-              executeAgentAction({ action })
-            }}
-          />
-          {/* Settings gear icon */}
+        <div className="flex items-center gap-1">
+          {sessionId && (
+            <button
+              onClick={() => setShowAssistant(!showAssistant)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                showAssistant
+                  ? 'bg-accent text-accent-foreground'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+              }`}
+            >
+              <MessageSquare className="w-3.5 h-3.5" />
+              AI Assist
+            </button>
+          )}
           <button
             onClick={() => setShowSettings(true)}
-            className="absolute top-3 right-3 w-7 h-7 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+            className="w-8 h-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
             title="Settings"
           >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M6.5 1.5h3l.5 2 1.5.7 1.8-1 2.1 2.1-1 1.8.7 1.5 2 .5v3l-2 .5-0.7 1.5 1 1.8-2.1 2.1-1.8-1-1.5.7-.5 2h-3l-.5-2-1.5-.7-1.8 1-2.1-2.1 1-1.8-.7-1.5-2-.5v-3l2-.5.7-1.5-1-1.8 2.1-2.1 1.8 1 1.5-.7z" />
-              <circle cx="8" cy="8" r="2" />
-            </svg>
+            <Settings className="w-4 h-4" />
           </button>
         </div>
-      )}
+      </div>
+
+      {/* Main content area */}
+      <div className="flex-1 flex min-h-0">
+        {/* Tab content */}
+        <div className="flex-1 min-w-0 flex flex-col">
+          {activeTab === 'input' && (
+            <div className="flex-1 min-h-0 bg-surface flex justify-center overflow-y-auto">
+              <div className="w-full max-w-2xl">
+                <InputColumn
+                  goals={goals}
+                  storyGroups={storyGroups}
+                  onGoalsChange={setGoals}
+                  onStoryGroupsChange={setStoryGroups}
+                  suggestedStories={suggestedStories}
+                  onAcceptStory={handleAcceptStory}
+                  onDismissStory={handleDismissStory}
+                  onHeaderClick={() => {}}
+                  isFocused={true}
+                  onGenerate={handleSubmitIntake}
+                  canGenerate={!!goals.trim()}
+                  loading={loading}
+                  showGenerateButton={true}
+                />
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'charter' && (
+            <div className="flex-1 min-h-0 flex flex-col">
+              <div className="flex-1 min-h-0 flex justify-center overflow-y-auto">
+                <div className="w-full max-w-2xl">
+                  <CharterPanel
+                    charter={state.charter}
+                    validation={state.validation}
+                    activeCriteria={activeCriteria}
+                    onEditCriterion={handleEditCriterion}
+                    onAddCriterion={handleAddCriterion}
+                    onEditAlignment={handleEditAlignment}
+                    onEditTask={handleEditTask}
+                    suggestions={suggestions}
+                    onAcceptSuggestion={handleAcceptSuggestion}
+                    onDismissSuggestion={handleDismissSuggestion}
+                    onGenerate={handleSubmitIntake}
+                    onRegenerate={handleSubmitIntake}
+                    onValidate={handleValidate}
+                    onSuggest={handleSuggest}
+                    loading={loading}
+                    hasSession={!!sessionId}
+                    canGenerate={!!goals.trim()}
+                    inputChanged={inputChanged}
+                    onHeaderClick={() => {}}
+                    isFocused={true}
+                    isCompact={false}
+                  />
+                </div>
+              </div>
+              {hasCharter && !dataset && (
+                <div className="p-4 border-t border-border bg-surface-raised flex justify-center">
+                  <button
+                    onClick={handleStartDataset}
+                    disabled={loading}
+                    className="px-8 py-2.5 bg-success text-white rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-50 transition-opacity"
+                  >
+                    {loading ? 'Starting...' : 'Finalize & start dataset'}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'examples' && dataset && (
+            <div className="flex-1 min-h-0 flex flex-col">
+              <ExampleReview
+                examples={dataset.examples || []}
+                charter={state.charter}
+                loading={loading}
+                onUpdateExample={handleUpdateExample}
+                onDeleteExample={handleDeleteExample}
+                onImport={handleImport}
+                onSynthesize={handleSynthesize}
+                onAutoReview={handleAutoReview}
+                onExport={handleExport}
+                onShowCoverageMap={handleShowCoverageMap}
+                onHeaderClick={() => {}}
+                isFocused={true}
+              />
+            </div>
+          )}
+        </div>
+
+        {/* Assistant drawer */}
+        {showAssistant && (
+          <div className="w-96 flex-shrink-0 border-l border-border bg-surface flex flex-col">
+            <div className="h-11 px-3 border-b border-border flex items-center justify-between flex-shrink-0">
+              <span className="text-xs font-medium text-foreground">AI Assistant</span>
+              <button
+                onClick={() => setShowAssistant(false)}
+                className="w-6 h-6 flex items-center justify-center rounded text-muted-foreground hover:text-foreground"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <ConversationPanel
+              messages={messages}
+              status={status}
+              validation={state.validation}
+              loading={loading}
+              onSend={handleSend}
+              onProceed={() => {}}
+              onKeepRefining={() => {}}
+              actionSuggestions={actionSuggestions}
+              onActionSuggestion={(action) => {
+                executeAgentAction({ action })
+              }}
+            />
+          </div>
+        )}
+      </div>
 
       {/* Coverage map overlay */}
       {showCoverageMap && gapAnalysis && (
@@ -854,5 +732,36 @@ export default function App() {
         <SettingsPanel onClose={() => setShowSettings(false)} />
       )}
     </div>
+  )
+}
+
+function TabButton({ label, active, onClick, disabled, badge }: {
+  label: string
+  active: boolean
+  onClick: () => void
+  disabled?: boolean
+  badge?: string
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+        active
+          ? 'bg-accent text-accent-foreground'
+          : disabled
+            ? 'text-muted-foreground/40 cursor-not-allowed'
+            : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+      }`}
+    >
+      {label}
+      {badge && (
+        <span className={`ml-1.5 px-1.5 py-0.5 rounded-full text-[10px] ${
+          active ? 'bg-accent-foreground/20' : 'bg-muted text-muted-foreground'
+        }`}>
+          {badge}
+        </span>
+      )}
+    </button>
   )
 }

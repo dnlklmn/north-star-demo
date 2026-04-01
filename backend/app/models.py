@@ -238,6 +238,16 @@ class UpdateSettingsRequest(BaseModel):
     creativity: Optional[float] = None
 
 
+class ValidateResponse(BaseModel):
+    validation: Validation
+    state: SessionState
+
+
+class SuggestResponse(BaseModel):
+    suggestions: list[Suggestion] = Field(default_factory=list)
+    suggested_stories: list[SuggestedStory] = Field(default_factory=list)
+
+
 class EnrichRequest(BaseModel):
     gap_type: str  # "coverage" | "balance" | "label" | "feature_area"
     targets: list[str]  # criteria names or feature area names

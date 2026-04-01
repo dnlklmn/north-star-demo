@@ -49,12 +49,16 @@ from .models import (
     SendMessageResponse,
     SessionState,
     Settings,
+    SuggestResponse,
     SynthesizeRequest,
     TaskDefinition,
     UpdateExampleRequest,
     UpdateSettingsRequest,
+    ValidateResponse,
 )
 from .tools import (
+    call_validate_charter,
+    call_generate_suggestions,
     call_synthesize_examples,
     call_review_examples,
     call_gap_analysis,
@@ -213,6 +217,47 @@ async def patch_charter(session_id: str, req: PatchCharterRequest):
     await _save_state(session_id, state, conversation)
 
     return {"state": state.model_dump()}
+
+
+@app.post("/sessions/{session_id}/validate", response_model=ValidateResponse)
+async def validate_charter(session_id: str):
+    """Run validation on the current charter and return results."""
+    state, conversation = await _load_state(session_id)
+
+    validation, call_meta = await call_validate_charter(state)
+    state.validation = validation
+
+    await _save_state(session_id, state, conversation)
+
+    # Log the turn
+    await db.create_turn(
+        session_id=session_id,
+        turn_type="validate",
+        input_snapshot=state.charter.model_dump(),
+        llm_calls=call_meta,
+        parsed_output=validation.model_dump(),
+    )
+
+    return ValidateResponse(validation=validation, state=state)
+
+
+@app.post("/sessions/{session_id}/suggest", response_model=SuggestResponse)
+async def suggest_for_charter(session_id: str):
+    """Generate suggestions for weak/empty charter sections."""
+    state, conversation = await _load_state(session_id)
+
+    (suggestions, stories), call_meta = await call_generate_suggestions(state)
+
+    # Log the turn
+    await db.create_turn(
+        session_id=session_id,
+        turn_type="suggest",
+        input_snapshot=state.charter.model_dump(),
+        llm_calls=call_meta,
+        parsed_output={"suggestions": [s.model_dump() for s in suggestions], "stories": [s.model_dump() for s in stories]},
+    )
+
+    return SuggestResponse(suggestions=suggestions, suggested_stories=stories)
 
 
 @app.post("/sessions/{session_id}/finalize", response_model=FinalizeResponse)
