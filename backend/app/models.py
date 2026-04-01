@@ -248,6 +248,14 @@ class SuggestResponse(BaseModel):
     suggested_stories: list[SuggestedStory] = Field(default_factory=list)
 
 
+class SuggestGoalsRequest(BaseModel):
+    goals: list[str]
+
+
+class SuggestGoalsResponse(BaseModel):
+    suggestions: list[str] = Field(default_factory=list)
+
+
 class EnrichRequest(BaseModel):
     gap_type: str  # "coverage" | "balance" | "label" | "feature_area"
     targets: list[str]  # criteria names or feature area names

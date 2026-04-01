@@ -3,19 +3,20 @@ import { MessageSquare, Settings, X } from 'lucide-react'
 import type { Message, SessionState, AgentStatus, StoryGroup, Suggestion, SuggestedStory, Dataset, Example, GapAnalysis } from './types'
 import {
   createSession, getSession, sendMessage, patchCharter, finalizeCharter,
-  validateCharter, suggestForCharter,
+  validateCharter, suggestForCharter, suggestGoals,
   createDataset, getDataset, synthesizeExamples, updateExample as apiUpdateExample,
   deleteExample as apiDeleteExample, autoReviewExamples, getGapAnalysis, exportDataset,
   datasetChat,
 } from './api'
-import InputColumn from './components/InputColumn'
+import GoalsPanel from './components/GoalsPanel'
+import UsersPanel from './components/UsersPanel'
 import CharterPanel from './components/CharterPanel'
 import ConversationPanel from './components/ConversationPanel'
 import ExampleReview from './components/ExampleReview'
 import CoverageMap from './components/CoverageMap'
 import SettingsPanel from './components/SettingsPanel'
 
-type ActiveTab = 'input' | 'charter' | 'examples'
+type ActiveTab = 'goals' | 'users' | 'charter' | 'examples'
 
 const EMPTY_STATE: SessionState = {
   session_id: '',
@@ -55,7 +56,7 @@ function formatStoryGroups(groups: StoryGroup[]): string {
 
 export default function App() {
   // --- Navigation ---
-  const [activeTab, setActiveTab] = useState<ActiveTab>('input')
+  const [activeTab, setActiveTab] = useState<ActiveTab>('goals')
   const [showAssistant, setShowAssistant] = useState(false)
 
   // --- Shared state ---
@@ -64,11 +65,15 @@ export default function App() {
   const [messages, setMessages] = useState<Message[]>([])
   const [loading, setLoading] = useState(false)
 
+  // --- Goals state ---
+  const [goals, setGoals] = useState<string[]>([''])
+  const [goalSuggestions, setGoalSuggestions] = useState<string[]>([])
+  const [goalSuggestionsLoading, setGoalSuggestionsLoading] = useState(false)
+
   // --- Charter phase state ---
   const [activeCriteria, setActiveCriteria] = useState<string[]>([])
   const [suggestions, setSuggestions] = useState<Suggestion[]>([])
   const [suggestedStories, setSuggestedStories] = useState<SuggestedStory[]>([])
-  const [goals, setGoals] = useState('')
   const [storyGroups, setStoryGroups] = useState<StoryGroup[]>([
     { role: '', stories: [{ what: '', why: '' }] },
   ])
@@ -86,23 +91,75 @@ export default function App() {
 
   const status: AgentStatus = state.agent_status
   const hasCharter = !!(state.charter.coverage.criteria.length || state.charter.alignment.length)
+  const nonEmptyGoals = goals.filter(g => g.trim())
 
   // Tab availability
+  const usersAvailable = nonEmptyGoals.length >= 2
   const charterAvailable = hasCharter || loading
   const examplesAvailable = !!dataset
 
   // Check if input has changed since charter was generated
   const inputChanged = useMemo(() => {
     if (!savedInput) return false
+    const currentGoals = nonEmptyGoals.join('\n')
     const currentStories = formatStoryGroups(storyGroups)
-    return goals.trim() !== savedInput.goals || currentStories !== savedInput.stories
-  }, [savedInput, goals, storyGroups])
+    return currentGoals !== savedInput.goals || currentStories !== savedInput.stories
+  }, [savedInput, nonEmptyGoals, storyGroups])
+
+  // --- Goals handlers ---
+
+  const handleGoalsChange = useCallback((newGoals: string[]) => {
+    setGoals(newGoals)
+  }, [])
+
+  const fetchGoalSuggestions = useCallback(async (currentGoals: string[]) => {
+    const nonEmpty = currentGoals.filter(g => g.trim())
+    if (nonEmpty.length === 0) return
+
+    setGoalSuggestionsLoading(true)
+    try {
+      const res = await suggestGoals(nonEmpty)
+      setGoalSuggestions(res.suggestions)
+    } catch (err) {
+      console.error('Failed to get goal suggestions:', err)
+    } finally {
+      setGoalSuggestionsLoading(false)
+    }
+  }, [])
+
+  // Fetch suggestions when a goal is committed (Enter pressed → new empty goal added)
+  const prevGoalsLengthRef = useRef(goals.length)
+  useEffect(() => {
+    const nonEmpty = goals.filter(g => g.trim())
+    // Trigger when goals array grows (Enter was pressed) and we have content
+    if (goals.length > prevGoalsLengthRef.current && nonEmpty.length > 0) {
+      fetchGoalSuggestions(goals)
+    }
+    prevGoalsLengthRef.current = goals.length
+  }, [goals.length, fetchGoalSuggestions])
+
+  const handleAcceptGoalSuggestion = useCallback((suggestion: string) => {
+    // Add the suggestion as a new goal (before the empty trailing input)
+    setGoals(prev => {
+      const lastIsEmpty = prev.length > 0 && prev[prev.length - 1].trim() === ''
+      if (lastIsEmpty) {
+        return [...prev.slice(0, -1), suggestion, '']
+      }
+      return [...prev, suggestion, '']
+    })
+    setGoalSuggestions(prev => prev.filter(s => s !== suggestion))
+  }, [])
+
+  const handleDismissGoalSuggestion = useCallback((suggestion: string) => {
+    setGoalSuggestions(prev => prev.filter(s => s !== suggestion))
+  }, [])
 
   // --- Charter phase handlers ---
 
   const handleSubmitIntake = useCallback(async () => {
+    const goalsText = nonEmptyGoals.join('\n')
     const storiesText = formatStoryGroups(storyGroups)
-    if (!goals.trim() && !storiesText) return
+    if (!goalsText && !storiesText) return
 
     setActiveTab('charter')
     setLoading(true)
@@ -110,7 +167,7 @@ export default function App() {
     try {
       if (!sessionId) {
         const res = await createSession({
-          business_goals: goals.trim() || undefined,
+          business_goals: goalsText || undefined,
           user_stories: storiesText || undefined,
         })
         setSessionId(res.session_id)
@@ -121,9 +178,9 @@ export default function App() {
         setState(session.state as SessionState)
         setSuggestions(res.suggestions || [])
         setSuggestedStories(res.suggested_stories || [])
-        setSavedInput({ goals: goals.trim(), stories: storiesText })
+        setSavedInput({ goals: goalsText, stories: storiesText })
       } else {
-        const updateMsg = `I've updated my input.\n\nBusiness goals: ${goals.trim()}\n\nUser stories:\n${storiesText}\n\nPlease regenerate the document with this updated input.`
+        const updateMsg = `I've updated my input.\n\nBusiness goals:\n${goalsText}\n\nUser stories:\n${storiesText}\n\nPlease regenerate the document with this updated input.`
         const res = await sendMessage(sessionId, updateMsg, { regenerate: true })
         setMessages(prev => [
           ...prev,
@@ -133,14 +190,14 @@ export default function App() {
         setState(res.state)
         setSuggestions(res.suggestions || [])
         setSuggestedStories(res.suggested_stories || [])
-        setSavedInput({ goals: goals.trim(), stories: storiesText })
+        setSavedInput({ goals: goalsText, stories: storiesText })
       }
     } catch (err) {
       console.error('Failed:', err)
     } finally {
       setLoading(false)
     }
-  }, [goals, storyGroups, sessionId])
+  }, [nonEmptyGoals, storyGroups, sessionId])
 
   // Execute an action from the agent
   const executeAgentAction = useCallback(async (action: { action: string; count?: number; example_id?: string }) => {
@@ -269,6 +326,22 @@ export default function App() {
     }
   }, [sessionId, state.charter])
 
+  const handleAddCriterion = useCallback(async (dimension: string, value: string) => {
+    if (!sessionId) return
+    const dim = dimension as 'coverage' | 'balance' | 'rot'
+    const currentCharter = charterRef.current
+    const newCriteria = [...currentCharter[dim].criteria, value]
+    const newDim = { ...currentCharter[dim], criteria: newCriteria }
+    charterRef.current = { ...charterRef.current, [dim]: newDim }
+    setState(prev => ({
+      ...prev,
+      charter: { ...prev.charter, [dim]: newDim }
+    }))
+    patchCharter(sessionId, { [dim]: newDim }).catch(err => {
+      console.error('Failed to add criterion:', err)
+    })
+  }, [sessionId])
+
   const handleEditAlignment = useCallback(async (index: number, field: 'good' | 'bad', value: string) => {
     if (!sessionId) return
     const alignment = [...state.charter.alignment]
@@ -293,22 +366,6 @@ export default function App() {
       console.error('Failed to save task edit:', err)
     }
   }, [sessionId, state.charter.task])
-
-  const handleAddCriterion = useCallback(async (dimension: string, value: string) => {
-    if (!sessionId) return
-    const dim = dimension as 'coverage' | 'balance' | 'rot'
-    const currentCharter = charterRef.current
-    const newCriteria = [...currentCharter[dim].criteria, value]
-    const newDim = { ...currentCharter[dim], criteria: newCriteria }
-    charterRef.current = { ...charterRef.current, [dim]: newDim }
-    setState(prev => ({
-      ...prev,
-      charter: { ...prev.charter, [dim]: newDim }
-    }))
-    patchCharter(sessionId, { [dim]: newDim }).catch(err => {
-      console.error('Failed to add criterion:', err)
-    })
-  }, [sessionId])
 
   const handleValidate = useCallback(async () => {
     if (!sessionId) return
@@ -558,9 +615,16 @@ export default function App() {
       <div className="h-11 border-b border-border bg-surface-raised flex items-center justify-between px-2 flex-shrink-0">
         <div className="flex items-center gap-1">
           <TabButton
-            label="Input"
-            active={activeTab === 'input'}
-            onClick={() => setActiveTab('input')}
+            label="Goals"
+            active={activeTab === 'goals'}
+            onClick={() => setActiveTab('goals')}
+            badge={nonEmptyGoals.length > 0 ? `${nonEmptyGoals.length}` : undefined}
+          />
+          <TabButton
+            label="Users"
+            active={activeTab === 'users'}
+            onClick={() => setActiveTab('users')}
+            disabled={!usersAvailable}
           />
           <TabButton
             label="Charter"
@@ -605,26 +669,30 @@ export default function App() {
       <div className="flex-1 flex min-h-0">
         {/* Tab content */}
         <div className="flex-1 min-w-0 flex flex-col">
-          {activeTab === 'input' && (
-            <div className="flex-1 min-h-0 bg-surface flex justify-center overflow-y-auto">
-              <div className="w-full max-w-2xl">
-                <InputColumn
-                  goals={goals}
-                  storyGroups={storyGroups}
-                  onGoalsChange={setGoals}
-                  onStoryGroupsChange={setStoryGroups}
-                  suggestedStories={suggestedStories}
-                  onAcceptStory={handleAcceptStory}
-                  onDismissStory={handleDismissStory}
-                  onHeaderClick={() => {}}
-                  isFocused={true}
-                  onGenerate={handleSubmitIntake}
-                  canGenerate={!!goals.trim()}
-                  loading={loading}
-                  showGenerateButton={true}
-                />
-              </div>
-            </div>
+          {activeTab === 'goals' && (
+            <GoalsPanel
+              goals={goals}
+              onGoalsChange={handleGoalsChange}
+              goalSuggestions={goalSuggestions}
+              onAcceptGoalSuggestion={handleAcceptGoalSuggestion}
+              onDismissGoalSuggestion={handleDismissGoalSuggestion}
+              suggestionsLoading={goalSuggestionsLoading}
+              onDefineUsers={() => setActiveTab('users')}
+            />
+          )}
+
+          {activeTab === 'users' && (
+            <UsersPanel
+              storyGroups={storyGroups}
+              onStoryGroupsChange={setStoryGroups}
+              suggestedStories={suggestedStories}
+              onAcceptStory={handleAcceptStory}
+              onDismissStory={handleDismissStory}
+              onBackToGoals={() => setActiveTab('goals')}
+              onGenerate={handleSubmitIntake}
+              canGenerate={nonEmptyGoals.length > 0}
+              loading={loading}
+            />
           )}
 
           {activeTab === 'charter' && (
@@ -648,7 +716,7 @@ export default function App() {
                     onSuggest={handleSuggest}
                     loading={loading}
                     hasSession={!!sessionId}
-                    canGenerate={!!goals.trim()}
+                    canGenerate={nonEmptyGoals.length > 0}
                     inputChanged={inputChanged}
                     onHeaderClick={() => {}}
                     isFocused={true}

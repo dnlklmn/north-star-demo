@@ -86,6 +86,18 @@ export async function suggestForCharter(
   return res.json()
 }
 
+export async function suggestGoals(
+  goals: string[]
+): Promise<{ suggestions: string[] }> {
+  const res = await fetch(`${BASE}/suggest-goals`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ goals }),
+  })
+  if (!res.ok) throw new Error(`Failed to suggest goals: ${res.status}`)
+  return res.json()
+}
+
 export async function finalizeCharter(
   sessionId: string
 ): Promise<{ charter_id: string; session_id: string; charter: Charter }> {

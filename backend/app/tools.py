@@ -204,6 +204,16 @@ async def call_generate_suggestions(state: SessionState) -> tuple[tuple[list[Sug
     return (suggestions, suggested_stories), [meta]
 
 
+async def call_suggest_goals(goals: list[str]) -> tuple[list[str], list[dict]]:
+    """Suggest additional business goals. Returns (suggestions, call metadata list)."""
+    from .prompt import build_suggest_goals_prompt
+    await _refresh_settings()
+    prompt = build_suggest_goals_prompt(goals)
+    text, meta = _call_llm(prompt, max_tokens=512)
+    data = _extract_json(text)
+    return data.get("suggestions", []), [meta]
+
+
 # --- Dataset phase tools ---
 
 async def call_synthesize_examples(

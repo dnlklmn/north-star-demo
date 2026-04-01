@@ -49,6 +49,8 @@ from .models import (
     SendMessageResponse,
     SessionState,
     Settings,
+    SuggestGoalsRequest,
+    SuggestGoalsResponse,
     SuggestResponse,
     SynthesizeRequest,
     TaskDefinition,
@@ -57,6 +59,7 @@ from .models import (
     ValidateResponse,
 )
 from .tools import (
+    call_suggest_goals,
     call_validate_charter,
     call_generate_suggestions,
     call_synthesize_examples,
@@ -113,6 +116,17 @@ async def _save_state(session_id: str, state: SessionState, conversation: list[d
 
 
 # --- Endpoints ---
+
+@app.post("/suggest-goals", response_model=SuggestGoalsResponse)
+async def suggest_goals(req: SuggestGoalsRequest):
+    """Suggest additional business goals based on current goals (stateless, no session)."""
+    non_empty = [g for g in req.goals if g.strip()]
+    if not non_empty:
+        return SuggestGoalsResponse(suggestions=[])
+
+    suggestions, _ = await call_suggest_goals(non_empty)
+    return SuggestGoalsResponse(suggestions=suggestions)
+
 
 @app.post("/sessions", response_model=CreateSessionResponse)
 async def create_session(req: CreateSessionRequest):

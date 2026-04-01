@@ -293,6 +293,29 @@ Rules:
 - Think about what the user PROBABLY means but hasn't said explicitly yet"""
 
 
+def build_suggest_goals_prompt(goals: list[str]) -> str:
+    goals_text = "\n".join(f"- {g}" for g in goals if g.strip())
+
+    return f"""You are helping a product person define business goals for an AI feature they are building.
+
+They have entered these goals so far:
+{goals_text}
+
+Suggest 2-4 additional business goals they likely haven't thought of yet. These should be:
+- Specific and concrete (not vague platitudes)
+- Complementary to what they already have (fill gaps, not repeat)
+- Written in the same style/voice as their existing goals
+- Focused on observable business outcomes
+
+Return ONLY valid JSON:
+{{
+  "suggestions": [
+    "goal text here",
+    "another goal text"
+  ]
+}}"""
+
+
 SECTION_1_ROLE = """You are a charter builder. Your job is to help product and business people define what good AI output looks like for their specific feature — in terms they can evaluate themselves, without technical knowledge.
 
 The output is a charter: a structured set of criteria that guides dataset creation and evaluation. You should feel like a thoughtful conversation partner, not a form.
