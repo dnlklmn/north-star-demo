@@ -44,64 +44,86 @@ Evolved from the spec's 2-panel layout to a 3-column layout:
 |-------|---------|-------|
 | Business goals, role-grouped user stories, suggested stories | Four dimensions with inline editing, suggestions, live completion | Chat with text selection → respond |
 
-Key UI decisions made during build:
-- Generate button lives in charter panel (empty state), not input column
-- Suggestions appear in both charter panel (criteria) and input column (stories)
-- Accepting a suggestion notifies the agent, which responds with implications
-- All charter items always editable (no review-gate)
-- Non-blocking: edit goals/stories/charter while agent thinks
-- Completion labels update immediately on local changes, before validation
-
 ### Database
 
 4 tables: `sessions`, `charters`, `turns`, `judgements`
 
-The `turns` table is the key addition beyond the original spec. It stores:
-- Input snapshot at time of call
-- Full LLM call metadata (prompt, raw response, tokens, latency)
-- Parsed output
-- Agent message shown to user
-- Suggestions returned
+---
+
+## Phase 3: Chat-First Discovery + Dataset (complete)
+
+Replaced the static input form with a structured, one-question-at-a-time conversational flow and added full dataset management.
+
+### Discovery flow
+
+Split discovery into 3 sub-phases: **goals → users → stories**. Each phase:
+- Agent asks one question per turn using consulting frameworks (issue tree decomposition, JTBD, MECE)
+- Extracts entities (goals, users, stories) from conversation via structured extraction blocks
+- Users can also edit extracted items directly in the left panel
+- Phase advances via explicit user action ("Move to Users →") or agent readiness signal
+
+### Charter improvements
+
+- **Flat layout** — removed collapsible cards, all sections visible
+- **Radar chart** — SVG spider chart showing all 4 dimension scores
+- **Unified progress bars** — percentage + action text + soft OK threshold marker
+- **Task definition** — 2-field (input/output) with multi-entry support
+- **Manual add** — "+ Add" buttons for criteria and alignment entries
+- **Debounced reevaluation** — 3-second timer on edits, then background re-validation
+
+### Dataset features
+
+- **Generate examples** — minimum coverage (1 per scenario) or custom amount via modal
+- **Import** from CSV/JSON files
+- **Auto-review** with LLM judge (label, confidence, reasoning per example)
+- **Coverage map** — criteria × feature area matrix with radar chart, gap detection
+- **Fill gaps** — generate targeted examples for uncovered scenarios
+- **Keyboard navigation** — arrow keys to navigate, A/R/E/L shortcuts for review
+- **Export** approved examples as JSON
+
+### 5-step progress bar
+
+Goals → Users → Stories → Charter → Dataset. Each step shows count badges, descriptions, and allows clicking back to completed steps.
+
+### Key technical decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| One question per turn | Prevents overwhelming users. Consulting methodology (issue trees, JTBD) ensures depth. |
+| Extraction blocks (not tool calls) | Simpler parsing, works with any model. Embedded in LLM response text. |
+| Deduplication by first 40 chars | Prevents re-extraction of previously identified items. Case-insensitive matching. |
+| Per-scenario → total count | User thinks in total examples, backend thinks in per-scenario. Modal handles conversion. |
+| Optimistic UI + debounced background | Non-blocking editing. User sees changes instantly, agent catches up after 3s debounce. |
 
 ---
 
-## Phase 3: Evaluate (next)
-
-The infrastructure is in place. Next steps:
+## Phase 4: Evaluate (next)
 
 ### Run evals on real sessions
 - Use the app to generate several charters with different inputs
 - Run `POST /judge/run` to score all turns
 - Compare judge scores against manual assessment
-- Identify where the agent is weakest (likely: over-generating criteria, vague alignment descriptions)
+- Identify where the agent is weakest
 
 ### Calibrate the judge
-- Run `north-star-eval.py` against the 6 labeled dataset examples
+- Run `north-star-eval.py` against the labeled dataset examples
 - Compare judge output to expected labels
-- Adjust judge prompts in `main.py:_build_judge_prompt()` based on disagreements
-- The judge should be conservative: false positives (calling weak output good) are worse than false negatives
+- Adjust judge prompts based on disagreements
 
 ### Fix known agent issues
-- **Over-generation**: agent sometimes produces 5+ criteria from sparse input. The prompt says not to, but it still does. Use judge data to measure how often.
-- **Chat regeneration**: agent sometimes regenerates the full charter on chat turns instead of making minimal updates. Need to tighten the conversational turn prompt.
-- **Sparse input**: spec calls for asking a clarifying question before generating when input is very thin. Not yet implemented.
-- **Brevity**: agent responses are still too verbose despite prompt instructions. May need stronger constraints or a post-processing step.
-
-### Build the feedback loop
-- Track which suggestions users accept vs dismiss (already captured in conversation history)
-- Track which charter items users edit after generation (captured via PATCH endpoint)
-- Use this data to improve suggestion quality and generation accuracy over time
+- **Over-generation**: agent sometimes produces 5+ criteria from sparse input
+- **Chat regeneration**: agent sometimes regenerates the full charter on chat turns
+- **Brevity**: agent responses still too verbose despite prompt instructions
 
 ---
 
-## Phase 4: Iterate (future)
+## Phase 5: Iterate (future)
 
-- Output specs per feature area (step 5 of methodology — not yet built)
-- Dataset generation from charter (step 6)
-- Judge prompt generation from charter (step 7)
+- Output specs per feature area
 - Multi-session charter comparison
 - Team collaboration (multiple users on one charter)
-- Document import (was cut from MVP)
+- Document import
+- Production feedback loops
 
 ---
 

@@ -1,54 +1,77 @@
 import { useState } from 'react'
-import { ChevronRight, Circle, RefreshCw, Sparkles, Upload, Link, FileText, Wand2, X, Loader2 } from 'lucide-react'
-import type { Charter, Validation, DimensionStatus, AlignmentEntry, Suggestion, TaskDefinition, DetectSchemaResponse, ImportFromUrlResponse } from '../types'
+import { Plus, Circle, Loader2 } from 'lucide-react'
+import type { Charter, Validation, DimensionStatus, AlignmentEntry, Suggestion, TaskDefinition, TaskEntry } from '../types'
+import RadarChart from './RadarChart'
 
 interface Props {
   charter: Charter
   validation: Validation
   activeCriteria: string[]
   onEditCriterion?: (dimension: string, index: number, value: string) => void
+  onAddCriterion?: (dimension: string, value: string) => void
   onEditAlignment?: (index: number, field: 'good' | 'bad', value: string) => void
+  onAddAlignment?: (entry: { feature_area: string; good: string; bad: string }) => void
   onEditTask?: (field: keyof TaskDefinition, value: string) => void
+  onEditTaskEntry?: (side: 'input' | 'output', index: number, entry: TaskEntry) => void
+  onAddTaskEntry?: (side: 'input' | 'output', entry: TaskEntry) => void
+  onDeleteTaskEntry?: (side: 'input' | 'output', index: number) => void
   suggestions?: Suggestion[]
   onAcceptSuggestion?: (suggestion: Suggestion) => void
   onDismissSuggestion?: (suggestion: Suggestion) => void
-  onGenerate?: () => void
-  onRegenerate?: () => void
   loading?: boolean
   hasSession?: boolean
-  canGenerate?: boolean
-  inputChanged?: boolean
-  onHeaderClick?: () => void
-  isFocused?: boolean
-  isCompact?: boolean
-  // Schema detection props
-  onDetectSchema?: (content: string, contentType: string) => Promise<DetectSchemaResponse>
-  onImportFromUrl?: (url: string) => Promise<ImportFromUrlResponse>
-  onApplyDetectedSchema?: (task: Partial<TaskDefinition>) => void
+  onSectionClick?: (section: string) => void
+  softOkThreshold?: number // 0-100, default 70
 }
+
+// --- Helpers ---
+
+function validationToPercent(status: string, dimensionStatus: DimensionStatus, criteriaCount: number): number {
+  if (criteriaCount === 0) return 0
+  const s = status !== 'untested' ? status : dimensionStatus
+  if (s === 'pass' || s === 'good') return 100
+  if (s === 'weak') return 50
+  if (s === 'fail') return 15
+  // pending with items
+  return criteriaCount > 0 ? 30 : 0
+}
+
+function percentToActionText(pct: number): string {
+  if (pct >= 100) return 'Complete'
+  if (pct >= 70) return 'Almost there'
+  if (pct >= 40) return 'Needs refinement'
+  if (pct > 0) return 'Needs work'
+  return 'Not started'
+}
+
+function percentToColor(pct: number): string {
+  if (pct >= 100) return 'bg-success'
+  if (pct >= 70) return 'bg-accent'
+  if (pct >= 40) return 'bg-warning'
+  return 'bg-danger'
+}
+
+// --- Main Component ---
 
 export default function CharterPanel({
   charter,
   validation,
   activeCriteria,
   onEditCriterion,
+  onAddCriterion,
   onEditAlignment,
+  onAddAlignment,
   onEditTask,
+  onEditTaskEntry,
+  onAddTaskEntry,
+  onDeleteTaskEntry,
   suggestions = [],
   onAcceptSuggestion,
   onDismissSuggestion,
-  onGenerate,
-  onRegenerate,
   loading,
   hasSession,
-  canGenerate = true,
-  inputChanged = false,
-  onHeaderClick,
-  isFocused,
-  isCompact,
-  onDetectSchema,
-  onImportFromUrl,
-  onApplyDetectedSchema,
+  onSectionClick,
+  softOkThreshold = 70,
 }: Props) {
   const isEmpty = !charter.coverage.criteria.length
     && !charter.balance.criteria.length
@@ -60,105 +83,123 @@ export default function CharterPanel({
   const alignmentSuggestions = suggestions.filter(s => s.section === 'alignment')
   const rotSuggestions = suggestions.filter(s => s.section === 'rot')
 
+  // Percentages for each section
+  const coveragePct = validationToPercent(validation.coverage, charter.coverage.status, charter.coverage.criteria.length)
+  const balancePct = validationToPercent(validation.balance, charter.balance.status, charter.balance.criteria.length)
+  const rotPct = validationToPercent(validation.rot, charter.rot.status, charter.rot.criteria.length)
+
+  // Alignment percentage
+  const alignPassCount = validation.alignment.filter(v => v.status === 'pass').length
+  const alignTotal = charter.alignment.length
+  const alignmentPct = alignTotal === 0 ? 0 : Math.round((alignPassCount / alignTotal) * 100)
+
   return (
     <div className="flex-1 overflow-hidden min-w-0 flex flex-col">
-      <div
-        onClick={onHeaderClick}
-        className={`px-4 h-12 border-b border-border bg-surface-raised flex-shrink-0 flex items-center justify-between ${
-          isFocused ? '' : 'hover:bg-muted/50 cursor-pointer'
-        }`}
-      >
-        <h2 className="text-sm font-semibold text-foreground">Charter</h2>
-        {hasSession && !isEmpty && onRegenerate && inputChanged && !isCompact && (
-          <button
-            onClick={(e) => { e.stopPropagation(); onRegenerate(); }}
-            disabled={loading}
-            className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 disabled:opacity-50"
-          >
-            <RefreshCw className="w-3 h-3" />
-            Regenerate
-          </button>
-        )}
-      </div>
-
       {isEmpty && suggestions.length === 0 ? (
         <div className="flex-1 flex items-center justify-center p-8">
           <div className="text-center max-w-xs">
-            <Sparkles className="w-8 h-8 text-muted-foreground mx-auto mb-3" />
-            <p className="text-sm text-muted-foreground mb-4">
-              Add your business goals and user stories, then generate a charter.
+            <p className="text-sm text-muted-foreground">
+              Charter will be generated from your discovery inputs.
             </p>
-            {onGenerate && (
-              <>
-                <button
-                  onClick={onGenerate}
-                  disabled={loading || !canGenerate}
-                  className="px-6 py-2.5 bg-accent text-accent-foreground rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-50 transition-opacity"
-                >
-                  {loading ? 'Generating...' : 'Generate charter'}
-                </button>
-                {!canGenerate && (
-                  <p className="text-xs text-muted-foreground mt-2">
-                    Add at least a business goal to get started.
-                  </p>
-                )}
-              </>
-            )}
           </div>
         </div>
       ) : (
-        <div className="flex-1 overflow-y-auto p-4 bg-surface space-y-3">
+        <div className="flex-1 overflow-y-auto p-6 space-y-8">
+          {/* Loading indicator */}
+          {loading && (
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              <span className="text-xs">Evaluating charter...</span>
+            </div>
+          )}
+
+          {/* --- Radar Chart Overview --- */}
+          <div className="flex justify-center">
+            <RadarChart
+              points={[
+                { label: 'Coverage', value: coveragePct },
+                { label: 'Balance', value: balancePct },
+                { label: 'Alignment', value: alignmentPct },
+                { label: 'Rot', value: rotPct },
+              ]}
+              threshold={softOkThreshold}
+              size={220}
+            />
+          </div>
+
+          {/* --- Task Definition --- */}
           <TaskSection
             task={charter.task}
             onEdit={onEditTask}
-            onDetectSchema={onDetectSchema}
-            onImportFromUrl={onImportFromUrl}
-            onApplyDetectedSchema={onApplyDetectedSchema}
+            onEditEntry={onEditTaskEntry}
+            onAddEntry={onAddTaskEntry}
+            onDeleteEntry={onDeleteTaskEntry}
           />
+
+          {/* --- Coverage --- */}
           <DimensionSection
             name="Coverage"
             description="Input scenarios to test"
             criteria={charter.coverage.criteria}
-            status={charter.coverage.status}
-            validationStatus={validation.coverage}
+            percent={coveragePct}
+            softOkThreshold={softOkThreshold}
             activeCriteria={activeCriteria}
-            onEdit={onEditCriterion ? (i, v) => onEditCriterion('coverage', i, v) : undefined}
+            dimension="coverage"
+            onEdit={onEditCriterion}
+            onAdd={onAddCriterion}
             suggestions={coverageSuggestions}
             onAcceptSuggestion={onAcceptSuggestion}
             onDismissSuggestion={onDismissSuggestion}
+            onHeaderClick={onSectionClick ? () => onSectionClick('coverage') : undefined}
           />
+
+          {/* --- Balance --- */}
           <DimensionSection
             name="Balance"
             description="What to weight more heavily"
             criteria={charter.balance.criteria}
-            status={charter.balance.status}
-            validationStatus={validation.balance}
+            percent={balancePct}
+            softOkThreshold={softOkThreshold}
             activeCriteria={activeCriteria}
-            onEdit={onEditCriterion ? (i, v) => onEditCriterion('balance', i, v) : undefined}
+            dimension="balance"
+            onEdit={onEditCriterion}
+            onAdd={onAddCriterion}
             suggestions={balanceSuggestions}
             onAcceptSuggestion={onAcceptSuggestion}
             onDismissSuggestion={onDismissSuggestion}
+            onHeaderClick={onSectionClick ? () => onSectionClick('balance') : undefined}
           />
+
+          {/* --- Alignment --- */}
           <AlignmentSection
             entries={charter.alignment}
             validations={validation.alignment}
+            percent={alignmentPct}
+            softOkThreshold={softOkThreshold}
             activeCriteria={activeCriteria}
             onEdit={onEditAlignment}
+            onAdd={onAddAlignment}
             suggestions={alignmentSuggestions}
             onAcceptSuggestion={onAcceptSuggestion}
             onDismissSuggestion={onDismissSuggestion}
+            onHeaderClick={onSectionClick ? () => onSectionClick('alignment') : undefined}
           />
+
+          {/* --- Rot --- */}
           <DimensionSection
             name="Rot"
             description="When to update"
             criteria={charter.rot.criteria}
-            status={charter.rot.status}
-            validationStatus={validation.rot}
+            percent={rotPct}
+            softOkThreshold={softOkThreshold}
             activeCriteria={activeCriteria}
-            onEdit={onEditCriterion ? (i, v) => onEditCriterion('rot', i, v) : undefined}
+            dimension="rot"
+            onEdit={onEditCriterion}
+            onAdd={onAddCriterion}
             suggestions={rotSuggestions}
             onAcceptSuggestion={onAcceptSuggestion}
             onDismissSuggestion={onDismissSuggestion}
+            onHeaderClick={onSectionClick ? () => onSectionClick('rot') : undefined}
           />
         </div>
       )}
@@ -166,363 +207,525 @@ export default function CharterPanel({
   )
 }
 
-function completionLabel(status: DimensionStatus | string, validationStatus: string, criteriaCount: number): string {
-  // If no criteria yet, show nothing
-  if (criteriaCount === 0) return ''
-  // Use validation status if available
-  const s = validationStatus !== 'untested' ? validationStatus : status
-  if (s === 'good' || s === 'pass') return 'complete'
-  if (s === 'weak') return '~50%'
-  if (s === 'fail') return 'needs work'
-  // Fallback: show criteria count when validation hasn't run yet
-  return `${criteriaCount} item${criteriaCount !== 1 ? 's' : ''}`
+// --- Progress Bar ---
+
+function ProgressBar({ percent, softOkThreshold }: { percent: number; softOkThreshold: number }) {
+  return (
+    <div className="relative h-1.5 bg-border rounded-full overflow-visible">
+      {/* Fill */}
+      <div
+        className={`h-full rounded-full transition-all duration-500 ${percentToColor(percent)}`}
+        style={{ width: `${Math.min(percent, 100)}%` }}
+      />
+      {/* Soft OK threshold marker */}
+      <div
+        className="absolute top-1/2 -translate-y-1/2 w-0.5 h-3 bg-muted-foreground/40 rounded-full"
+        style={{ left: `${softOkThreshold}%` }}
+        title={`Soft OK threshold: ${softOkThreshold}%`}
+      />
+    </div>
+  )
 }
 
-type ImportSource = 'paste' | 'url' | 'manual' | null
+// --- Task Section ---
 
 function TaskSection({
   task,
   onEdit,
-  onDetectSchema,
-  onImportFromUrl,
-  onApplyDetectedSchema,
+  onEditEntry,
+  onAddEntry,
+  onDeleteEntry,
 }: {
   task: TaskDefinition
   onEdit?: (field: keyof TaskDefinition, value: string) => void
-  onDetectSchema?: (content: string, contentType: string) => Promise<DetectSchemaResponse>
-  onImportFromUrl?: (url: string) => Promise<ImportFromUrlResponse>
-  onApplyDetectedSchema?: (task: Partial<TaskDefinition>) => void
+  onEditEntry?: (side: 'input' | 'output', index: number, entry: TaskEntry) => void
+  onAddEntry?: (side: 'input' | 'output', entry: TaskEntry) => void
+  onDeleteEntry?: (side: 'input' | 'output', index: number) => void
 }) {
-  const [expanded, setExpanded] = useState(true)
-  const [importSource, setImportSource] = useState<ImportSource>(null)
-  const [importing, setImporting] = useState(false)
-  const [importError, setImportError] = useState<string | null>(null)
-  const [pasteContent, setPasteContent] = useState('')
-  const [urlInput, setUrlInput] = useState('')
-  const [detectedResult, setDetectedResult] = useState<{ input_description: string; sample_input: string } | null>(null)
-
-  const hasContent = task.input_description || task.output_description
-  const canImport = onDetectSchema || onImportFromUrl
-
-  const handleDetectFromPaste = async () => {
-    if (!onDetectSchema || !pasteContent.trim()) return
-    setImporting(true)
-    setImportError(null)
-    try {
-      const result = await onDetectSchema(pasteContent, 'auto')
-      setDetectedResult({
-        input_description: result.input_description,
-        sample_input: result.sample_input,
-      })
-    } catch (err) {
-      setImportError(err instanceof Error ? err.message : 'Failed to detect schema')
-    } finally {
-      setImporting(false)
-    }
-  }
-
-  const handleImportFromUrl = async () => {
-    if (!onImportFromUrl || !urlInput.trim()) return
-    setImporting(true)
-    setImportError(null)
-    try {
-      const result = await onImportFromUrl(urlInput)
-      onApplyDetectedSchema?.(result.task)
-      setImportSource(null)
-      setUrlInput('')
-    } catch (err) {
-      setImportError(err instanceof Error ? err.message : 'Failed to import from URL')
-    } finally {
-      setImporting(false)
-    }
-  }
-
-  const handleApplyDetected = () => {
-    if (detectedResult && onApplyDetectedSchema) {
-      onApplyDetectedSchema({
-        input_description: detectedResult.input_description,
-        sample_input: detectedResult.sample_input,
-      })
-      setImportSource(null)
-      setPasteContent('')
-      setDetectedResult(null)
-    }
-  }
-
-  const handleCancelImport = () => {
-    setImportSource(null)
-    setPasteContent('')
-    setUrlInput('')
-    setDetectedResult(null)
-    setImportError(null)
-  }
-
   return (
-    <div className="border border-border rounded-lg bg-surface-raised">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center justify-between p-3 hover:bg-muted/50 transition-colors rounded-t-lg"
-      >
-        <div className="flex items-center gap-2">
-          <ChevronRight
-            className={`w-3.5 h-3.5 text-muted-foreground transition-transform ${expanded ? 'rotate-90' : ''}`}
-          />
-          <div>
-            <h3 className="text-sm font-medium text-foreground text-left">Task Definition</h3>
-            <p className="text-xs text-muted-foreground text-left">What your app receives and produces</p>
-          </div>
-        </div>
-        {hasContent && (
-          <span className="text-xs text-success">defined</span>
-        )}
-      </button>
-
-      {expanded && (
-        <div className="px-3 pb-3 space-y-2">
-          {/* Import Source Selector */}
-          {canImport && !importSource && (
-            <div className="flex items-center gap-2 py-2 border-b border-border mb-2">
-              <span className="text-xs text-muted-foreground">Import from:</span>
-              <button
-                onClick={() => setImportSource('paste')}
-                className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/10 rounded transition-colors"
-              >
-                <FileText className="w-3 h-3" />
-                Paste data
-              </button>
-              <button
-                onClick={() => setImportSource('url')}
-                className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/10 rounded transition-colors"
-              >
-                <Link className="w-3 h-3" />
-                URL
-              </button>
-              <button
-                onClick={() => setImportSource('manual')}
-                className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/10 rounded transition-colors"
-              >
-                <Wand2 className="w-3 h-3" />
-                Describe manually
-              </button>
-            </div>
-          )}
-
-          {/* Import Panel: Paste */}
-          {importSource === 'paste' && (
-            <div className="p-3 bg-accent/5 rounded-lg border border-accent/20 space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium text-foreground">Paste sample data</span>
-                <button onClick={handleCancelImport} className="text-muted-foreground hover:text-foreground">
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-              <textarea
-                value={pasteContent}
-                onChange={e => setPasteContent(e.target.value)}
-                placeholder="Paste a sample of your input data (JSON, CSV, or plain text)..."
-                className="w-full h-32 border border-border rounded px-3 py-2 bg-background text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-              />
-              {importError && (
-                <p className="text-xs text-danger">{importError}</p>
-              )}
-              {detectedResult ? (
-                <div className="space-y-2">
-                  <p className="text-xs text-muted-foreground">Detected format:</p>
-                  <p className="text-sm text-foreground">{detectedResult.input_description}</p>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={handleApplyDetected}
-                      className="px-3 py-1.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90"
-                    >
-                      Apply
-                    </button>
-                    <button
-                      onClick={() => setDetectedResult(null)}
-                      className="px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground"
-                    >
-                      Try again
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <button
-                  onClick={handleDetectFromPaste}
-                  disabled={importing || !pasteContent.trim()}
-                  className="flex items-center gap-2 px-3 py-1.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90 disabled:opacity-50"
-                >
-                  {importing && <Loader2 className="w-3 h-3 animate-spin" />}
-                  Detect format
-                </button>
-              )}
-            </div>
-          )}
-
-          {/* Import Panel: URL */}
-          {importSource === 'url' && (
-            <div className="p-3 bg-accent/5 rounded-lg border border-accent/20 space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium text-foreground">Import from URL</span>
-                <button onClick={handleCancelImport} className="text-muted-foreground hover:text-foreground">
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-              <input
-                type="url"
-                value={urlInput}
-                onChange={e => setUrlInput(e.target.value)}
-                placeholder="https://api.example.com/schema.json or OpenAPI spec URL..."
-                className="w-full border border-border rounded px-3 py-2 bg-background text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-accent"
-              />
-              <p className="text-xs text-muted-foreground">
-                Supports JSON data, OpenAPI/Swagger specs, or API documentation pages.
-              </p>
-              {importError && (
-                <p className="text-xs text-danger">{importError}</p>
-              )}
-              <button
-                onClick={handleImportFromUrl}
-                disabled={importing || !urlInput.trim()}
-                className="flex items-center gap-2 px-3 py-1.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90 disabled:opacity-50"
-              >
-                {importing && <Loader2 className="w-3 h-3 animate-spin" />}
-                Import
-              </button>
-            </div>
-          )}
-
-          {/* Import Panel: Manual (just shows the fields) */}
-          {importSource === 'manual' && (
-            <div className="p-3 bg-accent/5 rounded-lg border border-accent/20 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium text-foreground">Describe your format</span>
-                <button onClick={handleCancelImport} className="text-muted-foreground hover:text-foreground">
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-              <p className="text-xs text-muted-foreground mb-2">
-                Fill in the fields below to describe what your app receives and produces.
-              </p>
-            </div>
-          )}
-
-          {/* Regular fields - always shown unless in paste/url import mode */}
-          {(importSource === null || importSource === 'manual') && (
-            <>
-              <TaskField
-                label="Input"
-                placeholder="What does your app receive? (e.g., 'business goals + user stories')"
-                value={task.input_description}
-                onSave={v => onEdit?.('input_description', v)}
-              />
-              <TaskField
-                label="Output"
-                placeholder="What does your app produce? (e.g., 'structured charter JSON')"
-                value={task.output_description}
-                onSave={v => onEdit?.('output_description', v)}
-              />
-              <div className="mt-2 pt-2 border-t border-border space-y-2">
-                <TaskField
-                  label="Sample input"
-                  placeholder="Paste an example of what your app actually receives..."
-                  value={task.sample_input || ''}
-                  onSave={v => onEdit?.('sample_input', v)}
-                  multiline
-                />
-                <TaskField
-                  label="Sample output"
-                  placeholder="Paste an example of what your app actually produces..."
-                  value={task.sample_output || ''}
-                  onSave={v => onEdit?.('sample_output', v)}
-                  multiline
-                />
-              </div>
-            </>
-          )}
-        </div>
-      )}
-    </div>
+    <section>
+      <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-3">
+        Task Definition
+      </h3>
+      <div className="grid grid-cols-2 gap-6">
+        <TaskSide
+          label="Input"
+          description={task.input_description}
+          descriptionPlaceholder="What does your app receive?"
+          entries={task.input_entries || (task.sample_input ? [{ label: 'Sample', content: task.sample_input }] : [])}
+          onEditDescription={onEdit ? (v) => onEdit('input_description', v) : undefined}
+          onEditEntry={onEditEntry ? (i, e) => onEditEntry('input', i, e) : undefined}
+          onAddEntry={onAddEntry ? (e) => onAddEntry('input', e) : undefined}
+          onDeleteEntry={onDeleteEntry ? (i) => onDeleteEntry('input', i) : undefined}
+        />
+        <TaskSide
+          label="Output"
+          description={task.output_description}
+          descriptionPlaceholder="What does your app produce?"
+          entries={task.output_entries || (task.sample_output ? [{ label: 'Sample', content: task.sample_output }] : [])}
+          onEditDescription={onEdit ? (v) => onEdit('output_description', v) : undefined}
+          onEditEntry={onEditEntry ? (i, e) => onEditEntry('output', i, e) : undefined}
+          onAddEntry={onAddEntry ? (e) => onAddEntry('output', e) : undefined}
+          onDeleteEntry={onDeleteEntry ? (i) => onDeleteEntry('output', i) : undefined}
+        />
+      </div>
+    </section>
   )
 }
 
-function TaskField({
+function TaskSide({
   label,
-  placeholder,
-  value,
-  onSave,
-  multiline = false,
+  description,
+  descriptionPlaceholder,
+  entries,
+  onEditDescription,
+  onEditEntry,
+  onAddEntry,
+  onDeleteEntry,
 }: {
   label: string
-  placeholder: string
-  value: string
-  onSave?: (value: string) => void
-  multiline?: boolean
+  description: string
+  descriptionPlaceholder: string
+  entries: TaskEntry[]
+  onEditDescription?: (v: string) => void
+  onEditEntry?: (index: number, entry: TaskEntry) => void
+  onAddEntry?: (entry: TaskEntry) => void
+  onDeleteEntry?: (index: number) => void
 }) {
-  const [editing, setEditing] = useState(false)
-  const [text, setText] = useState(value)
+  const [editingDesc, setEditingDesc] = useState(false)
+  const [descText, setDescText] = useState(description)
+  const [showAdd, setShowAdd] = useState(false)
+  const [newLabel, setNewLabel] = useState('')
+  const [newContent, setNewContent] = useState('')
 
-  const handleSave = () => {
-    setEditing(false)
-    if (text !== value && onSave) onSave(text)
+  const handleSaveDesc = () => {
+    setEditingDesc(false)
+    if (descText !== description && onEditDescription) onEditDescription(descText)
   }
 
-  const handleCancel = () => {
-    setText(value)
-    setEditing(false)
-  }
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      handleSave()
-    }
-    if (e.key === 'Escape') {
-      handleCancel()
+  const handleAddEntry = () => {
+    if (newContent.trim() && onAddEntry) {
+      onAddEntry({ label: newLabel.trim() || 'Sample', content: newContent.trim() })
+      setNewLabel('')
+      setNewContent('')
+      setShowAdd(false)
     }
   }
 
   return (
-    <div className="pl-2">
-      <span className="text-xs font-medium text-muted-foreground">{label}:</span>
-      {editing ? (
-        <div className="mt-1">
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs font-medium text-foreground">{label}</span>
+        {onAddEntry && (
+          <button
+            onClick={() => setShowAdd(true)}
+            className="flex items-center gap-1 text-xs text-accent hover:text-accent/80"
+          >
+            <Plus className="w-3 h-3" />
+            Add
+          </button>
+        )}
+      </div>
+
+      {/* Description */}
+      {editingDesc ? (
+        <div className="mb-2">
           <textarea
-            value={text}
-            onChange={e => setText(e.target.value)}
-            onKeyDown={handleKeyDown}
+            value={descText}
+            onChange={e => setDescText(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Escape') { setDescText(description); setEditingDesc(false) }
+            }}
             autoFocus
-            placeholder={placeholder}
-            className="w-full border border-accent rounded px-2 py-1 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-accent text-xs"
-            rows={multiline ? 4 : 2}
+            placeholder={descriptionPlaceholder}
+            className="w-full border border-accent rounded px-2 py-1.5 bg-background text-foreground text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+            rows={3}
           />
           <div className="flex gap-1.5 mt-1">
             <button
-              onClick={handleSave}
+              onClick={handleSaveDesc}
               className="px-2 py-0.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90"
             >
               Save
             </button>
             <button
-              onClick={handleCancel}
+              onClick={() => { setDescText(description); setEditingDesc(false) }}
               className="px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground"
             >
               Cancel
             </button>
-            <span className="text-[10px] text-muted-foreground ml-auto self-center">
-              Enter to save · Esc to cancel
-            </span>
           </div>
         </div>
       ) : (
         <div
-          onClick={() => onSave && setEditing(true)}
-          className={`mt-0.5 text-xs whitespace-pre-wrap ${value ? 'text-foreground/80' : 'text-muted-foreground italic'} ${onSave ? 'cursor-pointer hover:bg-accent/5 rounded px-1 -mx-1 py-0.5' : ''}`}
+          onClick={() => onEditDescription && setEditingDesc(true)}
+          className={`text-xs mb-2 ${description ? 'text-foreground/80' : 'text-muted-foreground italic'} ${onEditDescription ? 'cursor-pointer hover:bg-accent/5 rounded px-1 -mx-1 py-0.5' : ''}`}
         >
-          {value || placeholder}
+          {description || descriptionPlaceholder}
+        </div>
+      )}
+
+      {/* Entries */}
+      <div className="space-y-1.5">
+        {entries.map((entry, i) => (
+          <EntryItem
+            key={i}
+            entry={entry}
+            onEdit={onEditEntry ? (e) => onEditEntry(i, e) : undefined}
+            onDelete={onDeleteEntry ? () => onDeleteEntry(i) : undefined}
+          />
+        ))}
+      </div>
+
+      {/* Add entry form */}
+      {showAdd && (
+        <div className="mt-2 p-2 rounded bg-surface border border-border space-y-1.5">
+          <input
+            autoFocus
+            className="w-full text-xs bg-transparent border-b border-border focus:border-accent outline-none pb-1"
+            placeholder="Label (e.g. JSON schema, sample, API spec...)"
+            value={newLabel}
+            onChange={e => setNewLabel(e.target.value)}
+          />
+          <textarea
+            className="w-full text-xs bg-transparent border border-border rounded px-2 py-1.5 focus:border-accent outline-none font-mono"
+            placeholder="Content..."
+            rows={3}
+            value={newContent}
+            onChange={e => setNewContent(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter' && e.metaKey) handleAddEntry()
+              if (e.key === 'Escape') { setShowAdd(false); setNewLabel(''); setNewContent('') }
+            }}
+          />
+          <div className="flex gap-1.5">
+            <button onClick={handleAddEntry} className="px-2 py-0.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90">
+              Add
+            </button>
+            <button onClick={() => { setShowAdd(false); setNewLabel(''); setNewContent('') }} className="px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground">
+              Cancel
+            </button>
+          </div>
         </div>
       )}
     </div>
   )
 }
+
+function EntryItem({
+  entry,
+  onEdit,
+  onDelete,
+}: {
+  entry: TaskEntry
+  onEdit?: (entry: TaskEntry) => void
+  onDelete?: () => void
+}) {
+  const [editing, setEditing] = useState(false)
+  const [content, setContent] = useState(entry.content)
+  const [label, setLabel] = useState(entry.label)
+
+  const handleSave = () => {
+    setEditing(false)
+    if ((content !== entry.content || label !== entry.label) && onEdit) {
+      onEdit({ label: label.trim() || entry.label, content })
+    }
+  }
+
+  if (editing) {
+    return (
+      <div className="p-2 rounded bg-surface border border-accent/30 space-y-1">
+        <input
+          className="w-full text-xs bg-transparent border-b border-accent outline-none pb-1"
+          value={label}
+          onChange={e => setLabel(e.target.value)}
+        />
+        <textarea
+          value={content}
+          onChange={e => setContent(e.target.value)}
+          onBlur={handleSave}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && e.metaKey) handleSave()
+            if (e.key === 'Escape') { setContent(entry.content); setLabel(entry.label); setEditing(false) }
+          }}
+          autoFocus
+          className="w-full text-xs font-mono bg-transparent border border-border rounded px-2 py-1 focus:border-accent outline-none"
+          rows={3}
+        />
+      </div>
+    )
+  }
+
+  return (
+    <div
+      onClick={() => onEdit && setEditing(true)}
+      className={`group p-2 rounded bg-surface text-xs ${onEdit ? 'cursor-pointer hover:bg-surface-raised' : ''}`}
+    >
+      <div className="flex items-center justify-between mb-0.5">
+        <span className="text-muted-foreground font-medium">{entry.label}</span>
+        {onDelete && (
+          <button
+            onClick={e => { e.stopPropagation(); onDelete() }}
+            className="text-muted-foreground hover:text-danger opacity-0 group-hover:opacity-100 text-xs"
+          >
+            remove
+          </button>
+        )}
+      </div>
+      <pre className="text-foreground/80 font-mono whitespace-pre-wrap break-words text-[11px] leading-relaxed max-h-24 overflow-hidden">
+        {entry.content}
+      </pre>
+    </div>
+  )
+}
+
+// --- Dimension Section ---
+
+function DimensionSection({
+  name,
+  description,
+  criteria,
+  percent,
+  softOkThreshold,
+  activeCriteria,
+  dimension,
+  onEdit,
+  onAdd,
+  suggestions = [],
+  onAcceptSuggestion,
+  onDismissSuggestion,
+  onHeaderClick,
+}: {
+  name: string
+  description: string
+  criteria: string[]
+  percent: number
+  softOkThreshold: number
+  activeCriteria: string[]
+  dimension: string
+  onEdit?: (dimension: string, index: number, value: string) => void
+  onAdd?: (dimension: string, value: string) => void
+  suggestions?: Suggestion[]
+  onAcceptSuggestion?: (s: Suggestion) => void
+  onDismissSuggestion?: (s: Suggestion) => void
+  onHeaderClick?: () => void
+}) {
+  const [showAdd, setShowAdd] = useState(false)
+  const [newValue, setNewValue] = useState('')
+  const actionText = percentToActionText(percent)
+
+  const handleAdd = () => {
+    if (newValue.trim() && onAdd) {
+      onAdd(dimension, newValue.trim())
+      setNewValue('')
+      setShowAdd(false)
+    }
+  }
+
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-1.5">
+        <div
+          onClick={onHeaderClick}
+          className={onHeaderClick ? 'cursor-pointer hover:text-accent transition-colors' : ''}
+          title={onHeaderClick ? 'Click to discuss in chat' : undefined}
+        >
+          <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">{name}</h3>
+          <p className="text-xs text-muted-foreground">{description}</p>
+        </div>
+        <div className="text-right flex-shrink-0 ml-4">
+          <span className="text-xs font-medium text-foreground">{percent}%</span>
+          <span className="text-xs text-muted-foreground ml-1.5">{actionText}</span>
+        </div>
+      </div>
+
+      <ProgressBar percent={percent} softOkThreshold={softOkThreshold} />
+
+      <div className="mt-3 space-y-1">
+        {criteria.map((criterion, i) => {
+          const isActive = activeCriteria.includes(`${dimension}_${i}`)
+          return (
+            <CriterionRow
+              key={i}
+              text={criterion}
+              active={isActive}
+              onEdit={onEdit ? (v) => onEdit(dimension, i, v) : undefined}
+            />
+          )
+        })}
+
+        {suggestions.map((s, i) => (
+          <SuggestionRow
+            key={`sug-${i}`}
+            suggestion={s}
+            onAccept={onAcceptSuggestion}
+            onDismiss={onDismissSuggestion}
+          />
+        ))}
+
+        {/* Add button */}
+        {showAdd ? (
+          <div className="flex items-start gap-2 pl-2 py-1">
+            <Circle className="w-1.5 h-1.5 mt-2 text-muted-foreground fill-current flex-shrink-0" />
+            <div className="flex-1">
+              <textarea
+                value={newValue}
+                onChange={e => setNewValue(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleAdd() }
+                  if (e.key === 'Escape') { setShowAdd(false); setNewValue('') }
+                }}
+                autoFocus
+                placeholder={`Add a ${name.toLowerCase()} criterion...`}
+                className="w-full text-sm border border-accent rounded px-2 py-1 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-accent"
+                rows={2}
+              />
+            </div>
+          </div>
+        ) : onAdd && (
+          <button
+            onClick={() => setShowAdd(true)}
+            className="flex items-center gap-1.5 pl-2 py-1 text-xs text-accent hover:text-accent/80"
+          >
+            <Plus className="w-3 h-3" />
+            Add
+          </button>
+        )}
+      </div>
+    </section>
+  )
+}
+
+// --- Alignment Section ---
+
+function AlignmentSection({
+  entries,
+  validations,
+  percent,
+  softOkThreshold,
+  activeCriteria,
+  onEdit,
+  onAdd,
+  suggestions = [],
+  onAcceptSuggestion,
+  onDismissSuggestion,
+  onHeaderClick,
+}: {
+  entries: AlignmentEntry[]
+  validations: { feature_area: string; status: string; weak_reason: string | null }[]
+  percent: number
+  softOkThreshold: number
+  activeCriteria: string[]
+  onEdit?: (index: number, field: 'good' | 'bad', value: string) => void
+  onAdd?: (entry: { feature_area: string; good: string; bad: string }) => void
+  suggestions?: Suggestion[]
+  onAcceptSuggestion?: (s: Suggestion) => void
+  onDismissSuggestion?: (s: Suggestion) => void
+  onHeaderClick?: () => void
+}) {
+  const [showAdd, setShowAdd] = useState(false)
+  const [newArea, setNewArea] = useState('')
+  const [newGood, setNewGood] = useState('')
+  const [newBad, setNewBad] = useState('')
+  const actionText = percentToActionText(percent)
+
+  const handleAdd = () => {
+    if (newArea.trim() && newGood.trim() && newBad.trim() && onAdd) {
+      onAdd({ feature_area: newArea.trim(), good: newGood.trim(), bad: newBad.trim() })
+      setNewArea(''); setNewGood(''); setNewBad('')
+      setShowAdd(false)
+    }
+  }
+
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-1.5">
+        <div
+          onClick={onHeaderClick}
+          className={onHeaderClick ? 'cursor-pointer hover:text-accent transition-colors' : ''}
+          title={onHeaderClick ? 'Click to discuss in chat' : undefined}
+        >
+          <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Alignment</h3>
+          <p className="text-xs text-muted-foreground">What good vs bad looks like</p>
+        </div>
+        <div className="text-right flex-shrink-0 ml-4">
+          <span className="text-xs font-medium text-foreground">{percent}%</span>
+          <span className="text-xs text-muted-foreground ml-1.5">{actionText}</span>
+        </div>
+      </div>
+
+      <ProgressBar percent={percent} softOkThreshold={softOkThreshold} />
+
+      <div className="mt-3 space-y-2">
+        {entries.map((entry, i) => {
+          const val = validations.find(v => v.feature_area === entry.feature_area)
+          const isActive = activeCriteria.includes(`alignment_${entry.feature_area}`)
+          return (
+            <AlignmentRow
+              key={i}
+              entry={entry}
+              validation={val}
+              active={isActive}
+              onEdit={onEdit ? (field, value) => onEdit(i, field, value) : undefined}
+            />
+          )
+        })}
+
+        {suggestions.map((s, i) => (
+          <SuggestionRow
+            key={`sug-${i}`}
+            suggestion={s}
+            onAccept={onAcceptSuggestion}
+            onDismiss={onDismissSuggestion}
+          />
+        ))}
+
+        {/* Add button */}
+        {showAdd ? (
+          <div className="p-2 rounded bg-surface border border-accent/30 space-y-1.5">
+            <input
+              autoFocus
+              className="w-full text-sm bg-transparent border-b border-border focus:border-accent outline-none pb-1"
+              placeholder="Feature area..."
+              value={newArea}
+              onChange={e => setNewArea(e.target.value)}
+            />
+            <input
+              className="w-full text-xs bg-transparent border-b border-border focus:border-accent outline-none pb-1 text-success"
+              placeholder="What good looks like..."
+              value={newGood}
+              onChange={e => setNewGood(e.target.value)}
+            />
+            <input
+              className="w-full text-xs bg-transparent border-b border-border focus:border-accent outline-none pb-1 text-danger"
+              placeholder="What bad looks like..."
+              value={newBad}
+              onChange={e => setNewBad(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') handleAdd()
+                if (e.key === 'Escape') { setShowAdd(false); setNewArea(''); setNewGood(''); setNewBad('') }
+              }}
+            />
+            <div className="flex gap-1.5">
+              <button onClick={handleAdd} className="px-2 py-0.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90">Add</button>
+              <button onClick={() => { setShowAdd(false); setNewArea(''); setNewGood(''); setNewBad('') }} className="px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground">Cancel</button>
+            </div>
+          </div>
+        ) : onAdd && (
+          <button
+            onClick={() => setShowAdd(true)}
+            className="flex items-center gap-1.5 pl-2 py-1 text-xs text-accent hover:text-accent/80"
+          >
+            <Plus className="w-3 h-3" />
+            Add
+          </button>
+        )}
+      </div>
+    </section>
+  )
+}
+
+// --- Shared Sub-components ---
 
 function SuggestionRow({
   suggestion,
@@ -534,7 +737,7 @@ function SuggestionRow({
   onDismiss?: (s: Suggestion) => void
 }) {
   return (
-    <div className="flex items-start gap-2 py-1.5 px-2 bg-accent/5 rounded mb-1">
+    <div className="flex items-start gap-2 py-1.5 px-2 bg-accent/5 rounded">
       <span className="text-accent font-bold text-xs mt-0.5">+</span>
       <span className="flex-1 text-sm text-foreground">
         {suggestion.text}
@@ -562,181 +765,6 @@ function SuggestionRow({
   )
 }
 
-function DimensionSection({
-  name,
-  description,
-  criteria,
-  status,
-  validationStatus,
-  activeCriteria,
-  onEdit,
-  suggestions = [],
-  onAcceptSuggestion,
-  onDismissSuggestion,
-}: {
-  name: string
-  description: string
-  criteria: string[]
-  status: DimensionStatus
-  validationStatus: string
-  activeCriteria: string[]
-  onEdit?: (index: number, value: string) => void
-  suggestions?: Suggestion[]
-  onAcceptSuggestion?: (s: Suggestion) => void
-  onDismissSuggestion?: (s: Suggestion) => void
-}) {
-  const [expanded, setExpanded] = useState(true)
-  const hasSuggestions = suggestions.length > 0
-  const label = completionLabel(status, validationStatus, criteria.length)
-
-  return (
-    <div className="border border-border rounded-lg bg-surface-raised">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center justify-between p-3 hover:bg-muted/50 transition-colors rounded-t-lg"
-      >
-        <div className="flex items-center gap-2">
-          <ChevronRight
-            className={`w-3.5 h-3.5 text-muted-foreground transition-transform ${expanded ? 'rotate-90' : ''}`}
-          />
-          <div>
-            <h3 className="text-sm font-medium text-foreground text-left">{name}</h3>
-            <p className="text-xs text-muted-foreground text-left">{description}</p>
-          </div>
-          {hasSuggestions && !expanded && (
-            <span className="text-xs text-accent font-medium">
-              +{suggestions.length}
-            </span>
-          )}
-        </div>
-        {label && (
-          <span className={`text-xs ${
-            label === 'complete' ? 'text-success' :
-            label.includes('item') ? 'text-muted-foreground' :
-            label === '~50%' ? 'text-warning' :
-            'text-danger'
-          }`}>
-            {label}
-          </span>
-        )}
-      </button>
-
-      {expanded && (
-        <div className="px-3 pb-3 space-y-1">
-          {criteria.map((criterion, i) => {
-            const isActive = activeCriteria.includes(`${name.toLowerCase()}_${i}`)
-            return (
-              <CriterionRow
-                key={i}
-                text={criterion}
-                active={isActive}
-                onEdit={onEdit ? (v) => onEdit(i, v) : undefined}
-              />
-            )
-          })}
-          {criteria.length === 0 && !hasSuggestions && (
-            <p className="pl-5 text-xs text-muted-foreground italic">No criteria yet</p>
-          )}
-          {suggestions.map((s, i) => (
-            <SuggestionRow
-              key={`sug-${i}`}
-              suggestion={s}
-              onAccept={onAcceptSuggestion}
-              onDismiss={onDismissSuggestion}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function AlignmentSection({
-  entries,
-  validations,
-  activeCriteria,
-  onEdit,
-  suggestions = [],
-  onAcceptSuggestion,
-  onDismissSuggestion,
-}: {
-  entries: AlignmentEntry[]
-  validations: { feature_area: string; status: string; weak_reason: string | null }[]
-  activeCriteria: string[]
-  onEdit?: (index: number, field: 'good' | 'bad', value: string) => void
-  suggestions?: Suggestion[]
-  onAcceptSuggestion?: (s: Suggestion) => void
-  onDismissSuggestion?: (s: Suggestion) => void
-}) {
-  const [expanded, setExpanded] = useState(true)
-
-  const passCount = validations.filter(v => v.status === 'pass' || v.status === 'good').length
-  const total = entries.length
-  const hasSuggestions = suggestions.length > 0
-  const hasValidation = validations.length > 0
-  const label = total === 0 ? '' : hasValidation
-    ? (passCount === total ? 'complete' : `${Math.round((passCount / total) * 100)}%`)
-    : `${total} item${total !== 1 ? 's' : ''}`
-
-  return (
-    <div className="border border-border rounded-lg bg-surface-raised">
-      <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center justify-between p-3 hover:bg-muted/50 transition-colors rounded-t-lg"
-      >
-        <div className="flex items-center gap-2">
-          <ChevronRight
-            className={`w-3.5 h-3.5 text-muted-foreground transition-transform ${expanded ? 'rotate-90' : ''}`}
-          />
-          <div>
-            <h3 className="text-sm font-medium text-foreground text-left">Alignment</h3>
-            <p className="text-xs text-muted-foreground text-left">What good vs bad looks like</p>
-          </div>
-          {hasSuggestions && !expanded && (
-            <span className="text-xs text-accent font-medium">
-              +{suggestions.length}
-            </span>
-          )}
-        </div>
-        {label && (
-          <span className={`text-xs ${label === 'complete' ? 'text-success' : label.includes('item') ? 'text-muted-foreground' : 'text-warning'}`}>
-            {label}
-          </span>
-        )}
-      </button>
-
-      {expanded && (
-        <div className="px-3 pb-3 space-y-2">
-          {entries.map((entry, i) => {
-            const val = validations.find(v => v.feature_area === entry.feature_area)
-            const isActive = activeCriteria.includes(`alignment_${entry.feature_area}`)
-            return (
-              <AlignmentRow
-                key={i}
-                entry={entry}
-                validation={val}
-                active={isActive}
-                onEdit={onEdit ? (field, value) => onEdit(i, field, value) : undefined}
-              />
-            )
-          })}
-          {entries.length === 0 && !hasSuggestions && (
-            <p className="pl-5 text-xs text-muted-foreground italic">No alignment entries yet</p>
-          )}
-          {suggestions.map((s, i) => (
-            <SuggestionRow
-              key={`sug-${i}`}
-              suggestion={s}
-              onAccept={onAcceptSuggestion}
-              onDismiss={onDismissSuggestion}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
 function CriterionRow({
   text,
   active,
@@ -751,20 +779,7 @@ function CriterionRow({
 
   const handleBlur = () => {
     setEditing(false)
-    if (value !== text && onEdit) {
-      onEdit(value)
-    }
-  }
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      handleBlur()
-    }
-    if (e.key === 'Escape') {
-      setValue(text)
-      setEditing(false)
-    }
+    if (value !== text && onEdit) onEdit(value)
   }
 
   return (
@@ -775,7 +790,10 @@ function CriterionRow({
           value={value}
           onChange={e => setValue(e.target.value)}
           onBlur={handleBlur}
-          onKeyDown={handleKeyDown}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleBlur() }
+            if (e.key === 'Escape') { setValue(text); setEditing(false) }
+          }}
           autoFocus
           className="flex-1 text-sm border border-accent rounded px-2 py-1 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-accent"
           rows={2}
@@ -804,14 +822,13 @@ function AlignmentRow({
   onEdit?: (field: 'good' | 'bad', value: string) => void
 }) {
   const [showDetail, setShowDetail] = useState(false)
-  const status = validation?.status || 'pending'
 
   return (
     <div className={`pl-2 py-1 ${active ? 'bg-accent/5 rounded' : ''}`}>
       <div className="flex items-center gap-2">
         <Circle className="w-1.5 h-1.5 text-muted-foreground fill-current flex-shrink-0" />
         <span className="text-sm font-medium text-foreground">{entry.feature_area}</span>
-        {(status === 'weak' || status === 'fail') && validation?.weak_reason && (
+        {validation?.weak_reason && (
           <button
             onClick={() => setShowDetail(!showDetail)}
             className="text-xs text-warning hover:opacity-80"
@@ -828,18 +845,8 @@ function AlignmentRow({
       )}
 
       <div className="ml-4 mt-1 space-y-1">
-        <EditableField
-          label="Good"
-          value={entry.good}
-          color="text-success"
-          onSave={v => onEdit?.('good', v)}
-        />
-        <EditableField
-          label="Bad"
-          value={entry.bad}
-          color="text-danger"
-          onSave={v => onEdit?.('bad', v)}
-        />
+        <EditableField label="Good" value={entry.good} color="text-success" onSave={v => onEdit?.('good', v)} />
+        <EditableField label="Bad" value={entry.bad} color="text-danger" onSave={v => onEdit?.('bad', v)} />
       </div>
     </div>
   )
@@ -872,6 +879,10 @@ function EditableField({
           value={text}
           onChange={e => setText(e.target.value)}
           onBlur={handleBlur}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleBlur() }
+            if (e.key === 'Escape') { setText(value); setEditing(false) }
+          }}
           autoFocus
           className="w-full border border-accent rounded px-1 py-0.5 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-accent text-xs"
           rows={2}

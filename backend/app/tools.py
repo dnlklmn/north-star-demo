@@ -22,10 +22,12 @@ from .models import (
     SessionState,
     Suggestion,
     SuggestedStory,
+    TaskDefinition,
     Validation,
     ValidationStatus,
 )
 from .prompt import (
+    build_discovery_turn_prompt,
     build_generate_draft_prompt,
     build_validate_charter_prompt,
     build_conversational_turn_prompt,
@@ -91,14 +93,20 @@ def _call_llm(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
     # Map creativity (0-1) to temperature (0-1)
     temperature = creativity
 
+    logger.info(f"_call_llm: model={model}, max_tokens={max_tokens}, prompt_len={len(prompt)}")
     start = time.time()
-    response = get_client().messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    try:
+        response = get_client().messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as e:
+        logger.error(f"_call_llm FAILED: {type(e).__name__}: {e}")
+        raise
     elapsed_ms = int((time.time() - start) * 1000)
+    logger.info(f"_call_llm: OK in {elapsed_ms}ms, output_tokens={response.usage.output_tokens}")
     text = response.content[0].text if response.content else ""
     metadata = {
         "model": model,
@@ -114,6 +122,32 @@ def _call_llm(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
 
 # --- LLM call wrappers ---
 
+async def call_discovery_turn(state: SessionState, user_message: str | None) -> tuple[str, dict | None, list[dict]]:
+    """Run a discovery turn. Returns (conversational_text, extraction_data, call metadata list).
+
+    extraction_data is a dict with keys: goals, stories, ready_for_charter
+    """
+    await _refresh_settings()
+    prompt = build_discovery_turn_prompt(state, user_message)
+    text, meta = _call_llm(prompt, max_tokens=2048)
+
+    # Parse extraction block
+    extraction = None
+    clean_text = text
+    if "```extraction" in text:
+        try:
+            start = text.index("```extraction") + len("```extraction")
+            end = text.index("```", start)
+            extraction_json = text[start:end].strip()
+            extraction = json.loads(extraction_json)
+            clean_text = text[:text.index("```extraction")] + text[end + 3:]
+        except (ValueError, json.JSONDecodeError) as e:
+            logger.warning(f"Failed to parse extraction block: {e}")
+
+    clean_text = clean_text.strip()
+    return clean_text, extraction, [meta]
+
+
 async def call_generate_draft(state: SessionState) -> tuple[Charter, list[dict]]:
     """Generate a charter draft. Returns (parsed Charter, call metadata list)."""
     await _refresh_settings()
@@ -121,7 +155,14 @@ async def call_generate_draft(state: SessionState) -> tuple[Charter, list[dict]]
     text, meta = _call_llm(prompt, max_tokens=4096)
     charter_data = _extract_json(text)
 
+    task_data = charter_data.get("task", {})
     charter = Charter(
+        task=TaskDefinition(
+            input_description=task_data.get("input_description", ""),
+            output_description=task_data.get("output_description", ""),
+            sample_input=task_data.get("sample_input"),
+            sample_output=task_data.get("sample_output"),
+        ),
         coverage=DimensionCriteria(
             criteria=charter_data.get("coverage", {}).get("criteria", []),
             status=DimensionStatus.pending,
@@ -374,4 +415,8 @@ def _extract_json(text: str) -> dict:
     end = text.rfind("}") + 1
     if start >= 0 and end > start:
         text = text[start:end]
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse LLM JSON response: {e}\nText: {text[:500]}")
+        return {}

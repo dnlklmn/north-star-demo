@@ -26,7 +26,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import db
-from .agent import run_agent_turn, run_dataset_chat
+from .agent import run_agent_turn, run_dataset_chat, advance_phase
 from .models import (
     AgentStatus,
     Charter,
@@ -44,6 +44,9 @@ from .models import (
     ImportFromUrlResponse,
     InferSchemaResponse,
     PatchCharterRequest,
+    PatchGoalsRequest,
+    PatchUsersRequest,
+    PatchStoriesRequest,
     ProceedResponse,
     SendMessageRequest,
     SendMessageResponse,
@@ -108,6 +111,15 @@ async def _save_state(session_id: str, state: SessionState, conversation: list[d
     await db.update_session(session_id, state.model_dump(), conversation)
 
 
+def _get_phase(state: SessionState) -> str:
+    """Derive the current phase from session state."""
+    has_charter = bool(state.charter.coverage.criteria or state.charter.alignment)
+    if has_charter:
+        return "charter"
+    # Return the specific discovery sub-phase: goals, users, or stories
+    return state.discovery_phase.value if hasattr(state.discovery_phase, 'value') else state.discovery_phase
+
+
 # --- Endpoints ---
 
 @app.post("/sessions", response_model=CreateSessionResponse)
@@ -117,25 +129,26 @@ async def create_session(req: CreateSessionRequest):
     state = SessionState(
         session_id=session_id,
         input=req.initial_input,
-        agent_status=AgentStatus.drafting,
+        agent_status=AgentStatus.discovery,
     )
 
     await db.create_session(session_id, state.model_dump())
 
-    # Run initial agent turn
+    # Run initial agent turn (discovery greeting or generate if input provided)
     initial_input_parts = []
     if req.initial_input.business_goals:
         initial_input_parts.append(f"Business goals: {req.initial_input.business_goals}")
     if req.initial_input.user_stories:
         initial_input_parts.append(f"User stories: {req.initial_input.user_stories}")
 
-    result = None
     if initial_input_parts:
         user_msg = "\n\n".join(initial_input_parts)
         result = await run_agent_turn(state, user_msg)
-        agent_message = result.message
     else:
-        agent_message = "Tell me about the AI feature you're building — what does it do, and what does a good result look like?"
+        # Start with discovery — no user message yet
+        result = await run_agent_turn(state)
+
+    agent_message = result.message
 
     conversation = state.input.conversation_history.copy()
     await _save_state(session_id, state, conversation)
@@ -144,8 +157,18 @@ async def create_session(req: CreateSessionRequest):
         session_id=session_id,
         agent_status=state.agent_status,
         message=agent_message,
-        suggestions=result.suggestions if result else [],
-        suggested_stories=result.suggested_stories if result else [],
+        phase=_get_phase(state),
+        suggestions=result.suggestions,
+        suggested_stories=result.suggested_stories,
+        extracted_goals=result.extracted_goals,
+        extracted_users=result.extracted_users,
+        extracted_stories=result.extracted_stories,
+        ready_for_users=result.ready_for_users,
+        ready_for_stories=result.ready_for_stories,
+        ready_for_charter=result.ready_for_charter,
+        suggested_goals=result.suggested_goals,
+        suggested_users=result.suggested_users,
+        suggested_stories_options=result.suggested_stories_options,
     )
 
 
@@ -163,14 +186,55 @@ async def send_message(session_id: str, req: SendMessageRequest):
         f"tools={result.tool_calls} rounds={state.rounds_of_questions}"
     )
 
+    return _build_send_response(result, state)
+
+
+def _build_send_response(result, state: SessionState) -> SendMessageResponse:
+    """Build a SendMessageResponse from an AgentResult and state."""
     return SendMessageResponse(
         message=result.message,
         agent_status=state.agent_status,
         state=state,
+        phase=_get_phase(state),
         tool_calls=result.tool_calls,
         suggestions=result.suggestions,
         suggested_stories=result.suggested_stories,
+        extracted_goals=state.extracted_goals,
+        extracted_users=state.extracted_users,
+        extracted_stories=state.extracted_stories,
+        ready_for_users=result.ready_for_users,
+        ready_for_stories=result.ready_for_stories,
+        ready_for_charter=result.ready_for_charter,
+        suggested_goals=result.suggested_goals,
+        suggested_users=result.suggested_users,
+        suggested_stories_options=result.suggested_stories_options,
     )
+
+
+@app.post("/sessions/{session_id}/reevaluate", response_model=SendMessageResponse)
+async def reevaluate_endpoint(session_id: str):
+    """Re-evaluate discovery state after pill clicks — no user message added to chat."""
+    state, conversation = await _load_state(session_id)
+
+    result = await run_agent_turn(state)
+
+    conversation = state.input.conversation_history.copy()
+    await _save_state(session_id, state, conversation)
+
+    return _build_send_response(result, state)
+
+
+@app.post("/sessions/{session_id}/advance-phase", response_model=SendMessageResponse)
+async def advance_phase_endpoint(session_id: str):
+    """Advance discovery phase: goals→users→stories→charter generation."""
+    state, conversation = await _load_state(session_id)
+
+    result = await advance_phase(state)
+
+    conversation = state.input.conversation_history.copy()
+    await _save_state(session_id, state, conversation)
+
+    return _build_send_response(result, state)
 
 
 @app.post("/sessions/{session_id}/proceed", response_model=ProceedResponse)
@@ -201,6 +265,8 @@ async def get_session(session_id: str):
 async def patch_charter(session_id: str, req: PatchCharterRequest):
     state, conversation = await _load_state(session_id)
 
+    if req.task is not None:
+        state.charter.task = req.task
     if req.coverage is not None:
         state.charter.coverage = req.coverage
     if req.balance is not None:
@@ -213,6 +279,69 @@ async def patch_charter(session_id: str, req: PatchCharterRequest):
     await _save_state(session_id, state, conversation)
 
     return {"state": state.model_dump()}
+
+
+@app.patch("/sessions/{session_id}/goals")
+async def patch_goals(session_id: str, req: PatchGoalsRequest):
+    """Update extracted goals directly from the UI."""
+    state, conversation = await _load_state(session_id)
+    old_goals = state.extracted_goals.copy()
+    state.extracted_goals = req.goals
+    # Also rebuild the text input for charter generation
+    if req.goals:
+        state.input.business_goals = "\n".join(f"- {g}" for g in req.goals)
+    else:
+        state.input.business_goals = None
+    # Notify the agent about the manual edit
+    if req.goals != old_goals:
+        state.input.conversation_history.append({
+            "role": "system",
+            "content": f"[User manually edited goals. Current goals: {req.goals}]"
+        })
+    await _save_state(session_id, state, conversation)
+    return {"extracted_goals": state.extracted_goals}
+
+
+@app.patch("/sessions/{session_id}/users")
+async def patch_users(session_id: str, req: PatchUsersRequest):
+    """Update extracted user types directly from the UI."""
+    state, conversation = await _load_state(session_id)
+    old_users = state.extracted_users.copy()
+    state.extracted_users = req.users
+    if req.users != old_users:
+        state.input.conversation_history.append({
+            "role": "system",
+            "content": f"[User manually edited user types. Current users: {req.users}]"
+        })
+    await _save_state(session_id, state, conversation)
+    return {"extracted_users": state.extracted_users}
+
+
+@app.patch("/sessions/{session_id}/stories")
+async def patch_stories(session_id: str, req: PatchStoriesRequest):
+    """Update extracted stories directly from the UI."""
+    state, conversation = await _load_state(session_id)
+    old_stories = state.extracted_stories.copy()
+    state.extracted_stories = req.stories
+    # Also rebuild the text input for charter generation
+    if req.stories:
+        parts = []
+        for s in req.stories:
+            who = s.get("who", "user")
+            what = s.get("what", "")
+            why = s.get("why", "")
+            parts.append(f"As a {who}, I want to {what}" + (f", so that {why}" if why else ""))
+        state.input.user_stories = "\n".join(parts)
+    else:
+        state.input.user_stories = None
+    # Notify the agent about the manual edit
+    if req.stories != old_stories:
+        state.input.conversation_history.append({
+            "role": "system",
+            "content": f"[User manually edited stories. Current stories: {req.stories}]"
+        })
+    await _save_state(session_id, state, conversation)
+    return {"extracted_stories": state.extracted_stories}
 
 
 @app.post("/sessions/{session_id}/finalize", response_model=FinalizeResponse)
@@ -812,6 +941,24 @@ async def import_from_url(session_id: str, req: ImportFromUrlRequest):
 
     # Verify session exists
     state, _ = await _load_state(session_id)
+
+    # Validate URL to prevent SSRF
+    from urllib.parse import urlparse
+    import ipaddress
+
+    parsed = urlparse(req.url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="Only HTTP/HTTPS URLs are allowed")
+    blocked_hosts = {"localhost", "127.0.0.1", "0.0.0.0", "169.254.169.254", "metadata.google.internal"}
+    if parsed.hostname and parsed.hostname in blocked_hosts:
+        raise HTTPException(status_code=400, detail="Internal addresses are not allowed")
+    if parsed.hostname:
+        try:
+            ip = ipaddress.ip_address(parsed.hostname)
+            if ip.is_private or ip.is_loopback or ip.is_link_local:
+                raise HTTPException(status_code=400, detail="Internal addresses are not allowed")
+        except ValueError:
+            pass  # hostname is a domain name, not an IP
 
     # Fetch URL content
     try:

@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 # --- Enums ---
 
 class AgentStatus(str, Enum):
+    discovery = "discovery"
     drafting = "drafting"
     validating = "validating"
     questioning = "questioning"
@@ -24,6 +25,12 @@ class DimensionStatus(str, Enum):
     pending = "pending"
     weak = "weak"
     good = "good"
+
+
+class DiscoveryPhase(str, Enum):
+    goals = "goals"
+    users = "users"
+    stories = "stories"
 
 
 class ValidationStatus(str, Enum):
@@ -95,21 +102,36 @@ class SessionState(BaseModel):
     charter: Charter = Field(default_factory=Charter)
     validation: Validation = Field(default_factory=Validation)
     rounds_of_questions: int = 0
-    agent_status: AgentStatus = AgentStatus.drafting
+    agent_status: AgentStatus = AgentStatus.discovery
+    discovery_phase: DiscoveryPhase = DiscoveryPhase.goals
+    extracted_goals: list[str] = Field(default_factory=list)
+    extracted_users: list[str] = Field(default_factory=list)
+    extracted_stories: list[dict] = Field(default_factory=list)
+    discovery_rounds: int = 0
 
 
 # --- API request/response models ---
 
 class CreateSessionRequest(BaseModel):
-    initial_input: SessionInput
+    initial_input: SessionInput = Field(default_factory=SessionInput)
 
 
 class CreateSessionResponse(BaseModel):
     session_id: str
     agent_status: AgentStatus
     message: str
+    phase: str = "goals"
     suggestions: list['Suggestion'] = Field(default_factory=list)
     suggested_stories: list['SuggestedStory'] = Field(default_factory=list)
+    extracted_goals: list[str] = Field(default_factory=list)
+    extracted_users: list[str] = Field(default_factory=list)
+    extracted_stories: list[dict] = Field(default_factory=list)
+    ready_for_users: bool = False
+    ready_for_stories: bool = False
+    ready_for_charter: bool = False
+    suggested_goals: list[str] = Field(default_factory=list)
+    suggested_users: list[str] = Field(default_factory=list)
+    suggested_stories_options: list[dict] = Field(default_factory=list)
 
 
 class SendMessageRequest(BaseModel):
@@ -136,9 +158,31 @@ class SendMessageResponse(BaseModel):
     message: str
     agent_status: AgentStatus
     state: SessionState
+    phase: str = "goals"
     tool_calls: list[str] = Field(default_factory=list)
     suggestions: list[Suggestion] = Field(default_factory=list)
     suggested_stories: list[SuggestedStory] = Field(default_factory=list)
+    extracted_goals: list[str] = Field(default_factory=list)
+    extracted_users: list[str] = Field(default_factory=list)
+    extracted_stories: list[dict] = Field(default_factory=list)
+    ready_for_users: bool = False
+    ready_for_stories: bool = False
+    ready_for_charter: bool = False
+    suggested_goals: list[str] = Field(default_factory=list)
+    suggested_users: list[str] = Field(default_factory=list)
+    suggested_stories_options: list[dict] = Field(default_factory=list)
+
+
+class PatchGoalsRequest(BaseModel):
+    goals: list[str]
+
+
+class PatchUsersRequest(BaseModel):
+    users: list[str]
+
+
+class PatchStoriesRequest(BaseModel):
+    stories: list[dict]
 
 
 class ProceedResponse(BaseModel):

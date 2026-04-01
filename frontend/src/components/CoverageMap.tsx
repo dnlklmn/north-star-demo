@@ -1,8 +1,11 @@
 import type { GapAnalysis } from '../types'
+import RadarChart from './RadarChart'
 
 interface CoverageMapProps {
   gaps: GapAnalysis
   onClose: () => void
+  onFillGaps?: () => void
+  loading?: boolean
 }
 
 function cellColor(count: number): string {
@@ -11,10 +14,11 @@ function cellColor(count: number): string {
   return 'bg-success/20 text-success'
 }
 
-export default function CoverageMap({ gaps, onClose }: CoverageMapProps) {
+export default function CoverageMap({ gaps, onClose, onFillGaps, loading }: CoverageMapProps) {
   const matrix = gaps.coverage_matrix || {}
   const criteria = Object.keys(matrix)
   const featureAreas = criteria.length > 0 ? Object.keys(matrix[criteria[0]] || {}) : []
+  const hasGaps = gaps.coverage_gaps.length > 0 || gaps.feature_area_gaps.length > 0
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
@@ -35,11 +39,27 @@ export default function CoverageMap({ gaps, onClose }: CoverageMapProps) {
           {gaps.summary}
         </div>
 
-        {/* Matrix */}
+        {/* Radar + Matrix */}
         <div className="flex-1 overflow-auto p-5">
           {criteria.length === 0 ? (
             <p className="text-xs text-muted-foreground">No coverage data available. Generate or import examples first.</p>
           ) : (
+            <>
+            {/* Coverage radar — shows per-feature-area fill rate */}
+            {featureAreas.length >= 3 && (
+              <div className="flex justify-center mb-6">
+                <RadarChart
+                  points={featureAreas.map(fa => {
+                    // For each feature area, compute % of criteria that have at least 1 example
+                    const coveredCount = criteria.filter(c => ((matrix[c] || {})[fa] || 0) > 0).length
+                    const pct = criteria.length > 0 ? Math.round((coveredCount / criteria.length) * 100) : 0
+                    return { label: fa, value: pct }
+                  })}
+                  threshold={70}
+                  size={240}
+                />
+              </div>
+            )}
             <div className="overflow-x-auto">
               <table className="text-xs w-full border-collapse">
                 <thead>
@@ -64,7 +84,7 @@ export default function CoverageMap({ gaps, onClose }: CoverageMapProps) {
                         const count = (matrix[crit] || {})[fa] || 0
                         return (
                           <td key={fa} className="text-center p-2 border-b border-border">
-                            <span className={`inline-block w-7 h-7 rounded-md flex items-center justify-center text-xs font-medium ${cellColor(count)}`}>
+                            <span className={`w-7 h-7 rounded-md flex items-center justify-center text-xs font-medium ${cellColor(count)}`}>
                               {count}
                             </span>
                           </td>
@@ -75,6 +95,7 @@ export default function CoverageMap({ gaps, onClose }: CoverageMapProps) {
                 </tbody>
               </table>
             </div>
+            </>
           )}
         </div>
 
@@ -109,6 +130,19 @@ export default function CoverageMap({ gaps, onClose }: CoverageMapProps) {
             </div>
           )}
         </div>
+
+        {/* Fill gaps action */}
+        {onFillGaps && hasGaps && (
+          <div className="px-5 py-3 border-t border-border">
+            <button
+              onClick={onFillGaps}
+              disabled={loading}
+              className="w-full py-2.5 bg-accent text-accent-foreground rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-50 transition-opacity"
+            >
+              {loading ? 'Generating...' : 'Generate examples to fill gaps'}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )

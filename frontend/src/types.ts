@@ -1,4 +1,8 @@
-export type AgentStatus = 'drafting' | 'validating' | 'questioning' | 'soft_ok' | 'review'
+export type AgentStatus = 'discovery' | 'drafting' | 'validating' | 'questioning' | 'soft_ok' | 'review'
+
+export type Screen = 'goals' | 'users' | 'stories' | 'charter' | 'dataset'
+
+export type Phase = 'goals' | 'users' | 'stories' | 'charter' | 'dataset'
 
 export type DimensionStatus = 'pending' | 'weak' | 'good'
 
@@ -16,11 +20,18 @@ export interface AlignmentEntry {
   status: DimensionStatus
 }
 
+export interface TaskEntry {
+  label: string
+  content: string
+}
+
 export interface TaskDefinition {
   input_description: string
   output_description: string
   sample_input?: string | null
   sample_output?: string | null
+  input_entries?: TaskEntry[]
+  output_entries?: TaskEntry[]
 }
 
 export interface Charter {
@@ -58,6 +69,16 @@ export interface SessionState {
   validation: Validation
   rounds_of_questions: number
   agent_status: AgentStatus
+  extracted_goals: string[]
+  extracted_users: string[]
+  extracted_stories: ExtractedStory[]
+  discovery_rounds: number
+}
+
+export interface ExtractedStory {
+  who: string
+  what: string
+  why: string
 }
 
 export interface Message {
@@ -65,23 +86,22 @@ export interface Message {
   content: string
 }
 
-export interface UserStory {
-  who: string
-  what: string
-  why: string
-}
-
-export interface StoryGroup {
-  role: string
-  stories: { what: string; why: string }[]
-}
-
 export interface CreateSessionResponse {
   session_id: string
   agent_status: AgentStatus
   message: string
+  phase: Phase
   suggestions: Suggestion[]
   suggested_stories: SuggestedStory[]
+  extracted_goals: string[]
+  extracted_users: string[]
+  extracted_stories: ExtractedStory[]
+  ready_for_users?: boolean
+  ready_for_stories?: boolean
+  ready_for_charter?: boolean
+  suggested_goals?: string[]
+  suggested_users?: string[]
+  suggested_stories_options?: ExtractedStory[]
 }
 
 export interface Suggestion {
@@ -101,9 +121,19 @@ export interface SendMessageResponse {
   message: string
   agent_status: AgentStatus
   state: SessionState
+  phase: Phase
   tool_calls: string[]
   suggestions: Suggestion[]
   suggested_stories: SuggestedStory[]
+  extracted_goals: string[]
+  extracted_users: string[]
+  extracted_stories: ExtractedStory[]
+  ready_for_users?: boolean
+  ready_for_stories?: boolean
+  ready_for_charter?: boolean
+  suggested_goals?: string[]
+  suggested_users?: string[]
+  suggested_stories_options?: ExtractedStory[]
 }
 
 // --- Dataset types ---

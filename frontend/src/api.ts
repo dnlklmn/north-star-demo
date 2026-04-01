@@ -1,8 +1,8 @@
-import type { CreateSessionResponse, SendMessageResponse, SessionState, Charter, Dataset, Example, GapAnalysis, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse, TaskDefinition } from './types'
+import type { CreateSessionResponse, SendMessageResponse, SessionState, Charter, Dataset, Example, ExtractedStory, GapAnalysis, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse } from './types'
 
 const BASE = '/api'
 
-export async function createSession(input: {
+export async function createSession(input?: {
   business_goals?: string
   user_stories?: string
 }): Promise<CreateSessionResponse> {
@@ -11,8 +11,8 @@ export async function createSession(input: {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       initial_input: {
-        business_goals: input.business_goals || null,
-        user_stories: input.user_stories || null,
+        business_goals: input?.business_goals || null,
+        user_stories: input?.user_stories || null,
         conversation_history: [],
       },
     }),
@@ -32,6 +32,26 @@ export async function sendMessage(
     body: JSON.stringify({ message, regenerate: options?.regenerate ?? false }),
   })
   if (!res.ok) throw new Error(`Failed to send message: ${res.status}`)
+  return res.json()
+}
+
+export async function reevaluate(
+  sessionId: string
+): Promise<SendMessageResponse> {
+  const res = await fetch(`${BASE}/sessions/${sessionId}/reevaluate`, {
+    method: 'POST',
+  })
+  if (!res.ok) throw new Error(`Failed to reevaluate: ${res.status}`)
+  return res.json()
+}
+
+export async function advancePhase(
+  sessionId: string
+): Promise<SendMessageResponse> {
+  const res = await fetch(`${BASE}/sessions/${sessionId}/advance-phase`, {
+    method: 'POST',
+  })
+  if (!res.ok) throw new Error(`Failed to advance phase: ${res.status}`)
   return res.json()
 }
 
@@ -63,6 +83,45 @@ export async function patchCharter(
     body: JSON.stringify(patch),
   })
   if (!res.ok) throw new Error(`Failed to patch charter: ${res.status}`)
+  return res.json()
+}
+
+export async function patchGoals(
+  sessionId: string,
+  goals: string[]
+): Promise<{ extracted_goals: string[] }> {
+  const res = await fetch(`${BASE}/sessions/${sessionId}/goals`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ goals }),
+  })
+  if (!res.ok) throw new Error(`Failed to patch goals: ${res.status}`)
+  return res.json()
+}
+
+export async function patchUsers(
+  sessionId: string,
+  users: string[]
+): Promise<{ extracted_users: string[] }> {
+  const res = await fetch(`${BASE}/sessions/${sessionId}/users`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ users }),
+  })
+  if (!res.ok) throw new Error(`Failed to patch users: ${res.status}`)
+  return res.json()
+}
+
+export async function patchStories(
+  sessionId: string,
+  stories: ExtractedStory[]
+): Promise<{ extracted_stories: ExtractedStory[] }> {
+  const res = await fetch(`${BASE}/sessions/${sessionId}/stories`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ stories }),
+  })
+  if (!res.ok) throw new Error(`Failed to patch stories: ${res.status}`)
   return res.json()
 }
 

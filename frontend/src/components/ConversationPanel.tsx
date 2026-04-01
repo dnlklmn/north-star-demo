@@ -1,7 +1,31 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { Send } from 'lucide-react'
-import type { Message, AgentStatus, Validation } from '../types'
+import type { Message, AgentStatus, Validation, Phase, ExtractedStory } from '../types'
 import SoftOkBanner from './SoftOkBanner'
+
+const STATUS_SEQUENCES: Record<string, string[]> = {
+  init: ['Initializing...'],
+  goals: ['Thinking about your goals...'],
+  users: ['Thinking about your users...'],
+  stories: ['Thinking about user scenarios...'],
+  charter_generating: [
+    'Generating draft from your input',
+    'Validating criteria',
+    'Generating suggestions',
+  ],
+  charter: ['Thinking...'],
+  dataset: ['Thinking...'],
+}
+
+function getStatusKey(phase: Phase, hasCharter: boolean, isInit: boolean): string {
+  if (isInit) return 'init'
+  if (phase === 'goals') return 'goals'
+  if (phase === 'users') return 'users'
+  if (phase === 'stories') return 'stories'
+  if (phase === 'charter' && !hasCharter) return 'charter_generating'
+  if (phase === 'charter') return 'charter'
+  return 'dataset'
+}
 
 interface ActionSuggestion {
   action: string
@@ -19,6 +43,18 @@ interface Props {
   onKeepRefining: () => void
   actionSuggestions?: ActionSuggestion[]
   onActionSuggestion?: (action: string) => void
+  chatInput?: string
+  onChatInputChange?: (value: string) => void
+  placeholder?: string
+  phase?: Phase
+  hasCharter?: boolean
+  isInit?: boolean
+  suggestedGoals?: string[]
+  suggestedUsers?: string[]
+  suggestedStoryOptions?: ExtractedStory[]
+  onAcceptSuggestedGoal?: (goal: string) => void
+  onAcceptSuggestedUser?: (user: string) => void
+  onAcceptSuggestedStory?: (story: ExtractedStory) => void
 }
 
 export default function ConversationPanel({
@@ -31,8 +67,44 @@ export default function ConversationPanel({
   onKeepRefining,
   actionSuggestions = [],
   onActionSuggestion,
+  chatInput,
+  onChatInputChange,
+  placeholder = 'Type your response...',
+  phase = 'goals',
+  hasCharter = false,
+  suggestedGoals = [],
+  suggestedUsers = [],
+  suggestedStoryOptions = [],
+  onAcceptSuggestedGoal,
+  onAcceptSuggestedUser,
+  onAcceptSuggestedStory,
+  isInit = false,
 }: Props) {
-  const [input, setInput] = useState('')
+  const [localInput, setLocalInput] = useState('')
+  // Use controlled input if chatInput/onChatInputChange provided, else local state
+  const input = chatInput !== undefined ? chatInput : localInput
+  const setInput = onChatInputChange || setLocalInput
+
+  // Cycling status label during loading
+  const [statusIndex, setStatusIndex] = useState(0)
+  const statusKey = getStatusKey(phase, hasCharter, isInit)
+  const statusSequence = STATUS_SEQUENCES[statusKey] || ['Thinking...']
+
+  useEffect(() => {
+    if (!loading) {
+      setStatusIndex(0)
+      return
+    }
+    if (statusSequence.length <= 1) return
+
+    const interval = setInterval(() => {
+      setStatusIndex(prev => {
+        if (prev < statusSequence.length - 1) return prev + 1
+        return prev // Stay on last step
+      })
+    }, 3000)
+    return () => clearInterval(interval)
+  }, [loading, statusSequence.length])
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; text: string } | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const messagesAreaRef = useRef<HTMLDivElement>(null)
@@ -56,7 +128,7 @@ export default function ConversationPanel({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    if (!input.trim() || loading) return
+    if (!input.trim()) return
     onSend(input.trim())
     setInput('')
   }
@@ -110,7 +182,7 @@ export default function ConversationPanel({
       >
         {messages.length === 0 && !loading && (
           <p className="text-sm text-muted-foreground text-center mt-8">
-            Add your input and click Generate to start.
+            Starting your session...
           </p>
         )}
 
@@ -133,12 +205,15 @@ export default function ConversationPanel({
 
         {loading && (
           <div className="flex justify-start">
-            <div className="bg-muted px-4 py-2.5 rounded-2xl">
-              <div className="flex gap-1">
-                <span className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                <span className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                <span className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-              </div>
+            <div className="bg-muted px-4 py-2.5 rounded-2xl flex items-center gap-2">
+              <span className="text-sm italic text-muted-foreground">
+                {statusSequence[statusIndex]}
+              </span>
+              <span className="flex gap-0.5">
+                <span className="w-1 h-1 bg-muted-foreground/50 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                <span className="w-1 h-1 bg-muted-foreground/50 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                <span className="w-1 h-1 bg-muted-foreground/50 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+              </span>
             </div>
           </div>
         )}
@@ -171,6 +246,57 @@ export default function ConversationPanel({
         />
       )}
 
+      {/* Suggested goals (clickable options during goals phase) */}
+      {suggestedGoals.length > 0 && (
+        <div className="px-3 py-2 border-t border-border bg-muted/30">
+          <div className="flex flex-wrap gap-1.5">
+            {suggestedGoals.map((goal, i) => (
+              <button
+                key={i}
+                onClick={() => onAcceptSuggestedGoal?.(goal)}
+                className="px-3 py-1.5 text-xs bg-accent/10 text-accent rounded-full hover:bg-accent/20 transition-colors text-left"
+              >
+                + {goal}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Suggested users (clickable options during users phase) */}
+      {suggestedUsers.length > 0 && (
+        <div className="px-3 py-2 border-t border-border bg-muted/30">
+          <div className="flex flex-wrap gap-1.5">
+            {suggestedUsers.map((user, i) => (
+              <button
+                key={i}
+                onClick={() => onAcceptSuggestedUser?.(user)}
+                className="px-3 py-1.5 text-xs bg-accent/10 text-accent rounded-full hover:bg-accent/20 transition-colors text-left"
+              >
+                + {user}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Suggested stories (clickable options during stories phase) */}
+      {suggestedStoryOptions.length > 0 && (
+        <div className="px-3 py-2 border-t border-border bg-muted/30">
+          <div className="flex flex-wrap gap-1.5">
+            {suggestedStoryOptions.map((story, i) => (
+              <button
+                key={i}
+                onClick={() => onAcceptSuggestedStory?.(story)}
+                className="px-3 py-1.5 text-xs bg-accent/10 text-accent rounded-full hover:bg-accent/20 transition-colors text-left"
+              >
+                + {story.who}: {story.what}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Action suggestions */}
       {actionSuggestions.length > 0 && (
         <div className="px-3 py-2 border-t border-border bg-muted/30">
@@ -200,24 +326,25 @@ export default function ConversationPanel({
             type="text"
             value={input}
             onChange={e => setInput(e.target.value)}
-            placeholder="Type your response..."
-            disabled={loading}
-            className="flex-1 px-3 py-2 border border-border rounded-lg text-sm bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
+            placeholder={placeholder}
+            className="flex-1 px-3 py-2 border border-border rounded-lg text-sm bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-accent"
           />
           <button
             type="submit"
-            disabled={loading || !input.trim()}
+            disabled={!input.trim()}
             className="p-2 bg-accent text-accent-foreground rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
           >
             <Send className="w-4 h-4" />
           </button>
         </form>
-        <button
-          onClick={onProceed}
-          className="mt-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
-        >
-          Proceed to review
-        </button>
+        {phase === 'charter' && (
+          <button
+            onClick={onProceed}
+            className="mt-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Proceed to review
+          </button>
+        )}
       </div>
     </div>
   )
