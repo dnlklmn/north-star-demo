@@ -127,31 +127,49 @@ export default function App() {
     }
   }, [])
 
-  // Fetch suggestions when a goal is committed (Enter pressed → new empty goal added)
-  const prevGoalsLengthRef = useRef(goals.length)
-  useEffect(() => {
-    const nonEmpty = goals.filter(g => g.trim())
-    // Trigger when goals array grows (Enter was pressed) and we have content
-    if (goals.length > prevGoalsLengthRef.current && nonEmpty.length > 0) {
-      fetchGoalSuggestions(goals)
-    }
-    prevGoalsLengthRef.current = goals.length
-  }, [goals.length, fetchGoalSuggestions])
+  // Called by GoalsPanel when user presses Enter on a non-empty goal
+  const handleGoalCommit = useCallback(() => {
+    fetchGoalSuggestions(goals)
+  }, [goals, fetchGoalSuggestions])
+
+  // Debounced re-fetch after accepting a suggestion
+  const suggestionDebounceRef = useRef<number | null>(null)
 
   const handleAcceptGoalSuggestion = useCallback((suggestion: string) => {
-    // Add the suggestion as a new goal (before the empty trailing input)
     setGoals(prev => {
       const lastIsEmpty = prev.length > 0 && prev[prev.length - 1].trim() === ''
-      if (lastIsEmpty) {
-        return [...prev.slice(0, -1), suggestion, '']
+      const newGoals = lastIsEmpty
+        ? [...prev.slice(0, -1), suggestion, '']
+        : [...prev, suggestion, '']
+
+      // Schedule a debounced re-fetch with the new goals
+      if (suggestionDebounceRef.current) {
+        window.clearTimeout(suggestionDebounceRef.current)
       }
-      return [...prev, suggestion, '']
+      suggestionDebounceRef.current = window.setTimeout(() => {
+        suggestionDebounceRef.current = null
+        const nonEmpty = newGoals.filter(g => g.trim())
+        if (nonEmpty.length > 0) {
+          fetchGoalSuggestions(newGoals)
+        }
+      }, 3000)
+
+      return newGoals
     })
     setGoalSuggestions(prev => prev.filter(s => s !== suggestion))
-  }, [])
+  }, [fetchGoalSuggestions])
 
   const handleDismissGoalSuggestion = useCallback((suggestion: string) => {
     setGoalSuggestions(prev => prev.filter(s => s !== suggestion))
+  }, [])
+
+  // Cleanup debounce on unmount
+  useEffect(() => {
+    return () => {
+      if (suggestionDebounceRef.current) {
+        window.clearTimeout(suggestionDebounceRef.current)
+      }
+    }
   }, [])
 
   // --- Charter phase handlers ---
@@ -673,6 +691,7 @@ export default function App() {
             <GoalsPanel
               goals={goals}
               onGoalsChange={handleGoalsChange}
+              onGoalCommit={handleGoalCommit}
               goalSuggestions={goalSuggestions}
               onAcceptGoalSuggestion={handleAcceptGoalSuggestion}
               onDismissGoalSuggestion={handleDismissGoalSuggestion}

@@ -4,6 +4,7 @@ import { X, Sparkles, ArrowRight, Loader2 } from 'lucide-react'
 interface Props {
   goals: string[]
   onGoalsChange: (goals: string[]) => void
+  onGoalCommit: () => void
   goalSuggestions: string[]
   onAcceptGoalSuggestion: (suggestion: string) => void
   onDismissGoalSuggestion: (suggestion: string) => void
@@ -14,6 +15,7 @@ interface Props {
 export default function GoalsPanel({
   goals,
   onGoalsChange,
+  onGoalCommit,
   goalSuggestions,
   onAcceptGoalSuggestion,
   onDismissGoalSuggestion,
@@ -58,6 +60,9 @@ export default function GoalsPanel({
         // Focus next existing input
         inputRefs.current[index + 1]?.focus()
       }
+
+      // Trigger suggestion fetch
+      onGoalCommit()
     }
 
     if (e.key === 'Backspace' && goals[index] === '' && goals.length > 1) {
