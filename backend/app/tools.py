@@ -214,6 +214,26 @@ async def call_suggest_goals(goals: list[str]) -> tuple[list[str], list[dict]]:
     return data.get("suggestions", []), [meta]
 
 
+async def call_evaluate_goals(goals: list[str]) -> tuple[list[dict], list[dict]]:
+    """Evaluate business goal quality. Returns (feedback list, call metadata list)."""
+    from .prompt import build_evaluate_goals_prompt
+    await _refresh_settings()
+    prompt = build_evaluate_goals_prompt(goals)
+    text, meta = _call_llm(prompt, max_tokens=512)
+    data = _extract_json(text)
+    return data.get("feedback", []), [meta]
+
+
+async def call_suggest_stories(goals: list[str], stories: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Suggest additional user stories. Returns (suggestions, call metadata list)."""
+    from .prompt import build_suggest_stories_prompt
+    await _refresh_settings()
+    prompt = build_suggest_stories_prompt(goals, stories)
+    text, meta = _call_llm(prompt, max_tokens=512)
+    data = _extract_json(text)
+    return data.get("suggestions", []), [meta]
+
+
 # --- Dataset phase tools ---
 
 async def call_synthesize_examples(

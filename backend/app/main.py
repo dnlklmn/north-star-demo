@@ -38,7 +38,10 @@ from .models import (
     DetectSchemaRequest,
     DetectSchemaResponse,
     EnrichRequest,
+    EvaluateGoalsRequest,
+    EvaluateGoalsResponse,
     FinalizeResponse,
+    GoalFeedback,
     ImportExamplesRequest,
     ImportFromUrlRequest,
     ImportFromUrlResponse,
@@ -52,6 +55,8 @@ from .models import (
     SuggestGoalsRequest,
     SuggestGoalsResponse,
     SuggestResponse,
+    SuggestStoriesRequest,
+    SuggestStoriesResponse,
     SynthesizeRequest,
     TaskDefinition,
     UpdateExampleRequest,
@@ -60,6 +65,8 @@ from .models import (
 )
 from .tools import (
     call_suggest_goals,
+    call_evaluate_goals,
+    call_suggest_stories,
     call_validate_charter,
     call_generate_suggestions,
     call_synthesize_examples,
@@ -124,8 +131,51 @@ async def suggest_goals(req: SuggestGoalsRequest):
     if not non_empty:
         return SuggestGoalsResponse(suggestions=[])
 
-    suggestions, _ = await call_suggest_goals(non_empty)
-    return SuggestGoalsResponse(suggestions=suggestions)
+    try:
+        suggestions, _ = await call_suggest_goals(non_empty)
+        return SuggestGoalsResponse(suggestions=suggestions)
+    except Exception as e:
+        logger.exception("Failed to suggest goals")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/evaluate-goals", response_model=EvaluateGoalsResponse)
+async def evaluate_goals(req: EvaluateGoalsRequest):
+    """Evaluate business goal quality — check if goals are specific, measurable, independent."""
+    non_empty = [g for g in req.goals if g.strip()]
+    if not non_empty:
+        return EvaluateGoalsResponse(feedback=[])
+
+    try:
+        feedback_raw, _ = await call_evaluate_goals(non_empty)
+        feedback = [
+            GoalFeedback(
+                goal=f.get("goal", ""),
+                issue=f.get("issue"),
+                suggestion=f.get("suggestion"),
+            )
+            for f in feedback_raw
+        ]
+        return EvaluateGoalsResponse(feedback=feedback)
+    except Exception as e:
+        logger.exception("Failed to evaluate goals")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/suggest-stories", response_model=SuggestStoriesResponse)
+async def suggest_stories(req: SuggestStoriesRequest):
+    """Suggest additional user stories based on goals and existing stories (stateless, no session)."""
+    non_empty_goals = [g for g in req.goals if g.strip()]
+    non_empty_stories = [s for s in req.stories if s.get("who", "").strip() or s.get("what", "").strip()]
+    if not non_empty_goals:
+        return SuggestStoriesResponse(suggestions=[])
+
+    try:
+        suggestions, _ = await call_suggest_stories(non_empty_goals, non_empty_stories)
+        return SuggestStoriesResponse(suggestions=suggestions)
+    except Exception as e:
+        logger.exception("Failed to suggest stories")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/sessions", response_model=CreateSessionResponse)

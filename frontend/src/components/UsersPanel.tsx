@@ -1,217 +1,315 @@
-import { Plus, X, ArrowLeft } from 'lucide-react'
+import { useRef, useEffect, useState } from 'react'
+import { X, ArrowLeft, ArrowRight } from 'lucide-react'
 import type { StoryGroup, SuggestedStory } from '../types'
+import PanelLayout from './PanelLayout'
+import Section from './Section'
+import SuggestionBox, { SuggestionCard } from './SuggestionBox'
 
 interface Props {
   storyGroups: StoryGroup[]
   onStoryGroupsChange: (groups: StoryGroup[]) => void
-  suggestedStories?: SuggestedStory[]
-  onAcceptStory?: (story: SuggestedStory) => void
-  onDismissStory?: (story: SuggestedStory) => void
+  onStoryCommit: () => void
+  suggestedStories: SuggestedStory[]
+  onAcceptStory: (story: SuggestedStory) => void
+  onDismissStory: (story: SuggestedStory) => void
+  storySuggestionsLoading: boolean
   onBackToGoals: () => void
   onGenerate: () => void
   canGenerate: boolean
   loading: boolean
+  hasCharter: boolean
 }
 
 export default function UsersPanel({
   storyGroups,
   onStoryGroupsChange,
-  suggestedStories = [],
+  onStoryCommit,
+  suggestedStories,
   onAcceptStory,
   onDismissStory,
+  storySuggestionsLoading,
   onBackToGoals,
   onGenerate,
   canGenerate,
   loading,
+  hasCharter,
 }: Props) {
-  const addRole = () => {
-    onStoryGroupsChange([...storyGroups, { role: '', stories: [{ what: '', why: '' }] }])
-  }
+  const roleInputRefs = useRef<(HTMLInputElement | null)[]>([])
+  const storyWhatRefs = useRef<Map<string, HTMLInputElement | null>>(new Map())
+  const storyWhyRefs = useRef<Map<string, HTMLInputElement | null>>(new Map())
+  const focusRef = useRef<{ type: 'role' | 'what' | 'why'; groupIndex: number; storyIndex?: number } | null>(null)
+  // Track which roles have been committed (Enter pressed) — only committed roles become Sections
+  const [committedRoles, setCommittedRoles] = useState<Set<number>>(new Set())
 
-  const updateRole = (groupIndex: number, role: string) => {
-    const updated = [...storyGroups]
-    updated[groupIndex] = { ...updated[groupIndex], role }
-    onStoryGroupsChange(updated)
-  }
+  // Auto-commit roles that have content from outside (e.g. accepted suggestions)
+  useEffect(() => {
+    setCommittedRoles(prev => {
+      let changed = false
+      const next = new Set(prev)
+      storyGroups.forEach((g, i) => {
+        // A role with text AND at least one story with text was created externally — auto-commit it
+        if (g.role.trim() && g.stories.some(s => s.what.trim()) && !next.has(i)) {
+          next.add(i)
+          changed = true
+        }
+      })
+      return changed ? next : prev
+    })
+  }, [storyGroups])
 
-  const removeRole = (groupIndex: number) => {
-    onStoryGroupsChange(storyGroups.filter((_, i) => i !== groupIndex))
-  }
-
-  const addStory = (groupIndex: number) => {
-    const updated = [...storyGroups]
-    updated[groupIndex] = {
-      ...updated[groupIndex],
-      stories: [...updated[groupIndex].stories, { what: '', why: '' }],
+  useEffect(() => {
+    if (focusRef.current) {
+      const { type, groupIndex, storyIndex } = focusRef.current
+      focusRef.current = null
+      requestAnimationFrame(() => {
+        if (type === 'role') roleInputRefs.current[groupIndex]?.focus()
+        else if (type === 'what' && storyIndex !== undefined) storyWhatRefs.current.get(`${groupIndex}-${storyIndex}`)?.focus()
+        else if (type === 'why' && storyIndex !== undefined) storyWhyRefs.current.get(`${groupIndex}-${storyIndex}`)?.focus()
+      })
     }
+  })
+
+  const hasStories = storyGroups.some(g => g.role.trim() && g.stories.some(s => s.what.trim()))
+
+  const updateRole = (gi: number, role: string) => {
+    const updated = [...storyGroups]
+    updated[gi] = { ...updated[gi], role }
     onStoryGroupsChange(updated)
   }
 
-  const updateStory = (groupIndex: number, storyIndex: number, field: 'what' | 'why', value: string) => {
+  const removeRole = (gi: number) => {
+    // Rebuild committed set with shifted indices
+    setCommittedRoles(prev => {
+      const next = new Set<number>()
+      for (const idx of prev) {
+        if (idx < gi) next.add(idx)
+        else if (idx > gi) next.add(idx - 1)
+      }
+      return next
+    })
+    if (storyGroups.length <= 1) {
+      onStoryGroupsChange([{ role: '', stories: [{ what: '', why: '' }] }])
+      return
+    }
+    onStoryGroupsChange(storyGroups.filter((_, i) => i !== gi))
+  }
+
+  const updateStory = (gi: number, si: number, field: 'what' | 'why', value: string) => {
     const updated = [...storyGroups]
-    const stories = [...updated[groupIndex].stories]
-    stories[storyIndex] = { ...stories[storyIndex], [field]: value }
-    updated[groupIndex] = { ...updated[groupIndex], stories }
+    const stories = [...updated[gi].stories]
+    stories[si] = { ...stories[si], [field]: value }
+    updated[gi] = { ...updated[gi], stories }
     onStoryGroupsChange(updated)
   }
 
-  const removeStory = (groupIndex: number, storyIndex: number) => {
+  const removeStory = (gi: number, si: number) => {
     const updated = [...storyGroups]
-    const stories = updated[groupIndex].stories.filter((_, i) => i !== storyIndex)
-    if (stories.length === 0) {
-      onStoryGroupsChange(storyGroups.filter((_, i) => i !== groupIndex))
-    } else {
-      updated[groupIndex] = { ...updated[groupIndex], stories }
-      onStoryGroupsChange(updated)
+    const stories = updated[gi].stories.filter((_, i) => i !== si)
+    if (stories.length === 0) stories.push({ what: '', why: '' })
+    updated[gi] = { ...updated[gi], stories }
+    onStoryGroupsChange(updated)
+  }
+
+  const handleRoleKeyDown = (gi: number, e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      if (!storyGroups[gi].role.trim()) return
+      setCommittedRoles(prev => new Set(prev).add(gi))
+      focusRef.current = { type: 'what', groupIndex: gi, storyIndex: 0 }
+      if (storyGroups[gi].stories.length === 0) {
+        const updated = [...storyGroups]
+        updated[gi] = { ...updated[gi], stories: [{ what: '', why: '' }] }
+        onStoryGroupsChange(updated)
+      } else {
+        onStoryGroupsChange([...storyGroups])
+      }
     }
   }
+
+  const handleWhatKeyDown = (gi: number, si: number, e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      if (!storyGroups[gi].stories[si].what.trim()) return
+      const updated = [...storyGroups]
+      const stories = [...updated[gi].stories]
+      if (si === stories.length - 1) {
+        stories.push({ what: '', why: '' })
+        updated[gi] = { ...updated[gi], stories }
+        focusRef.current = { type: 'what', groupIndex: gi, storyIndex: si + 1 }
+        onStoryGroupsChange(updated)
+      } else {
+        focusRef.current = { type: 'what', groupIndex: gi, storyIndex: si + 1 }
+        onStoryGroupsChange([...storyGroups])
+      }
+      onStoryCommit()
+    }
+    if (e.key === 'Tab' && !e.shiftKey) {
+      e.preventDefault()
+      focusRef.current = { type: 'why', groupIndex: gi, storyIndex: si }
+      onStoryGroupsChange([...storyGroups])
+    }
+    if (e.key === 'Backspace' && storyGroups[gi].stories[si].what === '') {
+      e.preventDefault()
+      if (storyGroups[gi].stories.length > 1) {
+        removeStory(gi, si)
+        focusRef.current = { type: 'what', groupIndex: gi, storyIndex: Math.max(0, si - 1) }
+      }
+    }
+  }
+
+  const handleWhyKeyDown = (gi: number, si: number, e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      const updated = [...storyGroups]
+      const stories = [...updated[gi].stories]
+      if (si === stories.length - 1) {
+        stories.push({ what: '', why: '' })
+        updated[gi] = { ...updated[gi], stories }
+        focusRef.current = { type: 'what', groupIndex: gi, storyIndex: si + 1 }
+        onStoryGroupsChange(updated)
+      } else {
+        focusRef.current = { type: 'what', groupIndex: gi, storyIndex: si + 1 }
+        onStoryGroupsChange([...storyGroups])
+      }
+      onStoryCommit()
+    }
+  }
+
+  // Group suggestions by role
+  const suggestedRoles = [...new Set(suggestedStories.map(s => s.who))]
+  const storiesByRole = suggestedRoles.map(role => ({
+    role,
+    stories: suggestedStories.filter(s => s.who === role),
+  }))
+
+  const storyCount = storyGroups.reduce((n, g) => n + g.stories.filter(s => s.what.trim()).length, 0)
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="px-4 h-12 border-b border-border bg-surface-raised flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-foreground">User Stories</h2>
+    <PanelLayout
+      title="User Stories"
+      headerLeft={
+        <>
+          <button onClick={onBackToGoals} className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1">
+            <ArrowLeft className="w-3 h-3" /> Goals
+          </button>
+          <span className="text-border">|</span>
+        </>
+      }
+      headerRight={
         <button
-          onClick={onBackToGoals}
-          className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
+          onClick={onGenerate}
+          disabled={!canGenerate || loading}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+            canGenerate && !loading ? 'bg-accent text-accent-foreground hover:opacity-90' : 'text-muted-foreground/40 cursor-not-allowed'
+          }`}
         >
-          <ArrowLeft className="w-3 h-3" />
-          Goals
+          {loading ? 'Generating...' : hasCharter ? 'Regenerate charter' : 'Generate charter'}
+          {!loading && <ArrowRight className="w-3.5 h-3.5" />}
         </button>
-      </div>
+      }
+      right={
+        <SuggestionBox
+          onRefresh={hasStories ? onStoryCommit : undefined}
+          loading={storySuggestionsLoading}
+          emptyText={hasStories ? 'Press Enter after a story to get suggestions' : 'Add a user story and press Enter to get suggestions'}
+        >
+          {suggestedStories.length > 0
+            ? storiesByRole.map(({ role, stories }) => (
+                <div key={role}>
+                  <p className="text-xs font-semibold text-foreground mb-1.5 mt-2 first:mt-0">{role}</p>
+                  {stories.map((story, i) => (
+                    <SuggestionCard
+                      key={i}
+                      onAccept={() => onAcceptStory(story)}
+                      onDismiss={() => onDismissStory(story)}
+                    >
+                      {story.what}
+                      {story.why && <span className="text-muted-foreground"> — {story.why}</span>}
+                    </SuggestionCard>
+                  ))}
+                </div>
+              ))
+            : null}
+        </SuggestionBox>
+      }
+    >
+      <p className="text-sm text-muted-foreground mb-4">
+        Who will use this AI feature, and what do they need?
+      </p>
 
-      <div className="flex-1 overflow-y-auto p-6">
-        <div className="max-w-lg mx-auto space-y-5">
-          <div>
-            <p className="text-sm text-muted-foreground mb-4">
-              Who will use this AI feature, and what do they need?
-            </p>
-
-            <div className="flex items-center justify-between mb-3">
-              <label className="text-xs font-medium text-muted-foreground">
-                User roles & stories
-              </label>
-              <button
-                onClick={addRole}
-                className="text-xs text-accent hover:opacity-80 font-medium flex items-center gap-0.5"
+      <div className="space-y-3">
+        {storyGroups.map((group, gi) => (
+          <div key={gi}>
+            {committedRoles.has(gi) && group.role.trim() ? (
+              <Section
+                title={group.role}
+                subtitle={`${group.stories.filter(s => s.what.trim()).length} stories`}
+                onRemove={() => removeRole(gi)}
+                onTitleChange={role => updateRole(gi, role)}
               >
-                <Plus className="w-3 h-3" />
-                Add role
-              </button>
-            </div>
-
-            <div className="space-y-4">
-              {storyGroups.map((group, gi) => (
-                <div key={gi}>
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="text-xs text-muted-foreground flex-shrink-0">As a</span>
-                    <input
-                      type="text"
-                      value={group.role}
-                      onChange={e => updateRole(gi, e.target.value)}
-                      placeholder="role..."
-                      className="flex-1 text-sm font-semibold bg-transparent text-foreground placeholder:text-muted-foreground focus:outline-none border-b border-transparent focus:border-accent"
-                    />
-                    <button
-                      onClick={() => removeRole(gi)}
-                      className="text-muted-foreground hover:text-danger p-0.5"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  </div>
-
-                  <div className="space-y-2 pl-1">
-                    {group.stories.map((story, si) => (
-                      <div key={si} className="border border-border rounded-lg p-3 bg-surface-raised group">
-                        <div className="flex items-start gap-2">
-                          <div className="flex-1 space-y-2">
-                            <div>
-                              <label className="text-xs text-muted-foreground mb-0.5 block">I want to</label>
-                              <input
-                                type="text"
-                                value={story.what}
-                                onChange={e => updateStory(gi, si, 'what', e.target.value)}
-                                placeholder="see a ranked list of candidates..."
-                                className="w-full px-2 py-1.5 border border-border rounded text-sm bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-accent"
-                              />
-                            </div>
-                            <div>
-                              <label className="text-xs text-muted-foreground mb-0.5 block">In order to</label>
-                              <input
-                                type="text"
-                                value={story.why}
-                                onChange={e => updateStory(gi, si, 'why', e.target.value)}
-                                placeholder="(optional) focus on the best fits first"
-                                className="w-full px-2 py-1.5 border border-border rounded text-sm bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-accent"
-                              />
-                            </div>
-                          </div>
-                          <button
-                            onClick={() => removeStory(gi, si)}
-                            className="mt-1 text-muted-foreground hover:text-danger opacity-0 group-hover:opacity-100 transition-opacity p-0.5"
-                          >
-                            <X className="w-3 h-3" />
-                          </button>
-                        </div>
+                <div className="space-y-1.5">
+                  {group.stories.map((story, si) => (
+                    <div key={si} className="flex items-center gap-2 group/story">
+                      <div className="flex-1 flex items-center gap-2">
+                        <input
+                          ref={el => { storyWhatRefs.current.set(`${gi}-${si}`, el) }}
+                          type="text"
+                          value={story.what}
+                          onChange={e => updateStory(gi, si, 'what', e.target.value)}
+                          onKeyDown={e => handleWhatKeyDown(gi, si, e)}
+                          placeholder="I want to..."
+                          className="flex-1 px-3 py-1.5 border border-border rounded-lg text-sm bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-accent"
+                        />
+                        <input
+                          ref={el => { storyWhyRefs.current.set(`${gi}-${si}`, el) }}
+                          type="text"
+                          value={story.why}
+                          onChange={e => updateStory(gi, si, 'why', e.target.value)}
+                          onKeyDown={e => handleWhyKeyDown(gi, si, e)}
+                          placeholder="in order to... (optional)"
+                          className="flex-1 px-3 py-1.5 border border-border rounded-lg text-sm bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-accent"
+                        />
                       </div>
-                    ))}
-                    <button
-                      onClick={() => addStory(gi)}
-                      className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 pl-1"
-                    >
-                      <Plus className="w-3 h-3" />
-                      add story
-                    </button>
-                  </div>
+                      <button
+                        onClick={() => removeStory(gi, si)}
+                        className="text-muted-foreground hover:text-danger opacity-0 group-hover/story:opacity-100 transition-opacity p-0.5"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                  <p className="text-xs text-muted-foreground">
+                    Enter to add story · Tab to "in order to"
+                  </p>
                 </div>
-              ))}
-
-              {storyGroups.length === 0 && (
-                <button
-                  onClick={addRole}
-                  className="w-full py-4 border border-dashed border-border rounded-lg text-xs text-muted-foreground hover:border-foreground/20 hover:text-foreground/60"
-                >
-                  Add a user role
-                </button>
-              )}
-
-              {/* Suggested stories */}
-              {suggestedStories.map((story, i) => (
-                <div key={`sug-${i}`} className="border border-accent/30 rounded-lg p-3 bg-accent/5">
-                  <div className="text-xs text-foreground mb-2">
-                    As a <strong>{story.who}</strong>, I want to <strong>{story.what}</strong>
-                    {story.why && <> in order to <strong>{story.why}</strong></>}
-                  </div>
-                  <div className="flex gap-1.5">
-                    <button
-                      onClick={() => onAcceptStory?.(story)}
-                      className="text-xs px-2 py-0.5 bg-accent/20 text-accent rounded hover:bg-accent/30 font-medium"
-                    >
-                      Add
-                    </button>
-                    <button
-                      onClick={() => onDismissStory?.(story)}
-                      className="text-xs px-1.5 py-0.5 text-muted-foreground hover:text-foreground"
-                    >
-                      dismiss
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
+              </Section>
+            ) : (
+              /* Empty role — just show the role input */
+              <input
+                ref={el => { roleInputRefs.current[gi] = el }}
+                type="text"
+                value={group.role}
+                onChange={e => updateRole(gi, e.target.value)}
+                onKeyDown={e => handleRoleKeyDown(gi, e)}
+                placeholder="User role (e.g. recruiter, hiring manager...)"
+                className="w-full px-3 py-2 border border-border rounded-lg text-sm font-semibold bg-surface-raised text-foreground placeholder:text-muted-foreground placeholder:font-normal focus:outline-none focus:ring-1 focus:ring-accent"
+              />
+            )}
           </div>
+        ))}
 
-          {/* Generate charter button */}
-          <div className="pt-4">
-            <button
-              onClick={onGenerate}
-              disabled={!canGenerate || loading}
-              className="px-6 py-2.5 bg-accent text-accent-foreground rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-50 transition-opacity"
-            >
-              {loading ? 'Generating...' : 'Generate charter'}
-            </button>
-          </div>
-        </div>
+        {storyGroups.length > 0 && storyGroups.every((_, i) => committedRoles.has(i)) && (
+          <button
+            onClick={() => {
+              focusRef.current = { type: 'role', groupIndex: storyGroups.length }
+              onStoryGroupsChange([...storyGroups, { role: '', stories: [{ what: '', why: '' }] }])
+            }}
+            className="w-full py-2.5 border border-dashed border-border rounded-lg text-xs text-muted-foreground hover:border-foreground/20 hover:text-foreground/60 transition-colors"
+          >
+            + Add another user role
+          </button>
+        )}
       </div>
-    </div>
+    </PanelLayout>
   )
 }

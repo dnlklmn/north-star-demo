@@ -86,6 +86,18 @@ export async function suggestForCharter(
   return res.json()
 }
 
+export async function evaluateGoals(
+  goals: string[]
+): Promise<{ feedback: Array<{ goal: string; issue: string | null; suggestion: string | null }> }> {
+  const res = await fetch(`${BASE}/evaluate-goals`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ goals }),
+  })
+  if (!res.ok) throw new Error(`Failed to evaluate goals: ${res.status}`)
+  return res.json()
+}
+
 export async function suggestGoals(
   goals: string[]
 ): Promise<{ suggestions: string[] }> {
@@ -95,6 +107,19 @@ export async function suggestGoals(
     body: JSON.stringify({ goals }),
   })
   if (!res.ok) throw new Error(`Failed to suggest goals: ${res.status}`)
+  return res.json()
+}
+
+export async function suggestStories(
+  goals: string[],
+  stories: Array<{ who: string; what: string; why: string }>
+): Promise<{ suggestions: Array<{ who: string; what: string; why: string }> }> {
+  const res = await fetch(`${BASE}/suggest-stories`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ goals, stories }),
+  })
+  if (!res.ok) throw new Error(`Failed to suggest stories: ${res.status}`)
   return res.json()
 }
 

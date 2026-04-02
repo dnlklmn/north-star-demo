@@ -1,9 +1,9 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
-import { MessageSquare, Settings, X } from 'lucide-react'
+import { MessageSquare, Settings, X, ShieldCheck, ArrowRight, Sparkles, Upload } from 'lucide-react'
 import type { Message, SessionState, AgentStatus, StoryGroup, Suggestion, SuggestedStory, Dataset, Example, GapAnalysis } from './types'
 import {
   createSession, getSession, sendMessage, patchCharter, finalizeCharter,
-  validateCharter, suggestForCharter, suggestGoals,
+  validateCharter, suggestForCharter, suggestGoals, evaluateGoals, suggestStories,
   createDataset, getDataset, synthesizeExamples, updateExample as apiUpdateExample,
   deleteExample as apiDeleteExample, autoReviewExamples, getGapAnalysis, exportDataset,
   datasetChat,
@@ -11,12 +11,14 @@ import {
 import GoalsPanel from './components/GoalsPanel'
 import UsersPanel from './components/UsersPanel'
 import CharterPanel from './components/CharterPanel'
+import ScorersPanel from './components/ScorersPanel'
+import EvaluatePanel from './components/EvaluatePanel'
 import ConversationPanel from './components/ConversationPanel'
 import ExampleReview from './components/ExampleReview'
 import CoverageMap from './components/CoverageMap'
 import SettingsPanel from './components/SettingsPanel'
 
-type ActiveTab = 'goals' | 'users' | 'charter' | 'examples'
+type ActiveTab = 'goals' | 'users' | 'charter' | 'dataset' | 'scorers' | 'evaluate'
 
 const EMPTY_STATE: SessionState = {
   session_id: '',
@@ -69,6 +71,11 @@ export default function App() {
   const [goals, setGoals] = useState<string[]>([''])
   const [goalSuggestions, setGoalSuggestions] = useState<string[]>([])
   const [goalSuggestionsLoading, setGoalSuggestionsLoading] = useState(false)
+  const [goalFeedback, setGoalFeedback] = useState<Array<{ goal: string; issue: string | null; suggestion: string | null }>>([])
+  const [goalFeedbackLoading, setGoalFeedbackLoading] = useState(false)
+
+  // --- Story suggestion state ---
+  const [storySuggestionsLoading, setStorySuggestionsLoading] = useState(false)
 
   // --- Charter phase state ---
   const [activeCriteria, setActiveCriteria] = useState<string[]>([])
@@ -96,7 +103,9 @@ export default function App() {
   // Tab availability
   const usersAvailable = nonEmptyGoals.length >= 2
   const charterAvailable = hasCharter || loading
-  const examplesAvailable = !!dataset
+  const datasetAvailable = hasCharter
+  const scorersAvailable = hasCharter
+  const evaluateAvailable = !!dataset
 
   // Check if input has changed since charter was generated
   const inputChanged = useMemo(() => {
@@ -127,10 +136,26 @@ export default function App() {
     }
   }, [])
 
+  const fetchGoalFeedback = useCallback(async (currentGoals: string[]) => {
+    const nonEmpty = currentGoals.filter(g => g.trim())
+    if (nonEmpty.length < 1) return
+
+    setGoalFeedbackLoading(true)
+    try {
+      const res = await evaluateGoals(nonEmpty)
+      setGoalFeedback(res.feedback)
+    } catch (err) {
+      console.error('Failed to evaluate goals:', err)
+    } finally {
+      setGoalFeedbackLoading(false)
+    }
+  }, [])
+
   // Called by GoalsPanel when user presses Enter on a non-empty goal
   const handleGoalCommit = useCallback(() => {
     fetchGoalSuggestions(goals)
-  }, [goals, fetchGoalSuggestions])
+    fetchGoalFeedback(goals)
+  }, [goals, fetchGoalSuggestions, fetchGoalFeedback])
 
   // Debounced re-fetch after accepting a suggestion
   const suggestionDebounceRef = useRef<number | null>(null)
@@ -168,6 +193,76 @@ export default function App() {
     return () => {
       if (suggestionDebounceRef.current) {
         window.clearTimeout(suggestionDebounceRef.current)
+      }
+    }
+  }, [])
+
+  // --- Story suggestion handlers ---
+
+  const fetchStorySuggestions = useCallback(async (currentGoals: string[], currentGroups: StoryGroup[]) => {
+    const nonEmpty = currentGoals.filter(g => g.trim())
+    if (nonEmpty.length === 0) return
+
+    const existingStories = currentGroups
+      .filter(g => g.role.trim())
+      .flatMap(g => g.stories.filter(s => s.what.trim()).map(s => ({ who: g.role, what: s.what, why: s.why })))
+
+    setStorySuggestionsLoading(true)
+    try {
+      const res = await suggestStories(nonEmpty, existingStories)
+      setSuggestedStories(res.suggestions.map(s => ({ who: s.who, what: s.what, why: s.why || '' })))
+    } catch (err) {
+      console.error('Failed to get story suggestions:', err)
+    } finally {
+      setStorySuggestionsLoading(false)
+    }
+  }, [])
+
+  // Called when user presses Enter after completing a story's "why" field
+  const handleStoryCommit = useCallback(() => {
+    fetchStorySuggestions(goals, storyGroups)
+  }, [goals, storyGroups, fetchStorySuggestions])
+
+  // Debounced re-fetch after accepting a story suggestion
+  const storySuggestionDebounceRef = useRef<number | null>(null)
+
+  const handleAcceptStory = useCallback((story: SuggestedStory) => {
+    setStoryGroups(prev => {
+      const existing = prev.findIndex(g => g.role.toLowerCase() === story.who.toLowerCase())
+      let updated: StoryGroup[]
+      if (existing >= 0) {
+        updated = [...prev]
+        updated[existing] = {
+          ...updated[existing],
+          stories: [...updated[existing].stories, { what: story.what, why: story.why }],
+        }
+      } else {
+        updated = [...prev, { role: story.who, stories: [{ what: story.what, why: story.why }] }]
+      }
+
+      // Schedule debounced re-fetch
+      if (storySuggestionDebounceRef.current) {
+        window.clearTimeout(storySuggestionDebounceRef.current)
+      }
+      storySuggestionDebounceRef.current = window.setTimeout(() => {
+        storySuggestionDebounceRef.current = null
+        fetchStorySuggestions(goals, updated)
+      }, 3000)
+
+      return updated
+    })
+    setSuggestedStories(prev => prev.filter(s => s !== story))
+  }, [goals, fetchStorySuggestions])
+
+  const handleDismissStory = useCallback((story: SuggestedStory) => {
+    setSuggestedStories(prev => prev.filter(s => s !== story))
+  }, [])
+
+  // Cleanup story suggestion debounce
+  useEffect(() => {
+    return () => {
+      if (storySuggestionDebounceRef.current) {
+        window.clearTimeout(storySuggestionDebounceRef.current)
       }
     }
   }, [])
@@ -398,9 +493,13 @@ export default function App() {
     }
   }, [sessionId])
 
+  // --- Charter suggestion state ---
+  const [charterSuggestionsLoading, setCharterSuggestionsLoading] = useState(false)
+  const charterSuggestionDebounceRef = useRef<number | null>(null)
+
   const handleSuggest = useCallback(async () => {
     if (!sessionId) return
-    setLoading(true)
+    setCharterSuggestionsLoading(true)
     try {
       const res = await suggestForCharter(sessionId)
       setSuggestions(prev => [...prev, ...res.suggestions])
@@ -408,9 +507,28 @@ export default function App() {
     } catch (err) {
       console.error('Failed to get suggestions:', err)
     } finally {
-      setLoading(false)
+      setCharterSuggestionsLoading(false)
     }
   }, [sessionId])
+
+  const scheduleCharterSuggestionRegen = useCallback(() => {
+    if (charterSuggestionDebounceRef.current) {
+      window.clearTimeout(charterSuggestionDebounceRef.current)
+    }
+    charterSuggestionDebounceRef.current = window.setTimeout(() => {
+      charterSuggestionDebounceRef.current = null
+      handleSuggest()
+    }, 3000)
+  }, [handleSuggest])
+
+  // Cleanup charter suggestion debounce
+  useEffect(() => {
+    return () => {
+      if (charterSuggestionDebounceRef.current) {
+        window.clearTimeout(charterSuggestionDebounceRef.current)
+      }
+    }
+  }, [])
 
   // Use a ref to track latest charter state for rapid updates
   const charterRef = useRef(state.charter)
@@ -454,31 +572,13 @@ export default function App() {
     }
 
     setSuggestions(prev => prev.filter(s => s !== suggestion))
-  }, [sessionId])
+    scheduleCharterSuggestionRegen()
+  }, [sessionId, scheduleCharterSuggestionRegen])
 
   const handleDismissSuggestion = useCallback((suggestion: Suggestion) => {
     setSuggestions(prev => prev.filter(s => s !== suggestion))
-  }, [])
-
-  const handleAcceptStory = useCallback((story: SuggestedStory) => {
-    setStoryGroups(prev => {
-      const existing = prev.findIndex(g => g.role.toLowerCase() === story.who.toLowerCase())
-      if (existing >= 0) {
-        const updated = [...prev]
-        updated[existing] = {
-          ...updated[existing],
-          stories: [...updated[existing].stories, { what: story.what, why: story.why }],
-        }
-        return updated
-      }
-      return [...prev, { role: story.who, stories: [{ what: story.what, why: story.why }] }]
-    })
-    setSuggestedStories(prev => prev.filter(s => s !== story))
-  }, [])
-
-  const handleDismissStory = useCallback((story: SuggestedStory) => {
-    setSuggestedStories(prev => prev.filter(s => s !== story))
-  }, [])
+    scheduleCharterSuggestionRegen()
+  }, [scheduleCharterSuggestionRegen])
 
   // --- Phase transition: charter -> dataset ---
 
@@ -487,16 +587,83 @@ export default function App() {
     setLoading(true)
     try {
       await finalizeCharter(sessionId)
-      await createDataset(sessionId)
-      const fullDs = await getDataset(sessionId)
-      setDataset(fullDs)
-      setActiveTab('examples')
+      setActiveTab('dataset')
     } catch (err) {
-      console.error('Failed to start dataset:', err)
+      console.error('Failed to finalize charter:', err)
     } finally {
       setLoading(false)
     }
   }, [sessionId])
+
+  const handleGenerateDataset = useCallback(async () => {
+    if (!sessionId) return
+    setLoading(true)
+    try {
+      if (!dataset) {
+        await createDataset(sessionId)
+      }
+      const ds = await getDataset(sessionId)
+      await synthesizeExamples(ds.id)
+      const fullDs = await getDataset(sessionId)
+      setDataset(fullDs)
+    } catch (err) {
+      console.error('Failed to generate dataset:', err)
+    } finally {
+      setLoading(false)
+    }
+  }, [sessionId, dataset])
+
+  const handleImportDataset = useCallback(async () => {
+    if (!sessionId) return
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = '.json,.csv'
+    input.onchange = async (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0]
+      if (!file) return
+
+      setLoading(true)
+      try {
+        // Ensure dataset exists
+        if (!dataset) {
+          await createDataset(sessionId)
+        }
+        const ds = await getDataset(sessionId)
+
+        const text = await file.text()
+        let examples: Array<{ input: string; expected_output: string; feature_area?: string; label?: string }>
+
+        if (file.name.endsWith('.csv')) {
+          const lines = text.split('\n').filter(l => l.trim())
+          const headers = lines[0].split(',').map(h => h.trim().toLowerCase())
+          examples = lines.slice(1).map(line => {
+            const values = line.split(',')
+            const obj: Record<string, string> = {}
+            headers.forEach((h, i) => { obj[h] = values[i]?.trim() || '' })
+            return {
+              input: obj.input || obj.question || obj.scenario || '',
+              expected_output: obj.expected_output || obj.output || obj.answer || '',
+              feature_area: obj.feature_area || 'unassigned',
+              label: obj.label,
+            }
+          })
+        } else {
+          const parsed = JSON.parse(text)
+          examples = Array.isArray(parsed) ? parsed : parsed.examples || []
+        }
+
+        const { importExamples } = await import('./api')
+        await importExamples(ds.id, examples)
+        const fullDs = await getDataset(sessionId)
+        setDataset(fullDs)
+      } catch (err) {
+        console.error('Failed to import:', err)
+      } finally {
+        setLoading(false)
+      }
+    }
+    input.click()
+  }, [sessionId, dataset])
 
   // --- Dataset phase handlers ---
 
@@ -652,27 +819,37 @@ export default function App() {
             badge={suggestions.length > 0 ? `+${suggestions.length}` : undefined}
           />
           <TabButton
-            label="Examples"
-            active={activeTab === 'examples'}
-            onClick={() => setActiveTab('examples')}
-            disabled={!examplesAvailable}
+            label="Dataset"
+            active={activeTab === 'dataset'}
+            onClick={() => setActiveTab('dataset')}
+            disabled={!datasetAvailable}
             badge={dataset ? `${dataset.examples?.length || 0}` : undefined}
+          />
+          <TabButton
+            label="Scorers"
+            active={activeTab === 'scorers'}
+            onClick={() => setActiveTab('scorers')}
+            disabled={!scorersAvailable}
+          />
+          <TabButton
+            label="Evaluate"
+            active={activeTab === 'evaluate'}
+            onClick={() => setActiveTab('evaluate')}
+            disabled={!evaluateAvailable}
           />
         </div>
         <div className="flex items-center gap-1">
-          {sessionId && (
-            <button
-              onClick={() => setShowAssistant(!showAssistant)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                showAssistant
-                  ? 'bg-accent text-accent-foreground'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-              }`}
-            >
-              <MessageSquare className="w-3.5 h-3.5" />
-              AI Assist
-            </button>
-          )}
+          <button
+            onClick={() => setShowAssistant(!showAssistant)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+              showAssistant
+                ? 'bg-accent text-accent-foreground'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+            }`}
+          >
+            <MessageSquare className="w-3.5 h-3.5" />
+            AI Assist
+          </button>
           <button
             onClick={() => setShowSettings(true)}
             className="w-8 h-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
@@ -696,7 +873,10 @@ export default function App() {
               onAcceptGoalSuggestion={handleAcceptGoalSuggestion}
               onDismissGoalSuggestion={handleDismissGoalSuggestion}
               suggestionsLoading={goalSuggestionsLoading}
+              goalFeedback={goalFeedback}
+              goalFeedbackLoading={goalFeedbackLoading}
               onDefineUsers={() => setActiveTab('users')}
+              hasCharter={hasCharter}
             />
           )}
 
@@ -704,76 +884,130 @@ export default function App() {
             <UsersPanel
               storyGroups={storyGroups}
               onStoryGroupsChange={setStoryGroups}
+              onStoryCommit={handleStoryCommit}
               suggestedStories={suggestedStories}
               onAcceptStory={handleAcceptStory}
               onDismissStory={handleDismissStory}
+              storySuggestionsLoading={storySuggestionsLoading}
               onBackToGoals={() => setActiveTab('goals')}
               onGenerate={handleSubmitIntake}
               canGenerate={nonEmptyGoals.length > 0}
               loading={loading}
+              hasCharter={hasCharter}
             />
           )}
 
           {activeTab === 'charter' && (
             <div className="flex-1 min-h-0 flex flex-col">
-              <div className="flex-1 min-h-0 flex justify-center overflow-y-auto">
-                <div className="w-full max-w-2xl">
-                  <CharterPanel
-                    charter={state.charter}
-                    validation={state.validation}
-                    activeCriteria={activeCriteria}
-                    onEditCriterion={handleEditCriterion}
-                    onAddCriterion={handleAddCriterion}
-                    onEditAlignment={handleEditAlignment}
-                    onEditTask={handleEditTask}
-                    suggestions={suggestions}
-                    onAcceptSuggestion={handleAcceptSuggestion}
-                    onDismissSuggestion={handleDismissSuggestion}
-                    onGenerate={handleSubmitIntake}
-                    onRegenerate={handleSubmitIntake}
-                    onValidate={handleValidate}
-                    onSuggest={handleSuggest}
-                    loading={loading}
-                    hasSession={!!sessionId}
-                    canGenerate={nonEmptyGoals.length > 0}
-                    inputChanged={inputChanged}
-                    onHeaderClick={() => {}}
-                    isFocused={true}
-                    isCompact={false}
-                  />
+              {/* Charter subheader */}
+              <div className="px-4 h-12 border-b border-border bg-surface-raised flex items-center justify-between flex-shrink-0">
+                <h2 className="text-sm font-semibold text-foreground">Charter</h2>
+                <div className="flex items-center gap-2">
+                  {hasCharter && (
+                    <button
+                      onClick={handleValidate}
+                      disabled={loading}
+                      className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 disabled:opacity-50"
+                    >
+                      <ShieldCheck className="w-3 h-3" />
+                      Validate
+                    </button>
+                  )}
+                  {hasCharter && (
+                    <button
+                      onClick={handleStartDataset}
+                      disabled={loading}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-accent text-accent-foreground hover:opacity-90 disabled:opacity-50 transition-all"
+                    >
+                      Dataset
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
               </div>
-              {hasCharter && !dataset && (
-                <div className="p-4 border-t border-border bg-surface-raised flex justify-center">
-                  <button
-                    onClick={handleStartDataset}
-                    disabled={loading}
-                    className="px-8 py-2.5 bg-success text-white rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-50 transition-opacity"
-                  >
-                    {loading ? 'Starting...' : 'Finalize & start dataset'}
-                  </button>
+              <CharterPanel
+                charter={state.charter}
+                validation={state.validation}
+                activeCriteria={activeCriteria}
+                onEditCriterion={handleEditCriterion}
+                onAddCriterion={handleAddCriterion}
+                onEditAlignment={handleEditAlignment}
+                onEditTask={handleEditTask}
+                suggestions={suggestions}
+                onAcceptSuggestion={handleAcceptSuggestion}
+                onDismissSuggestion={handleDismissSuggestion}
+                onRegenSuggestions={handleSuggest}
+                suggestionsLoading={charterSuggestionsLoading}
+                loading={loading}
+              />
+            </div>
+          )}
+
+          {activeTab === 'dataset' && (
+            <div className="flex-1 min-h-0 flex flex-col">
+              {dataset && (dataset.examples?.length || 0) > 0 ? (
+                <ExampleReview
+                  examples={dataset.examples || []}
+                  charter={state.charter}
+                  loading={loading}
+                  onUpdateExample={handleUpdateExample}
+                  onDeleteExample={handleDeleteExample}
+                  onImport={handleImport}
+                  onSynthesize={handleSynthesize}
+                  onAutoReview={handleAutoReview}
+                  onExport={handleExport}
+                  onShowCoverageMap={handleShowCoverageMap}
+                  onHeaderClick={() => {}}
+                  isFocused={true}
+                />
+              ) : (
+                <div className="flex-1 flex items-center justify-center">
+                  <div className="flex flex-col items-center gap-6 max-w-md text-center">
+                    <div>
+                      <h2 className="text-lg font-semibold text-foreground mb-1">Build your dataset</h2>
+                      <p className="text-sm text-muted-foreground">
+                        Create evaluation examples from your charter criteria, or import an existing dataset.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <button
+                        onClick={handleGenerateDataset}
+                        disabled={loading}
+                        className="flex flex-col items-center gap-2 px-6 py-5 rounded-xl border border-border bg-surface-raised hover:border-accent hover:bg-accent/5 transition-all group disabled:opacity-50"
+                      >
+                        <Sparkles className="w-6 h-6 text-muted-foreground group-hover:text-accent transition-colors" />
+                        <span className="text-sm font-medium text-foreground">{loading ? 'Generating...' : 'Generate'}</span>
+                        <span className="text-xs text-muted-foreground">Create examples from charter</span>
+                      </button>
+                      <span className="text-xs text-muted-foreground">or</span>
+                      <button
+                        onClick={handleImportDataset}
+                        disabled={loading}
+                        className="flex flex-col items-center gap-2 px-6 py-5 rounded-xl border border-border bg-surface-raised hover:border-accent hover:bg-accent/5 transition-all group disabled:opacity-50"
+                      >
+                        <Upload className="w-6 h-6 text-muted-foreground group-hover:text-accent transition-colors" />
+                        <span className="text-sm font-medium text-foreground">Import</span>
+                        <span className="text-xs text-muted-foreground">Upload JSON or CSV file</span>
+                      </button>
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
           )}
 
-          {activeTab === 'examples' && dataset && (
-            <div className="flex-1 min-h-0 flex flex-col">
-              <ExampleReview
-                examples={dataset.examples || []}
-                charter={state.charter}
-                loading={loading}
-                onUpdateExample={handleUpdateExample}
-                onDeleteExample={handleDeleteExample}
-                onImport={handleImport}
-                onSynthesize={handleSynthesize}
-                onAutoReview={handleAutoReview}
-                onExport={handleExport}
-                onShowCoverageMap={handleShowCoverageMap}
-                onHeaderClick={() => {}}
-                isFocused={true}
-              />
-            </div>
+          {activeTab === 'scorers' && (
+            <ScorersPanel
+              charter={state.charter}
+              hasDataset={!!dataset}
+            />
+          )}
+
+          {activeTab === 'evaluate' && (
+            <EvaluatePanel
+              dataset={dataset}
+              onExport={handleExport}
+            />
           )}
         </div>
 

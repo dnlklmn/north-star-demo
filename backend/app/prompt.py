@@ -316,6 +316,81 @@ Return ONLY valid JSON:
 }}"""
 
 
+def build_suggest_stories_prompt(goals: list[str], stories: list[dict]) -> str:
+    goals_text = "\n".join(f"- {g}" for g in goals if g.strip())
+
+    existing_stories_text = ""
+    if stories:
+        for s in stories:
+            who = s.get("who", "")
+            what = s.get("what", "")
+            why = s.get("why", "")
+            existing_stories_text += f"- As a {who}, I want to {what}, so that {why}\n"
+    else:
+        existing_stories_text = "(none yet)"
+
+    return f"""You are helping a product person define user stories for an AI feature they are building.
+
+They have these business goals:
+{goals_text}
+
+And these existing user stories:
+{existing_stories_text}
+
+Suggest 2-3 additional user stories they likely haven't thought of yet. These should be:
+- Specific and concrete (not vague platitudes)
+- Complementary to what they already have (fill gaps, not duplicate existing stories)
+- Written from the perspective of a real user role
+- Aligned with the business goals listed above
+
+Each suggestion must have:
+- "who": the user role (e.g., "product manager", "end user")
+- "what": the action they want to perform
+- "why": the reason/benefit
+
+Return ONLY valid JSON:
+{{
+  "suggestions": [
+    {{"who": "...", "what": "...", "why": "..."}},
+    {{"who": "...", "what": "...", "why": "..."}}
+  ]
+}}"""
+
+
+def build_evaluate_goals_prompt(goals: list[str]) -> str:
+    goals_text = "\n".join(f"{i+1}. {g}" for i, g in enumerate(goals) if g.strip())
+
+    return f"""You are helping a product person define business goals for an AI feature. Review each goal for quality.
+
+Goals to evaluate:
+{goals_text}
+
+For each goal, check:
+1. **Too broad** — Could this apply to any product? (e.g. "Improve user experience" is too broad; "Reduce candidate screening time from 2 hours to 15 minutes" is specific)
+2. **Too technical** — Is this an implementation detail, not a business outcome? (e.g. "Use RAG for retrieval" is technical; "Surface relevant documents without manual search" is a business goal)
+3. **Not independent** — Is this a subset or restatement of another goal in the list?
+4. **Not measurable** — Could you tell if this goal was achieved? It should describe an observable outcome.
+
+Return ONLY valid JSON:
+{{
+  "feedback": [
+    {{
+      "goal": "the original goal text",
+      "issue": "brief description of the problem, or null if the goal is fine",
+      "suggestion": "an improved version of the goal, or null if the goal is fine"
+    }}
+  ]
+}}
+
+Rules:
+- Return one entry per goal, in the same order as the input
+- If a goal is good, set both issue and suggestion to null
+- Be concise — issues should be 5-10 words max (e.g., "Too broad — could apply to any product")
+- Suggestions should be concrete rewrites in the same voice as the original
+- Don't be overly harsh — only flag real problems. A goal that's reasonably specific and measurable is fine.
+- At least some goals should pass without issues — don't nitpick everything"""
+
+
 SECTION_1_ROLE = """You are a charter builder. Your job is to help product and business people define what good AI output looks like for their specific feature — in terms they can evaluate themselves, without technical knowledge.
 
 The output is a charter: a structured set of criteria that guides dataset creation and evaluation. You should feel like a thoughtful conversation partner, not a form.

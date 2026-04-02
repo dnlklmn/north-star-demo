@@ -256,6 +256,30 @@ class SuggestGoalsResponse(BaseModel):
     suggestions: list[str] = Field(default_factory=list)
 
 
+class GoalFeedback(BaseModel):
+    """Feedback on a single business goal's quality."""
+    goal: str
+    issue: Optional[str] = None  # null means goal is fine
+    suggestion: Optional[str] = None  # improved version if issue exists
+
+
+class EvaluateGoalsRequest(BaseModel):
+    goals: list[str]
+
+
+class EvaluateGoalsResponse(BaseModel):
+    feedback: list[GoalFeedback] = Field(default_factory=list)
+
+
+class SuggestStoriesRequest(BaseModel):
+    goals: list[str]
+    stories: list[dict]  # each dict has who, what, why
+
+
+class SuggestStoriesResponse(BaseModel):
+    suggestions: list[dict] = Field(default_factory=list)  # each dict has who, what, why
+
+
 class EnrichRequest(BaseModel):
     gap_type: str  # "coverage" | "balance" | "label" | "feature_area"
     targets: list[str]  # criteria names or feature area names
