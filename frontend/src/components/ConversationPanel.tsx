@@ -1,6 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { Send } from 'lucide-react'
-import type { Message, AgentStatus, Validation, Phase, ExtractedStory } from '../types'
+import type { Message, AgentStatus, Validation } from '../types'
+
+type Phase = 'goals' | 'users' | 'stories' | 'charter' | 'dataset'
+type ExtractedStory = { who: string; what: string; why: string }
 import SoftOkBanner from './SoftOkBanner'
 
 const STATUS_SEQUENCES: Record<string, string[]> = {

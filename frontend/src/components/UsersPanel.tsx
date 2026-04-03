@@ -182,8 +182,6 @@ export default function UsersPanel({
     stories: suggestedStories.filter(s => s.who === role),
   }))
 
-  const storyCount = storyGroups.reduce((n, g) => n + g.stories.filter(s => s.what.trim()).length, 0)
-
   return (
     <PanelLayout
       title="User Stories"

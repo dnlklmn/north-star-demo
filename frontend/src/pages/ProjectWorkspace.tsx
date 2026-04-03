@@ -1,7 +1,7 @@
-import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { MessageSquare, Settings, X, ShieldCheck, ArrowRight, ArrowLeft, Sparkles, Upload, Loader2 } from 'lucide-react'
-import type { Message, SessionState, AgentStatus, StoryGroup, Suggestion, SuggestedStory, Dataset, Example, GapAnalysis } from '../types'
+import type { Message, SessionState, AgentStatus, StoryGroup, Suggestion, SuggestedStory, Dataset, Example, GapAnalysis, ScorerDef } from '../types'
 import {
   createSession, getSession, sendMessage, patchCharter, finalizeCharter,
   validateCharter, suggestForCharter, suggestGoals, evaluateGoals, suggestStories,
@@ -96,14 +96,14 @@ export default function ProjectWorkspace() {
   ])
 
   // --- Input change tracking for regenerate button ---
-  const [savedInput, setSavedInput] = useState<{ goals: string; stories: string } | null>(null)
+  const [, setSavedInput] = useState<{ goals: string; stories: string } | null>(null)
 
   // --- Dataset phase state ---
   const [dataset, setDataset] = useState<Dataset | null>(null)
   const [actionSuggestions, setActionSuggestions] = useState<Array<{ action: string; label: string; reason: string }>>([])
 
   // --- Scorers state (lifted up for persistence across tab switches) ---
-  const [scorers, setScorers] = useState<Array<{ name: string; type: string; description: string; code: string }>>([])
+  const [scorers, setScorers] = useState<ScorerDef[]>([])
 
   const [gapAnalysis, setGapAnalysis] = useState<GapAnalysis | null>(null)
   const [showCoverageMap, setShowCoverageMap] = useState(false)
@@ -190,14 +190,6 @@ export default function ProjectWorkspace() {
   const datasetAvailable = hasCharter
   const scorersAvailable = hasCharter
   const evaluateAvailable = !!dataset
-
-  // Check if input has changed since charter was generated
-  const inputChanged = useMemo(() => {
-    if (!savedInput) return false
-    const currentGoals = nonEmptyGoals.join('\n')
-    const currentStories = formatStoryGroups(storyGroups)
-    return currentGoals !== savedInput.goals || currentStories !== savedInput.stories
-  }, [savedInput, nonEmptyGoals, storyGroups])
 
   // --- Project name ---
   const startEditingName = () => {

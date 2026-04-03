@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Plus, Pencil, Trash2, MessageSquare, ArrowRight } from 'lucide-react'
-import type { ExtractedStory, Phase } from '../types'
+type Phase = 'goals' | 'users' | 'stories' | 'charter' | 'dataset'
+type ExtractedStory = { who: string; what: string; why: string }
 
 interface Props {
   phase: Phase
@@ -473,7 +474,7 @@ export default function DiscoveryScreen({
 // --- StoryItem sub-component ---
 function StoryItem({
   story,
-  index,
+  index: _index,
   editing,
   onStartEdit,
   onCancelEdit,
@@ -526,7 +527,6 @@ function StoryItem({
               if (e.key === 'Enter') {
                 const container = (e.target as HTMLElement).closest('.space-y-2')
                 if (container) {
-                  const inputs = container.querySelectorAll('input')
                   const whoInput = container.querySelector('[data-field="who"]') as HTMLInputElement | null
                   const whatInput = container.querySelector('[data-field="what"]') as HTMLInputElement
                   const whyInput = container.querySelector('[data-field="why"]') as HTMLInputElement

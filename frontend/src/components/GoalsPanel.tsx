@@ -32,7 +32,7 @@ export default function GoalsPanel({
   onDismissGoalSuggestion,
   suggestionsLoading,
   goalFeedback,
-  goalFeedbackLoading,
+  goalFeedbackLoading: _goalFeedbackLoading,
   onDefineUsers,
   hasCharter,
 }: Props) {

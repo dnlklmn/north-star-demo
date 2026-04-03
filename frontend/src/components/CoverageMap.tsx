@@ -49,13 +49,12 @@ export default function CoverageMap({ gaps, onClose, onFillGaps, loading }: Cove
             {featureAreas.length >= 3 && (
               <div className="flex justify-center mb-6">
                 <RadarChart
-                  points={featureAreas.map(fa => {
+                  dimensions={featureAreas.map(fa => {
                     // For each feature area, compute % of criteria that have at least 1 example
                     const coveredCount = criteria.filter(c => ((matrix[c] || {})[fa] || 0) > 0).length
-                    const pct = criteria.length > 0 ? Math.round((coveredCount / criteria.length) * 100) : 0
-                    return { label: fa, value: pct }
+                    const pct = criteria.length > 0 ? (coveredCount / criteria.length) : 0
+                    return { label: fa, value: pct, status: pct >= 0.7 ? 'good' as const : pct > 0 ? 'weak' as const : 'fail' as const }
                   })}
-                  threshold={70}
                   size={240}
                 />
               </div>

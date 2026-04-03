@@ -1,4 +1,4 @@
-import type { CreateSessionResponse, SendMessageResponse, SessionState, Charter, Dataset, Example, GapAnalysis, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse, TaskDefinition, ProjectSummary, StoryGroup } from './types'
+import type { CreateSessionResponse, SendMessageResponse, SessionState, Charter, Dataset, Example, GapAnalysis, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse, ProjectSummary, StoryGroup } from './types'
 
 const BASE = import.meta.env.VITE_API_URL || '/api'
 

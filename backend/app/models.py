@@ -33,6 +33,13 @@ class ValidationStatus(str, Enum):
     untested = "untested"
 
 
+class DiscoveryPhase(str, Enum):
+    goals = "goals"
+    users = "users"
+    stories = "stories"
+    charter = "charter"
+
+
 # --- Charter models ---
 
 class TaskDefinition(BaseModel):
@@ -98,6 +105,7 @@ class SessionState(BaseModel):
     validation: Validation = Field(default_factory=Validation)
     rounds_of_questions: int = 0
     agent_status: AgentStatus = AgentStatus.drafting
+    discovery_phase: DiscoveryPhase = DiscoveryPhase.goals
     scorers: list[dict] = Field(default_factory=list)
 
 

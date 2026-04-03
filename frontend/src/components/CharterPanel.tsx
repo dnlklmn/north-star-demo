@@ -213,7 +213,7 @@ function buildRadarDimensions(charter: Charter, validation: Validation) {
   dims.push({ label: 'Balance', ...bal })
   if (charter.alignment.length > 0) {
     const contentScore = Math.min(1, charter.alignment.length / 4)
-    const passCount = validation.alignment.filter(v => v.status === 'pass' || v.status === 'good').length
+    const passCount = validation.alignment.filter(v => v.status === 'pass' || (v.status as string) === 'good').length
     const hasValidation = validation.alignment.length > 0
     if (hasValidation) {
       const validationRatio = passCount / Math.max(1, charter.alignment.length)

@@ -4,7 +4,6 @@ import type { Example, Charter } from '../types'
 import Badge, { SOURCE_COLORS, LABEL_COLORS, REVIEW_COLORS } from './examples/Badge'
 import DeleteModal from './examples/DeleteModal'
 import GenerateModal from './examples/GenerateModal'
-import { formatWithLineBreaks } from '../lib/formatters'
 
 interface ExampleReviewProps {
   examples: Example[]
@@ -86,6 +85,7 @@ export default function ExampleReview({
   }
 
   const { count: suggestedCount, reason: suggestionReason } = getSuggestedGeneration()
+  const totalScenarios = Math.max((charter.coverage?.criteria?.length || 0) * (charter.alignment?.length || 0), 1)
 
   const filtered = examples.filter(ex => {
     if (filterArea && ex.feature_area !== filterArea) return false
@@ -316,6 +316,7 @@ export default function ExampleReview({
           onCancel={() => setShowGenerateModal(false)}
           suggestedCount={suggestedCount}
           suggestionReason={suggestionReason}
+          totalScenarios={totalScenarios}
         />
       )}
     </div>

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Check, ChevronDown, ChevronUp } from 'lucide-react'
-import type { Screen, Phase } from '../types'
+type Screen = 'goals' | 'users' | 'stories' | 'charter' | 'dataset'
+type Phase = 'goals' | 'users' | 'stories' | 'charter' | 'dataset'
 
 interface Props {
   currentScreen: Screen

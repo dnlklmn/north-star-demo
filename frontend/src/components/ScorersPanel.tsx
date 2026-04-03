@@ -1,13 +1,6 @@
 import { useState } from 'react'
 import { Sparkles, ChevronRight, Copy, Download, Loader2, ArrowRight } from 'lucide-react'
-import type { Charter } from '../types'
-
-interface ScorerDef {
-  name: string
-  type: 'coverage' | 'alignment' | 'balance' | 'rot'
-  description: string
-  code: string
-}
+import type { Charter, ScorerDef } from '../types'
 
 interface Props {
   charter: Charter
@@ -17,7 +10,7 @@ interface Props {
   onNavigateToEvaluate?: () => void
 }
 
-export default function ScorersPanel({ charter, hasDataset, scorers: externalScorers, onScorersChange, onNavigateToEvaluate }: Props) {
+export default function ScorersPanel({ charter, hasDataset: _hasDataset, scorers: externalScorers, onScorersChange, onNavigateToEvaluate }: Props) {
   const [localScorers, setLocalScorers] = useState<ScorerDef[]>([])
   const scorers = externalScorers ?? localScorers
   const setScorers = (s: ScorerDef[]) => {
