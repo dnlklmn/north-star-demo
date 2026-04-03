@@ -1,15 +1,18 @@
 """FastAPI application — charter generation agent backend.
 
-9 endpoints:
-- POST /sessions — create a new session
+Core endpoints:
+- GET  /sessions — list all sessions (project list)
+- POST /sessions — create a new session (accepts optional name)
+- GET  /sessions/{id} — get current session state
+- PATCH /sessions/{id}/name — rename a session
+- PATCH /sessions/{id}/input — save goals/stories without running agent
 - POST /sessions/{id}/message — send a user message
 - POST /sessions/{id}/proceed — user-initiated proceed to review
-- GET /sessions/{id} — get current session state
 - PATCH /sessions/{id}/charter — user edits during review
 - POST /sessions/{id}/finalize — mark charter as final
-- GET /sessions/{id}/turns — get all turns for a session
+- GET  /sessions/{id}/turns — get all turns for a session
 - POST /judge/run — run judge scoring on unjudged turns
-- GET /judge/results — get judgement results
+- GET  /judge/results — get judgement results
 """
 
 from __future__ import annotations
@@ -22,8 +25,9 @@ import uuid
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from pathlib import Path
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import db
 from .agent import run_agent_turn, run_dataset_chat
@@ -48,6 +52,7 @@ from .models import (
     InferSchemaResponse,
     PatchCharterRequest,
     ProceedResponse,
+    ProjectSummary,
     SendMessageRequest,
     SendMessageResponse,
     SessionState,
@@ -60,6 +65,7 @@ from .models import (
     SynthesizeRequest,
     TaskDefinition,
     UpdateExampleRequest,
+    UpdateInputRequest,
     UpdateSettingsRequest,
     ValidateResponse,
 )
@@ -75,6 +81,7 @@ from .tools import (
     call_detect_schema,
     call_infer_schema,
     call_import_from_url,
+    set_request_api_key,
 )
 
 load_dotenv(Path(__file__).parent.parent / ".env", override=True)
@@ -94,15 +101,23 @@ app = FastAPI(title="North Star", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=["*"],  # Allow any origin for deployed prototype
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_headers=["Content-Type", "Authorization", "X-Anthropic-Key"],
 )
+
+
+class ApiKeyMiddleware(BaseHTTPMiddleware):
+    """Extract X-Anthropic-Key header and set it for the current request context."""
+    async def dispatch(self, request: Request, call_next):
+        api_key = request.headers.get("x-anthropic-key")
+        set_request_api_key(api_key if api_key else None)
+        response = await call_next(request)
+        return response
+
+
+app.add_middleware(ApiKeyMiddleware)
 
 
 # --- Helpers ---
@@ -123,6 +138,13 @@ async def _save_state(session_id: str, state: SessionState, conversation: list[d
 
 
 # --- Endpoints ---
+
+@app.get("/health")
+async def health_check():
+    """Health check that also reports whether a default API key is configured."""
+    has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    return {"status": "ok", "has_default_api_key": has_key}
+
 
 @app.post("/suggest-goals", response_model=SuggestGoalsResponse)
 async def suggest_goals(req: SuggestGoalsRequest):
@@ -188,7 +210,7 @@ async def create_session(req: CreateSessionRequest):
         agent_status=AgentStatus.drafting,
     )
 
-    await db.create_session(session_id, state.model_dump())
+    await db.create_session(session_id, state.model_dump(), name=req.name)
 
     # Run initial agent turn
     initial_input_parts = []
@@ -215,6 +237,74 @@ async def create_session(req: CreateSessionRequest):
         suggestions=result.suggestions if result else [],
         suggested_stories=result.suggested_stories if result else [],
     )
+
+
+@app.get("/sessions", response_model=list[ProjectSummary])
+async def list_sessions():
+    """List all sessions ordered by most recently updated."""
+    rows = await db.list_sessions(limit=50)
+    return [
+        ProjectSummary(
+            id=r["id"],
+            name=r["name"],
+            created_at=r["created_at"],
+            updated_at=r["updated_at"],
+            agent_status=r["agent_status"],
+            has_charter=r.get("has_charter", False),
+            has_dataset=r.get("has_dataset", False),
+        )
+        for r in rows
+    ]
+
+
+@app.patch("/sessions/{session_id}/name")
+async def rename_session(session_id: str, body: dict):
+    """Rename a session."""
+    name = body.get("name")
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    try:
+        row = await db.update_session_name(session_id, name)
+        return row
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+
+@app.patch("/sessions/{session_id}/input")
+async def update_session_input(session_id: str, req: UpdateInputRequest):
+    """Save structured goals and story_groups without triggering the agent."""
+    state, conversation = await _load_state(session_id)
+
+    state.input.goals = req.goals
+    state.input.story_groups = req.story_groups
+
+    try:
+        result = await db.update_session_input(session_id, state.model_dump())
+        return {"state": result["state"]}
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+
+@app.patch("/sessions/{session_id}/scorers")
+async def update_session_scorers(session_id: str, body: dict):
+    """Save generated scorers to session state."""
+    state, conversation = await _load_state(session_id)
+    state.scorers = body.get("scorers", [])
+    try:
+        result = await db.update_session_input(session_id, state.model_dump())
+        return {"ok": True}
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """Delete a session and all associated data."""
+    try:
+        await db.delete_session(session_id)
+        return {"ok": True}
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Session not found")
 
 
 @app.post("/sessions/{session_id}/message", response_model=SendMessageResponse)
@@ -257,9 +347,13 @@ async def proceed_to_review(session_id: str):
 
 @app.get("/sessions/{session_id}")
 async def get_session(session_id: str):
+    row = await db.get_session(session_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Session not found")
     state, conversation = await _load_state(session_id)
     return {
         "session_id": session_id,
+        "name": row.get("name"),
         "state": state.model_dump(),
         "conversation": conversation,
     }

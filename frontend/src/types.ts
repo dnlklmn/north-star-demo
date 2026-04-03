@@ -49,6 +49,25 @@ export interface SessionInput {
   business_goals: string | null
   user_stories: string | null
   conversation_history: Message[]
+  goals?: string[]
+  story_groups?: StoryGroup[]
+}
+
+export interface ProjectSummary {
+  id: string
+  name: string
+  created_at: string
+  updated_at: string
+  agent_status: AgentStatus
+  has_charter: boolean
+  has_dataset: boolean
+}
+
+export interface ScorerDef {
+  name: string
+  type: string
+  description: string
+  code: string
 }
 
 export interface SessionState {
@@ -58,6 +77,7 @@ export interface SessionState {
   validation: Validation
   rounds_of_questions: number
   agent_status: AgentStatus
+  scorers?: ScorerDef[]
 }
 
 export interface Message {

@@ -43,12 +43,27 @@ logger = logging.getLogger(__name__)
 
 _client: anthropic.Anthropic | None = None
 
+# Per-request API key (set via contextvars for thread safety)
+import contextvars
+_request_api_key: contextvars.ContextVar[str | None] = contextvars.ContextVar('_request_api_key', default=None)
+
 # Cached settings (refreshed each LLM call)
 _cached_settings: dict | None = None
 
 
+def set_request_api_key(key: str | None) -> None:
+    """Set the API key for the current request context."""
+    _request_api_key.set(key)
+
+
 def get_client() -> anthropic.Anthropic:
+    """Get an Anthropic client — uses per-request key if provided, else env var."""
     global _client
+    request_key = _request_api_key.get(None)
+    if request_key:
+        # Per-request key: create a fresh client (not cached)
+        return anthropic.Anthropic(api_key=request_key)
+    # Default: use env var (cached singleton)
     if _client is None:
         _client = anthropic.Anthropic()
     return _client

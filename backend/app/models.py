@@ -84,6 +84,8 @@ class Validation(BaseModel):
 class SessionInput(BaseModel):
     business_goals: Optional[str] = None
     user_stories: Optional[str] = None
+    goals: list[str] = Field(default_factory=list)
+    story_groups: list[dict] = Field(default_factory=list)
     conversation_history: list[dict] = Field(default_factory=list)
 
 
@@ -96,12 +98,14 @@ class SessionState(BaseModel):
     validation: Validation = Field(default_factory=Validation)
     rounds_of_questions: int = 0
     agent_status: AgentStatus = AgentStatus.drafting
+    scorers: list[dict] = Field(default_factory=list)
 
 
 # --- API request/response models ---
 
 class CreateSessionRequest(BaseModel):
     initial_input: SessionInput
+    name: Optional[str] = None
 
 
 class CreateSessionResponse(BaseModel):
@@ -110,6 +114,23 @@ class CreateSessionResponse(BaseModel):
     message: str
     suggestions: list['Suggestion'] = Field(default_factory=list)
     suggested_stories: list['SuggestedStory'] = Field(default_factory=list)
+
+
+class ProjectSummary(BaseModel):
+    """Lightweight session summary for the project list."""
+    id: str
+    name: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    agent_status: str
+    has_charter: bool = False
+    has_dataset: bool = False
+
+
+class UpdateInputRequest(BaseModel):
+    """Save structured goals + story_groups without triggering the agent."""
+    goals: list[str] = Field(default_factory=list)
+    story_groups: list[dict] = Field(default_factory=list)
 
 
 class SendMessageRequest(BaseModel):

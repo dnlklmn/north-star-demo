@@ -1,12 +1,89 @@
-import type { CreateSessionResponse, SendMessageResponse, SessionState, Charter, Dataset, Example, GapAnalysis, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse, TaskDefinition } from './types'
+import type { CreateSessionResponse, SendMessageResponse, SessionState, Charter, Dataset, Example, GapAnalysis, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse, TaskDefinition, ProjectSummary, StoryGroup } from './types'
 
 const BASE = '/api'
+
+// --- API Key management (localStorage) ---
+
+const API_KEY_STORAGE_KEY = 'northstar_anthropic_api_key'
+
+export function getApiKey(): string {
+  return localStorage.getItem(API_KEY_STORAGE_KEY) || ''
+}
+
+export function setApiKey(key: string): void {
+  if (key.trim()) {
+    localStorage.setItem(API_KEY_STORAGE_KEY, key.trim())
+  } else {
+    localStorage.removeItem(API_KEY_STORAGE_KEY)
+  }
+}
+
+export function hasApiKey(): boolean {
+  return !!getApiKey()
+}
+
+// --- Fetch wrapper that attaches API key header ---
+
+function apiHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...extra }
+  const key = getApiKey()
+  if (key) {
+    headers['X-Anthropic-Key'] = key
+  }
+  return headers
+}
+
+async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
+  const res = await fetch(url, {
+    ...init,
+    headers: {
+      ...apiHeaders(),
+      ...(init?.headers as Record<string, string> || {}),
+    },
+  })
+  if (res.status === 401) {
+    throw new Error('Invalid or missing API key. Please add your Anthropic API key in Settings.')
+  }
+  return res
+}
+
+// --- Health check ---
+
+export async function checkHealth(): Promise<{ status: string; has_default_api_key: boolean }> {
+  const res = await apiFetch(`${BASE}/health`)
+  if (!res.ok) return { status: 'error', has_default_api_key: false }
+  return res.json()
+}
+
+// --- Scorers persistence ---
+
+export async function saveScorers(sessionId: string, scorers: Array<{ name: string; type: string; description: string; code: string }>): Promise<void> {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/scorers`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scorers }),
+  })
+  if (!res.ok) throw new Error(`Failed to save scorers: ${res.status}`)
+}
+
+// --- Project / Session management ---
+
+export async function listSessions(): Promise<{ sessions: ProjectSummary[] }> {
+  const res = await apiFetch(`${BASE}/sessions`)
+  if (!res.ok) throw new Error(`Failed to list sessions: ${res.status}`)
+  const data = await res.json()
+  // Backend returns a plain array; wrap it
+  return { sessions: Array.isArray(data) ? data : data.sessions ?? [] }
+}
 
 export async function createSession(input: {
   business_goals?: string
   user_stories?: string
+  name?: string
+  goals?: string[]
+  story_groups?: StoryGroup[]
 }): Promise<CreateSessionResponse> {
-  const res = await fetch(`${BASE}/sessions`, {
+  const res = await apiFetch(`${BASE}/sessions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -14,11 +91,45 @@ export async function createSession(input: {
         business_goals: input.business_goals || null,
         user_stories: input.user_stories || null,
         conversation_history: [],
+        goals: input.goals,
+        story_groups: input.story_groups,
       },
+      name: input.name,
     }),
   })
   if (!res.ok) throw new Error(`Failed to create session: ${res.status}`)
   return res.json()
+}
+
+export async function updateSessionName(
+  sessionId: string,
+  name: string
+): Promise<void> {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/name`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+  if (!res.ok) throw new Error(`Failed to rename session: ${res.status}`)
+}
+
+export async function updateSessionInput(
+  sessionId: string,
+  input: { goals?: string[]; story_groups?: StoryGroup[] }
+): Promise<void> {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/input`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  if (!res.ok) throw new Error(`Failed to save input: ${res.status}`)
+}
+
+export async function deleteSession(sessionId: string): Promise<void> {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok) throw new Error(`Failed to delete session: ${res.status}`)
 }
 
 export async function sendMessage(
@@ -26,7 +137,7 @@ export async function sendMessage(
   message: string,
   options?: { regenerate?: boolean }
 ): Promise<SendMessageResponse> {
-  const res = await fetch(`${BASE}/sessions/${sessionId}/message`, {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/message`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message, regenerate: options?.regenerate ?? false }),
@@ -38,7 +149,7 @@ export async function sendMessage(
 export async function getSession(
   sessionId: string
 ): Promise<{ session_id: string; state: SessionState; conversation: Array<{ role: string; content: string }> }> {
-  const res = await fetch(`${BASE}/sessions/${sessionId}`)
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}`)
   if (!res.ok) throw new Error(`Failed to get session: ${res.status}`)
   return res.json()
 }
@@ -46,7 +157,7 @@ export async function getSession(
 export async function proceedToReview(
   sessionId: string
 ): Promise<{ agent_status: string; state: SessionState }> {
-  const res = await fetch(`${BASE}/sessions/${sessionId}/proceed`, {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/proceed`, {
     method: 'POST',
   })
   if (!res.ok) throw new Error(`Failed to proceed: ${res.status}`)
@@ -57,7 +168,7 @@ export async function patchCharter(
   sessionId: string,
   patch: Partial<Charter>
 ): Promise<{ state: SessionState }> {
-  const res = await fetch(`${BASE}/sessions/${sessionId}/charter`, {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/charter`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(patch),
@@ -69,7 +180,7 @@ export async function patchCharter(
 export async function validateCharter(
   sessionId: string
 ): Promise<{ validation: import('./types').Validation; state: SessionState }> {
-  const res = await fetch(`${BASE}/sessions/${sessionId}/validate`, {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/validate`, {
     method: 'POST',
   })
   if (!res.ok) throw new Error(`Failed to validate: ${res.status}`)
@@ -79,7 +190,7 @@ export async function validateCharter(
 export async function suggestForCharter(
   sessionId: string
 ): Promise<{ suggestions: import('./types').Suggestion[]; suggested_stories: import('./types').SuggestedStory[] }> {
-  const res = await fetch(`${BASE}/sessions/${sessionId}/suggest`, {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/suggest`, {
     method: 'POST',
   })
   if (!res.ok) throw new Error(`Failed to suggest: ${res.status}`)
@@ -89,7 +200,7 @@ export async function suggestForCharter(
 export async function evaluateGoals(
   goals: string[]
 ): Promise<{ feedback: Array<{ goal: string; issue: string | null; suggestion: string | null }> }> {
-  const res = await fetch(`${BASE}/evaluate-goals`, {
+  const res = await apiFetch(`${BASE}/evaluate-goals`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ goals }),
@@ -101,7 +212,7 @@ export async function evaluateGoals(
 export async function suggestGoals(
   goals: string[]
 ): Promise<{ suggestions: string[] }> {
-  const res = await fetch(`${BASE}/suggest-goals`, {
+  const res = await apiFetch(`${BASE}/suggest-goals`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ goals }),
@@ -114,7 +225,7 @@ export async function suggestStories(
   goals: string[],
   stories: Array<{ who: string; what: string; why: string }>
 ): Promise<{ suggestions: Array<{ who: string; what: string; why: string }> }> {
-  const res = await fetch(`${BASE}/suggest-stories`, {
+  const res = await apiFetch(`${BASE}/suggest-stories`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ goals, stories }),
@@ -126,7 +237,7 @@ export async function suggestStories(
 export async function finalizeCharter(
   sessionId: string
 ): Promise<{ charter_id: string; session_id: string; charter: Charter }> {
-  const res = await fetch(`${BASE}/sessions/${sessionId}/finalize`, {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/finalize`, {
     method: 'POST',
   })
   if (!res.ok) throw new Error(`Failed to finalize: ${res.status}`)
@@ -136,7 +247,7 @@ export async function finalizeCharter(
 // --- Dataset API ---
 
 export async function createDataset(sessionId: string, name?: string): Promise<Dataset> {
-  const res = await fetch(`${BASE}/sessions/${sessionId}/dataset`, {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/dataset`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
@@ -146,7 +257,7 @@ export async function createDataset(sessionId: string, name?: string): Promise<D
 }
 
 export async function getDataset(sessionId: string): Promise<Dataset> {
-  const res = await fetch(`${BASE}/sessions/${sessionId}/dataset`)
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/dataset`)
   if (!res.ok) throw new Error(`Failed to get dataset: ${res.status}`)
   return res.json()
 }
@@ -155,7 +266,7 @@ export async function importExamples(
   datasetId: string,
   examples: Array<{ input: string; expected_output: string; feature_area?: string; label?: string }>
 ): Promise<{ imported: number; stats: Dataset['stats'] }> {
-  const res = await fetch(`${BASE}/datasets/${datasetId}/import`, {
+  const res = await apiFetch(`${BASE}/datasets/${datasetId}/import`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ examples }),
@@ -168,7 +279,7 @@ export async function synthesizeExamples(
   datasetId: string,
   options?: { feature_areas?: string[]; coverage_criteria?: string[]; count_per_scenario?: number }
 ): Promise<{ generated: number; examples: Example[]; stats: Dataset['stats'] }> {
-  const res = await fetch(`${BASE}/datasets/${datasetId}/synthesize`, {
+  const res = await apiFetch(`${BASE}/datasets/${datasetId}/synthesize`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(options || {}),
@@ -182,7 +293,7 @@ export async function updateExample(
   exampleId: string,
   fields: Partial<Example>
 ): Promise<Example> {
-  const res = await fetch(`${BASE}/datasets/${datasetId}/examples/${exampleId}`, {
+  const res = await apiFetch(`${BASE}/datasets/${datasetId}/examples/${exampleId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(fields),
@@ -195,7 +306,7 @@ export async function addExample(
   datasetId: string,
   example: { feature_area: string; input: string; expected_output: string; coverage_tags?: string[]; label?: string }
 ): Promise<Example> {
-  const res = await fetch(`${BASE}/datasets/${datasetId}/examples`, {
+  const res = await apiFetch(`${BASE}/datasets/${datasetId}/examples`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(example),
@@ -205,14 +316,14 @@ export async function addExample(
 }
 
 export async function deleteExample(datasetId: string, exampleId: string): Promise<void> {
-  const res = await fetch(`${BASE}/datasets/${datasetId}/examples/${exampleId}`, {
+  const res = await apiFetch(`${BASE}/datasets/${datasetId}/examples/${exampleId}`, {
     method: 'DELETE',
   })
   if (!res.ok) throw new Error(`Failed to delete example: ${res.status}`)
 }
 
 export async function autoReviewExamples(datasetId: string): Promise<{ reviewed: number; reviews: Array<{ example_id: string; suggested_label: string; confidence: string; reasoning: string }> }> {
-  const res = await fetch(`${BASE}/datasets/${datasetId}/review`, {
+  const res = await apiFetch(`${BASE}/datasets/${datasetId}/review`, {
     method: 'POST',
   })
   if (!res.ok) throw new Error(`Failed to review: ${res.status}`)
@@ -220,7 +331,7 @@ export async function autoReviewExamples(datasetId: string): Promise<{ reviewed:
 }
 
 export async function getGapAnalysis(datasetId: string): Promise<GapAnalysis> {
-  const res = await fetch(`${BASE}/datasets/${datasetId}/gaps`)
+  const res = await apiFetch(`${BASE}/datasets/${datasetId}/gaps`)
   if (!res.ok) throw new Error(`Failed to get gaps: ${res.status}`)
   return res.json()
 }
@@ -231,7 +342,7 @@ export async function enrichDataset(
   targets: string[],
   count?: number
 ): Promise<{ generated: number; examples: Example[]; stats: Dataset['stats'] }> {
-  const res = await fetch(`${BASE}/datasets/${datasetId}/enrich`, {
+  const res = await apiFetch(`${BASE}/datasets/${datasetId}/enrich`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ gap_type: gapType, targets, count: count || 2 }),
@@ -241,7 +352,7 @@ export async function enrichDataset(
 }
 
 export async function exportDataset(datasetId: string): Promise<{ dataset_id: string; examples: Example[] }> {
-  const res = await fetch(`${BASE}/datasets/${datasetId}/export`)
+  const res = await apiFetch(`${BASE}/datasets/${datasetId}/export`)
   if (!res.ok) throw new Error(`Failed to export: ${res.status}`)
   return res.json()
 }
@@ -249,13 +360,13 @@ export async function exportDataset(datasetId: string): Promise<{ dataset_id: st
 // --- Settings API ---
 
 export async function getSettings(): Promise<Settings> {
-  const res = await fetch(`${BASE}/settings`)
+  const res = await apiFetch(`${BASE}/settings`)
   if (!res.ok) throw new Error(`Failed to get settings: ${res.status}`)
   return res.json()
 }
 
 export async function updateSettings(fields: Partial<Settings>): Promise<Settings> {
-  const res = await fetch(`${BASE}/settings`, {
+  const res = await apiFetch(`${BASE}/settings`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(fields),
@@ -280,7 +391,7 @@ export async function datasetChat(
   datasetId: string,
   message: string
 ): Promise<{ message: string; state: SessionState; actions?: AgentAction[]; action_suggestions?: ActionSuggestion[] }> {
-  const res = await fetch(`${BASE}/datasets/${datasetId}/chat`, {
+  const res = await apiFetch(`${BASE}/datasets/${datasetId}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message }),
@@ -296,7 +407,7 @@ export async function detectSchema(
   content: string,
   contentType: 'json' | 'csv' | 'text' | 'auto' = 'auto'
 ): Promise<DetectSchemaResponse> {
-  const res = await fetch(`${BASE}/sessions/${sessionId}/detect-schema`, {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/detect-schema`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content, content_type: contentType }),
@@ -310,7 +421,7 @@ export async function importFromUrl(
   url: string,
   urlType: 'json' | 'openapi' | 'auto' = 'auto'
 ): Promise<ImportFromUrlResponse> {
-  const res = await fetch(`${BASE}/sessions/${sessionId}/import-from-url`, {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/import-from-url`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url, url_type: urlType }),
@@ -322,7 +433,7 @@ export async function importFromUrl(
 export async function inferSchemaFromExamples(
   datasetId: string
 ): Promise<InferSchemaResponse> {
-  const res = await fetch(`${BASE}/datasets/${datasetId}/infer-schema`, {
+  const res = await apiFetch(`${BASE}/datasets/${datasetId}/infer-schema`, {
     method: 'POST',
   })
   if (!res.ok) throw new Error(`Failed to infer schema: ${res.status}`)

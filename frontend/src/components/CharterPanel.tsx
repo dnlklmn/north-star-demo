@@ -188,14 +188,21 @@ export default function CharterPanel({
 
 /* ── Helpers ── */
 
-function dimensionScore(status: DimensionStatus | string, validationStatus: string, criteriaCount: number): { value: number; status: 'pending' | 'weak' | 'good' | 'pass' | 'fail' | 'untested' } {
+function dimensionScore(_status: DimensionStatus | string, validationStatus: string, criteriaCount: number): { value: number; status: 'pending' | 'weak' | 'good' | 'pass' | 'fail' | 'untested' } {
   if (criteriaCount === 0) return { value: 0, status: 'pending' }
-  const s = validationStatus !== 'untested' ? validationStatus : status
-  if (s === 'good' || s === 'pass') return { value: 1, status: s as 'good' | 'pass' }
-  if (s === 'weak') return { value: 0.5, status: 'weak' }
-  if (s === 'fail') return { value: 0.25, status: 'fail' }
-  const v = Math.min(1, criteriaCount / 5) * 0.7 + 0.1
-  return { value: v, status: 'pending' }
+
+  // Base score from content: more criteria = higher score, scaling smoothly
+  const contentScore = Math.min(1, criteriaCount / 5)
+
+  // If validated, blend content score with validation result
+  if (validationStatus !== 'untested') {
+    if (validationStatus === 'good' || validationStatus === 'pass') return { value: Math.max(contentScore, 1), status: validationStatus as 'good' | 'pass' }
+    if (validationStatus === 'weak') return { value: Math.max(contentScore, 0.6), status: 'weak' }
+    if (validationStatus === 'fail') return { value: Math.max(contentScore * 0.5, 0.3), status: 'fail' }
+  }
+
+  // Pending: score purely from content
+  return { value: contentScore, status: 'pending' }
 }
 
 function buildRadarDimensions(charter: Charter, validation: Validation) {
@@ -205,11 +212,17 @@ function buildRadarDimensions(charter: Charter, validation: Validation) {
   const bal = dimensionScore(charter.balance.status, validation.balance, charter.balance.criteria.length)
   dims.push({ label: 'Balance', ...bal })
   if (charter.alignment.length > 0) {
+    const contentScore = Math.min(1, charter.alignment.length / 4)
     const passCount = validation.alignment.filter(v => v.status === 'pass' || v.status === 'good').length
     const hasValidation = validation.alignment.length > 0
-    const value = hasValidation ? passCount / Math.max(1, charter.alignment.length) : Math.min(1, charter.alignment.length / 4) * 0.7 + 0.1
-    const status: 'good' | 'weak' | 'pending' = hasValidation ? (passCount === charter.alignment.length ? 'good' : 'weak') : 'pending'
-    dims.push({ label: 'Alignment', value, status })
+    if (hasValidation) {
+      const validationRatio = passCount / Math.max(1, charter.alignment.length)
+      const value = Math.max(contentScore * 0.5, validationRatio)
+      const status: 'good' | 'weak' | 'pending' = passCount === charter.alignment.length ? 'good' : 'weak'
+      dims.push({ label: 'Alignment', value, status })
+    } else {
+      dims.push({ label: 'Alignment', value: contentScore, status: 'pending' })
+    }
   } else {
     dims.push({ label: 'Alignment', value: 0, status: 'pending' })
   }
@@ -220,20 +233,24 @@ function buildRadarDimensions(charter: Charter, validation: Validation) {
   return dims
 }
 
-function completionLabel(status: DimensionStatus | string, validationStatus: string, criteriaCount: number): string {
+function completionLabel(_status: DimensionStatus | string, validationStatus: string, criteriaCount: number): string {
   if (criteriaCount === 0) return ''
-  const s = validationStatus !== 'untested' ? validationStatus : status
-  if (s === 'good' || s === 'pass') return 'complete'
-  if (s === 'weak') return '~50%'
-  if (s === 'fail') return 'needs work'
+  if (validationStatus !== 'untested') {
+    if (validationStatus === 'good' || validationStatus === 'pass') return 'complete'
+    if (validationStatus === 'weak') return 'needs refinement'
+    if (validationStatus === 'fail') return 'needs work'
+  }
   return `${criteriaCount} item${criteriaCount !== 1 ? 's' : ''}`
 }
+
+
 
 function badgeVariant(label: string): 'success' | 'warning' | 'danger' | 'muted' {
   if (label === 'complete') return 'success'
   if (label.includes('item')) return 'muted'
-  if (label === '~50%') return 'warning'
-  return 'danger'
+  if (label === 'needs refinement') return 'warning'
+  if (label === 'needs work') return 'danger'
+  return 'muted'
 }
 
 /* ── DimensionContent: Section wrapper + criteria list ── */
@@ -339,16 +356,23 @@ function AlignmentContent({
   const passCount = validations.filter(v => v.status === 'pass' || v.status === 'good').length
   const total = entries.length
   const hasValidation = validations.length > 0
-  const label = total === 0 ? '' : hasValidation
-    ? (passCount === total ? 'complete' : `${Math.round((passCount / total) * 100)}%`)
-    : `${total} item${total !== 1 ? 's' : ''}`
+  let label = ''
+  if (total > 0) {
+    if (hasValidation) {
+      if (passCount === total) label = 'complete'
+      else if (passCount > 0) label = `${passCount}/${total} passing`
+      else label = 'needs refinement'
+    } else {
+      label = `${total} item${total !== 1 ? 's' : ''}`
+    }
+  }
 
   return (
     <Section
       title="Alignment"
       subtitle="What good vs bad looks like"
       badge={label || undefined}
-      badgeVariant={label ? (label === 'complete' ? 'success' : label.includes('item') ? 'muted' : 'warning') : 'muted'}
+      badgeVariant={label ? (label === 'complete' ? 'success' : label.includes('item') ? 'muted' : label.includes('passing') ? 'warning' : label === 'needs refinement' ? 'warning' : 'muted') : 'muted'}
     >
       <div className="space-y-2">
         {entries.map((entry, i) => {

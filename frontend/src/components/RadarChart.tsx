@@ -65,7 +65,8 @@ export default function RadarChart({ dimensions, size = 200 }: Props) {
     const angleStep = (2 * Math.PI) / count
     const startAngle = -Math.PI / 2
     return dimensions.map((d, i) => {
-      const r = Math.max(0, Math.min(1, d.value)) * radius
+      // Give zero values a small offset so the polygon doesn't collapse to center
+      const r = Math.max(0.05, Math.min(1, d.value)) * radius
       return polarToCartesian(cx, cy, r, startAngle + i * angleStep)
     })
   }, [dimensions, cx, cy, radius, count])
@@ -129,15 +130,33 @@ export default function RadarChart({ dimensions, size = 200 }: Props) {
         />
       ))}
 
-      {/* Data polygon */}
+      {/* Data polygon fill */}
       <polygon
         points={pointsToString(dataPoints)}
         style={{
-          fill: 'hsl(var(--color-accent) / 0.15)',
-          stroke: 'hsl(var(--color-accent))',
+          fill: 'hsl(var(--color-accent) / 0.1)',
         }}
-        strokeWidth={1.5}
+        strokeWidth={0}
       />
+
+      {/* Lines connecting data points */}
+      {dataPoints.map((point, i) => {
+        const next = dataPoints[(i + 1) % dataPoints.length]
+        return (
+          <line
+            key={`line-${i}`}
+            x1={point.x}
+            y1={point.y}
+            x2={next.x}
+            y2={next.y}
+            style={{
+              stroke: 'hsl(var(--color-accent))',
+            }}
+            strokeWidth={2}
+            strokeLinecap="round"
+          />
+        )
+      })}
 
       {/* Data point circles */}
       {dataPoints.map((point, i) => (
@@ -145,11 +164,12 @@ export default function RadarChart({ dimensions, size = 200 }: Props) {
           key={i}
           cx={point.x}
           cy={point.y}
-          r={3}
+          r={4}
           style={{
             fill: STATUS_COLORS[dimensions[i].status] ?? STATUS_COLORS.pending,
+            stroke: 'hsl(var(--color-background))',
           }}
-          strokeWidth={0}
+          strokeWidth={1.5}
         />
       ))}
 

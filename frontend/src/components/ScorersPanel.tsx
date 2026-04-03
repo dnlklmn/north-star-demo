@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Sparkles, ChevronRight, Copy, Download, Loader2 } from 'lucide-react'
+import { Sparkles, ChevronRight, Copy, Download, Loader2, ArrowRight } from 'lucide-react'
 import type { Charter } from '../types'
 
 interface ScorerDef {
@@ -12,10 +12,18 @@ interface ScorerDef {
 interface Props {
   charter: Charter
   hasDataset: boolean
+  scorers?: ScorerDef[]
+  onScorersChange?: (scorers: ScorerDef[]) => void
+  onNavigateToEvaluate?: () => void
 }
 
-export default function ScorersPanel({ charter, hasDataset }: Props) {
-  const [scorers, setScorers] = useState<ScorerDef[]>([])
+export default function ScorersPanel({ charter, hasDataset, scorers: externalScorers, onScorersChange, onNavigateToEvaluate }: Props) {
+  const [localScorers, setLocalScorers] = useState<ScorerDef[]>([])
+  const scorers = externalScorers ?? localScorers
+  const setScorers = (s: ScorerDef[]) => {
+    setLocalScorers(s)
+    onScorersChange?.(s)
+  }
   const [generating, setGenerating] = useState(false)
   const [expandedScorer, setExpandedScorer] = useState<string | null>(null)
 
@@ -96,12 +104,17 @@ export default function ScorersPanel({ charter, hasDataset }: Props) {
   return (
     <div className="flex flex-col h-full">
       <div className="px-4 h-12 border-b border-border bg-surface-raised flex items-center justify-between flex-shrink-0">
-        <h2 className="text-sm font-semibold text-foreground">Scorers</h2>
+        <div className="flex items-center gap-3">
+          <h2 className="text-sm font-semibold text-foreground">Scorers</h2>
+          {scorers.length > 0 && (
+            <span className="text-xs text-muted-foreground">{scorers.length} scorers</span>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           {scorers.length > 0 && (
             <button
               onClick={handleDownloadAll}
-              className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
+              className="px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground border border-border rounded-md transition-colors flex items-center gap-1"
             >
               <Download className="w-3 h-3" />
               Download all
@@ -110,9 +123,7 @@ export default function ScorersPanel({ charter, hasDataset }: Props) {
           <button
             onClick={handleGenerate}
             disabled={!hasCriteria || generating}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-              hasCriteria && !generating ? 'bg-accent text-accent-foreground hover:opacity-90' : 'text-muted-foreground/40 cursor-not-allowed'
-            }`}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {generating ? (
               <>
@@ -122,10 +133,19 @@ export default function ScorersPanel({ charter, hasDataset }: Props) {
             ) : (
               <>
                 <Sparkles className="w-3 h-3" />
-                {scorers.length > 0 ? 'Regenerate scorers' : 'Generate scorers'}
+                {scorers.length > 0 ? 'Regenerate' : 'Generate scorers'}
               </>
             )}
           </button>
+          {onNavigateToEvaluate && (
+            <button
+              onClick={onNavigateToEvaluate}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-accent text-accent-foreground hover:opacity-90 transition-all"
+            >
+              Evaluate
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       </div>
 
