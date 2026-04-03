@@ -1,6 +1,6 @@
 import type { CreateSessionResponse, SendMessageResponse, SessionState, Charter, Dataset, Example, GapAnalysis, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse, TaskDefinition, ProjectSummary, StoryGroup } from './types'
 
-const BASE = '/api'
+const BASE = import.meta.env.VITE_API_URL || '/api'
 
 // --- API Key management (localStorage) ---
 
