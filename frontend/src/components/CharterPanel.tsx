@@ -1,7 +1,9 @@
 import { useState } from 'react'
-import { Plus, Circle, Loader2 } from 'lucide-react'
-import type { Charter, Validation, DimensionStatus, AlignmentEntry, Suggestion, TaskDefinition, TaskEntry } from '../types'
+import { Circle, Link, FileText, Wand2, X, Loader2, Plus } from 'lucide-react'
+import type { Charter, Validation, DimensionStatus, AlignmentEntry, Suggestion, TaskDefinition, DetectSchemaResponse, ImportFromUrlResponse } from '../types'
 import RadarChart from './RadarChart'
+import Section from './Section'
+import SuggestionBox, { SuggestionCard } from './SuggestionBox'
 
 interface Props {
   charter: Charter
@@ -10,48 +12,17 @@ interface Props {
   onEditCriterion?: (dimension: string, index: number, value: string) => void
   onAddCriterion?: (dimension: string, value: string) => void
   onEditAlignment?: (index: number, field: 'good' | 'bad', value: string) => void
-  onAddAlignment?: (entry: { feature_area: string; good: string; bad: string }) => void
   onEditTask?: (field: keyof TaskDefinition, value: string) => void
-  onEditTaskEntry?: (side: 'input' | 'output', index: number, entry: TaskEntry) => void
-  onAddTaskEntry?: (side: 'input' | 'output', entry: TaskEntry) => void
-  onDeleteTaskEntry?: (side: 'input' | 'output', index: number) => void
   suggestions?: Suggestion[]
   onAcceptSuggestion?: (suggestion: Suggestion) => void
   onDismissSuggestion?: (suggestion: Suggestion) => void
+  onRegenSuggestions?: () => void
+  suggestionsLoading?: boolean
   loading?: boolean
-  hasSession?: boolean
-  onSectionClick?: (section: string) => void
-  softOkThreshold?: number // 0-100, default 70
+  onDetectSchema?: (content: string, contentType: string) => Promise<DetectSchemaResponse>
+  onImportFromUrl?: (url: string) => Promise<ImportFromUrlResponse>
+  onApplyDetectedSchema?: (task: Partial<TaskDefinition>) => void
 }
-
-// --- Helpers ---
-
-function validationToPercent(status: string, dimensionStatus: DimensionStatus, criteriaCount: number): number {
-  if (criteriaCount === 0) return 0
-  const s = status !== 'untested' ? status : dimensionStatus
-  if (s === 'pass' || s === 'good') return 100
-  if (s === 'weak') return 50
-  if (s === 'fail') return 15
-  // pending with items
-  return criteriaCount > 0 ? 30 : 0
-}
-
-function percentToActionText(pct: number): string {
-  if (pct >= 100) return 'Complete'
-  if (pct >= 70) return 'Almost there'
-  if (pct >= 40) return 'Needs refinement'
-  if (pct > 0) return 'Needs work'
-  return 'Not started'
-}
-
-function percentToColor(pct: number): string {
-  if (pct >= 100) return 'bg-success'
-  if (pct >= 70) return 'bg-accent'
-  if (pct >= 40) return 'bg-warning'
-  return 'bg-danger'
-}
-
-// --- Main Component ---
 
 export default function CharterPanel({
   charter,
@@ -60,18 +31,16 @@ export default function CharterPanel({
   onEditCriterion,
   onAddCriterion,
   onEditAlignment,
-  onAddAlignment,
   onEditTask,
-  onEditTaskEntry,
-  onAddTaskEntry,
-  onDeleteTaskEntry,
   suggestions = [],
   onAcceptSuggestion,
   onDismissSuggestion,
+  onRegenSuggestions,
+  suggestionsLoading,
   loading,
-  hasSession,
-  onSectionClick,
-  softOkThreshold = 70,
+  onDetectSchema,
+  onImportFromUrl,
+  onApplyDetectedSchema,
 }: Props) {
   const isEmpty = !charter.coverage.criteria.length
     && !charter.balance.criteria.length
@@ -83,580 +52,329 @@ export default function CharterPanel({
   const alignmentSuggestions = suggestions.filter(s => s.section === 'alignment')
   const rotSuggestions = suggestions.filter(s => s.section === 'rot')
 
-  // Percentages for each section
-  const coveragePct = validationToPercent(validation.coverage, charter.coverage.status, charter.coverage.criteria.length)
-  const balancePct = validationToPercent(validation.balance, charter.balance.status, charter.balance.criteria.length)
-  const rotPct = validationToPercent(validation.rot, charter.rot.status, charter.rot.criteria.length)
+  const radarDimensions = buildRadarDimensions(charter, validation)
 
-  // Alignment percentage
-  const alignPassCount = validation.alignment.filter(v => v.status === 'pass').length
-  const alignTotal = charter.alignment.length
-  const alignmentPct = alignTotal === 0 ? 0 : Math.round((alignPassCount / alignTotal) * 100)
-
-  return (
-    <div className="flex-1 overflow-hidden min-w-0 flex flex-col">
-      {isEmpty && suggestions.length === 0 ? (
-        <div className="flex-1 flex items-center justify-center p-8">
-          <div className="text-center max-w-xs">
-            <p className="text-sm text-muted-foreground">
-              Charter will be generated from your discovery inputs.
-            </p>
-          </div>
-        </div>
-      ) : (
-        <div className="flex-1 overflow-y-auto p-6 space-y-8">
-          {/* Loading indicator */}
-          {loading && (
-            <div className="flex items-center gap-2 text-muted-foreground">
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              <span className="text-xs">Evaluating charter...</span>
-            </div>
-          )}
-
-          {/* --- Radar Chart Overview --- */}
-          <div className="flex justify-center">
-            <RadarChart
-              points={[
-                { label: 'Coverage', value: coveragePct },
-                { label: 'Balance', value: balancePct },
-                { label: 'Alignment', value: alignmentPct },
-                { label: 'Rot', value: rotPct },
-              ]}
-              threshold={softOkThreshold}
-              size={220}
-            />
-          </div>
-
-          {/* --- Task Definition --- */}
-          <TaskSection
-            task={charter.task}
-            onEdit={onEditTask}
-            onEditEntry={onEditTaskEntry}
-            onAddEntry={onAddTaskEntry}
-            onDeleteEntry={onDeleteTaskEntry}
-          />
-
-          {/* --- Coverage --- */}
-          <DimensionSection
-            name="Coverage"
-            description="Input scenarios to test"
-            criteria={charter.coverage.criteria}
-            percent={coveragePct}
-            softOkThreshold={softOkThreshold}
-            activeCriteria={activeCriteria}
-            dimension="coverage"
-            onEdit={onEditCriterion}
-            onAdd={onAddCriterion}
-            suggestions={coverageSuggestions}
-            onAcceptSuggestion={onAcceptSuggestion}
-            onDismissSuggestion={onDismissSuggestion}
-            onHeaderClick={onSectionClick ? () => onSectionClick('coverage') : undefined}
-          />
-
-          {/* --- Balance --- */}
-          <DimensionSection
-            name="Balance"
-            description="What to weight more heavily"
-            criteria={charter.balance.criteria}
-            percent={balancePct}
-            softOkThreshold={softOkThreshold}
-            activeCriteria={activeCriteria}
-            dimension="balance"
-            onEdit={onEditCriterion}
-            onAdd={onAddCriterion}
-            suggestions={balanceSuggestions}
-            onAcceptSuggestion={onAcceptSuggestion}
-            onDismissSuggestion={onDismissSuggestion}
-            onHeaderClick={onSectionClick ? () => onSectionClick('balance') : undefined}
-          />
-
-          {/* --- Alignment --- */}
-          <AlignmentSection
-            entries={charter.alignment}
-            validations={validation.alignment}
-            percent={alignmentPct}
-            softOkThreshold={softOkThreshold}
-            activeCriteria={activeCriteria}
-            onEdit={onEditAlignment}
-            onAdd={onAddAlignment}
-            suggestions={alignmentSuggestions}
-            onAcceptSuggestion={onAcceptSuggestion}
-            onDismissSuggestion={onDismissSuggestion}
-            onHeaderClick={onSectionClick ? () => onSectionClick('alignment') : undefined}
-          />
-
-          {/* --- Rot --- */}
-          <DimensionSection
-            name="Rot"
-            description="When to update"
-            criteria={charter.rot.criteria}
-            percent={rotPct}
-            softOkThreshold={softOkThreshold}
-            activeCriteria={activeCriteria}
-            dimension="rot"
-            onEdit={onEditCriterion}
-            onAdd={onAddCriterion}
-            suggestions={rotSuggestions}
-            onAcceptSuggestion={onAcceptSuggestion}
-            onDismissSuggestion={onDismissSuggestion}
-            onHeaderClick={onSectionClick ? () => onSectionClick('rot') : undefined}
-          />
-        </div>
-      )}
-    </div>
-  )
-}
-
-// --- Progress Bar ---
-
-function ProgressBar({ percent, softOkThreshold }: { percent: number; softOkThreshold: number }) {
-  return (
-    <div className="relative h-1.5 bg-border rounded-full overflow-visible">
-      {/* Fill */}
-      <div
-        className={`h-full rounded-full transition-all duration-500 ${percentToColor(percent)}`}
-        style={{ width: `${Math.min(percent, 100)}%` }}
-      />
-      {/* Soft OK threshold marker */}
-      <div
-        className="absolute top-1/2 -translate-y-1/2 w-0.5 h-3 bg-muted-foreground/40 rounded-full"
-        style={{ left: `${softOkThreshold}%` }}
-        title={`Soft OK threshold: ${softOkThreshold}%`}
-      />
-    </div>
-  )
-}
-
-// --- Task Section ---
-
-function TaskSection({
-  task,
-  onEdit,
-  onEditEntry,
-  onAddEntry,
-  onDeleteEntry,
-}: {
-  task: TaskDefinition
-  onEdit?: (field: keyof TaskDefinition, value: string) => void
-  onEditEntry?: (side: 'input' | 'output', index: number, entry: TaskEntry) => void
-  onAddEntry?: (side: 'input' | 'output', entry: TaskEntry) => void
-  onDeleteEntry?: (side: 'input' | 'output', index: number) => void
-}) {
-  return (
-    <section>
-      <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-3">
-        Task Definition
-      </h3>
-      <div className="grid grid-cols-2 gap-6">
-        <TaskSide
-          label="Input"
-          description={task.input_description}
-          descriptionPlaceholder="What does your app receive?"
-          entries={task.input_entries || (task.sample_input ? [{ label: 'Sample', content: task.sample_input }] : [])}
-          onEditDescription={onEdit ? (v) => onEdit('input_description', v) : undefined}
-          onEditEntry={onEditEntry ? (i, e) => onEditEntry('input', i, e) : undefined}
-          onAddEntry={onAddEntry ? (e) => onAddEntry('input', e) : undefined}
-          onDeleteEntry={onDeleteEntry ? (i) => onDeleteEntry('input', i) : undefined}
-        />
-        <TaskSide
-          label="Output"
-          description={task.output_description}
-          descriptionPlaceholder="What does your app produce?"
-          entries={task.output_entries || (task.sample_output ? [{ label: 'Sample', content: task.sample_output }] : [])}
-          onEditDescription={onEdit ? (v) => onEdit('output_description', v) : undefined}
-          onEditEntry={onEditEntry ? (i, e) => onEditEntry('output', i, e) : undefined}
-          onAddEntry={onAddEntry ? (e) => onAddEntry('output', e) : undefined}
-          onDeleteEntry={onDeleteEntry ? (i) => onDeleteEntry('output', i) : undefined}
-        />
-      </div>
-    </section>
-  )
-}
-
-function TaskSide({
-  label,
-  description,
-  descriptionPlaceholder,
-  entries,
-  onEditDescription,
-  onEditEntry,
-  onAddEntry,
-  onDeleteEntry,
-}: {
-  label: string
-  description: string
-  descriptionPlaceholder: string
-  entries: TaskEntry[]
-  onEditDescription?: (v: string) => void
-  onEditEntry?: (index: number, entry: TaskEntry) => void
-  onAddEntry?: (entry: TaskEntry) => void
-  onDeleteEntry?: (index: number) => void
-}) {
-  const [editingDesc, setEditingDesc] = useState(false)
-  const [descText, setDescText] = useState(description)
-  const [showAdd, setShowAdd] = useState(false)
-  const [newLabel, setNewLabel] = useState('')
-  const [newContent, setNewContent] = useState('')
-
-  const handleSaveDesc = () => {
-    setEditingDesc(false)
-    if (descText !== description && onEditDescription) onEditDescription(descText)
-  }
-
-  const handleAddEntry = () => {
-    if (newContent.trim() && onAddEntry) {
-      onAddEntry({ label: newLabel.trim() || 'Sample', content: newContent.trim() })
-      setNewLabel('')
-      setNewContent('')
-      setShowAdd(false)
-    }
-  }
-
-  return (
-    <div>
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-xs font-medium text-foreground">{label}</span>
-        {onAddEntry && (
-          <button
-            onClick={() => setShowAdd(true)}
-            className="flex items-center gap-1 text-xs text-accent hover:text-accent/80"
-          >
-            <Plus className="w-3 h-3" />
-            Add
-          </button>
-        )}
-      </div>
-
-      {/* Description */}
-      {editingDesc ? (
-        <div className="mb-2">
-          <textarea
-            value={descText}
-            onChange={e => setDescText(e.target.value)}
-            onKeyDown={e => {
-              if (e.key === 'Escape') { setDescText(description); setEditingDesc(false) }
-            }}
-            autoFocus
-            placeholder={descriptionPlaceholder}
-            className="w-full border border-accent rounded px-2 py-1.5 bg-background text-foreground text-xs focus:outline-none focus:ring-1 focus:ring-accent"
-            rows={3}
-          />
-          <div className="flex gap-1.5 mt-1">
-            <button
-              onClick={handleSaveDesc}
-              className="px-2 py-0.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90"
-            >
-              Save
-            </button>
-            <button
-              onClick={() => { setDescText(description); setEditingDesc(false) }}
-              className="px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground"
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      ) : (
-        <div
-          onClick={() => onEditDescription && setEditingDesc(true)}
-          className={`text-xs mb-2 ${description ? 'text-foreground/80' : 'text-muted-foreground italic'} ${onEditDescription ? 'cursor-pointer hover:bg-accent/5 rounded px-1 -mx-1 py-0.5' : ''}`}
-        >
-          {description || descriptionPlaceholder}
-        </div>
-      )}
-
-      {/* Entries */}
-      <div className="space-y-1.5">
-        {entries.map((entry, i) => (
-          <EntryItem
-            key={i}
-            entry={entry}
-            onEdit={onEditEntry ? (e) => onEditEntry(i, e) : undefined}
-            onDelete={onDeleteEntry ? () => onDeleteEntry(i) : undefined}
-          />
-        ))}
-      </div>
-
-      {/* Add entry form */}
-      {showAdd && (
-        <div className="mt-2 p-2 rounded bg-surface border border-border space-y-1.5">
-          <input
-            autoFocus
-            className="w-full text-xs bg-transparent border-b border-border focus:border-accent outline-none pb-1"
-            placeholder="Label (e.g. JSON schema, sample, API spec...)"
-            value={newLabel}
-            onChange={e => setNewLabel(e.target.value)}
-          />
-          <textarea
-            className="w-full text-xs bg-transparent border border-border rounded px-2 py-1.5 focus:border-accent outline-none font-mono"
-            placeholder="Content..."
-            rows={3}
-            value={newContent}
-            onChange={e => setNewContent(e.target.value)}
-            onKeyDown={e => {
-              if (e.key === 'Enter' && e.metaKey) handleAddEntry()
-              if (e.key === 'Escape') { setShowAdd(false); setNewLabel(''); setNewContent('') }
-            }}
-          />
-          <div className="flex gap-1.5">
-            <button onClick={handleAddEntry} className="px-2 py-0.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90">
-              Add
-            </button>
-            <button onClick={() => { setShowAdd(false); setNewLabel(''); setNewContent('') }} className="px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground">
-              Cancel
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function EntryItem({
-  entry,
-  onEdit,
-  onDelete,
-}: {
-  entry: TaskEntry
-  onEdit?: (entry: TaskEntry) => void
-  onDelete?: () => void
-}) {
-  const [editing, setEditing] = useState(false)
-  const [content, setContent] = useState(entry.content)
-  const [label, setLabel] = useState(entry.label)
-
-  const handleSave = () => {
-    setEditing(false)
-    if ((content !== entry.content || label !== entry.label) && onEdit) {
-      onEdit({ label: label.trim() || entry.label, content })
-    }
-  }
-
-  if (editing) {
+  if (isEmpty && suggestions.length === 0) {
     return (
-      <div className="p-2 rounded bg-surface border border-accent/30 space-y-1">
-        <input
-          className="w-full text-xs bg-transparent border-b border-accent outline-none pb-1"
-          value={label}
-          onChange={e => setLabel(e.target.value)}
-        />
-        <textarea
-          value={content}
-          onChange={e => setContent(e.target.value)}
-          onBlur={handleSave}
-          onKeyDown={e => {
-            if (e.key === 'Enter' && e.metaKey) handleSave()
-            if (e.key === 'Escape') { setContent(entry.content); setLabel(entry.label); setEditing(false) }
-          }}
-          autoFocus
-          className="w-full text-xs font-mono bg-transparent border border-border rounded px-2 py-1 focus:border-accent outline-none"
-          rows={3}
-        />
+      <div className="flex-1 flex items-center justify-center p-8">
+        <div className="text-center">
+          {loading ? (
+            <>
+              <Loader2 className="w-6 h-6 text-muted-foreground animate-spin mx-auto mb-3" />
+              <p className="text-sm text-muted-foreground">Generating...</p>
+            </>
+          ) : (
+            <p className="text-sm text-muted-foreground">No charter yet. Go back and generate one.</p>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  const renderSuggestionBox = (items: Suggestion[], label: string) => {
+    if (items.length === 0 && !suggestionsLoading) return null
+    return (
+      <div className="w-56 flex-shrink-0">
+        <SuggestionBox
+          label={label}
+          onRefresh={onRegenSuggestions}
+          loading={suggestionsLoading && items.length === 0}
+        >
+          {items.length > 0
+            ? items.map((s, i) => (
+                <SuggestionCard
+                  key={i}
+                  onAccept={() => onAcceptSuggestion?.(s)}
+                  onDismiss={() => onDismissSuggestion?.(s)}
+                >
+                  {s.text}
+                  {s.good && (
+                    <span className="block text-xs text-muted-foreground mt-0.5">
+                      Good: {s.good} / Bad: {s.bad}
+                    </span>
+                  )}
+                </SuggestionCard>
+              ))
+            : null}
+        </SuggestionBox>
       </div>
     )
   }
 
   return (
-    <div
-      onClick={() => onEdit && setEditing(true)}
-      className={`group p-2 rounded bg-surface text-xs ${onEdit ? 'cursor-pointer hover:bg-surface-raised' : ''}`}
-    >
-      <div className="flex items-center justify-between mb-0.5">
-        <span className="text-muted-foreground font-medium">{entry.label}</span>
-        {onDelete && (
-          <button
-            onClick={e => { e.stopPropagation(); onDelete() }}
-            className="text-muted-foreground hover:text-danger opacity-0 group-hover:opacity-100 text-xs"
-          >
-            remove
-          </button>
+    <div className="flex-1 overflow-y-auto p-6">
+      <div className="flex items-start gap-12 px-6">
+        {/* Left: radar chart */}
+        {radarDimensions.length >= 3 && (
+          <div className="flex-shrink-0 sticky top-6 hidden lg:block">
+            <RadarChart dimensions={radarDimensions} size={200} />
+          </div>
         )}
+
+        {/* Sections with per-section suggestions */}
+        <div className="flex-1 min-w-0 space-y-3">
+          <TaskSection
+            task={charter.task}
+            onEdit={onEditTask}
+            onDetectSchema={onDetectSchema}
+            onImportFromUrl={onImportFromUrl}
+            onApplyDetectedSchema={onApplyDetectedSchema}
+          />
+
+          <div className="flex gap-12 items-start">
+            <div className="flex-1 min-w-0">
+              <DimensionContent
+                name="Coverage"
+                description="Input scenarios to test"
+                criteria={charter.coverage.criteria}
+                status={charter.coverage.status}
+                validationStatus={validation.coverage}
+                activeCriteria={activeCriteria}
+                onEdit={onEditCriterion ? (i, v) => onEditCriterion('coverage', i, v) : undefined}
+                onAdd={onAddCriterion ? (v) => onAddCriterion('coverage', v) : undefined}
+              />
+            </div>
+            {renderSuggestionBox(coverageSuggestions, 'Coverage')}
+          </div>
+
+          <div className="flex gap-12 items-start">
+            <div className="flex-1 min-w-0">
+              <DimensionContent
+                name="Balance"
+                description="What to weight more heavily"
+                criteria={charter.balance.criteria}
+                status={charter.balance.status}
+                validationStatus={validation.balance}
+                activeCriteria={activeCriteria}
+                onEdit={onEditCriterion ? (i, v) => onEditCriterion('balance', i, v) : undefined}
+                onAdd={onAddCriterion ? (v) => onAddCriterion('balance', v) : undefined}
+              />
+            </div>
+            {renderSuggestionBox(balanceSuggestions, 'Balance')}
+          </div>
+
+          <div className="flex gap-12 items-start">
+            <div className="flex-1 min-w-0">
+              <AlignmentContent
+                entries={charter.alignment}
+                validations={validation.alignment}
+                activeCriteria={activeCriteria}
+                onEdit={onEditAlignment}
+              />
+            </div>
+            {renderSuggestionBox(alignmentSuggestions, 'Alignment')}
+          </div>
+
+          <div className="flex gap-12 items-start">
+            <div className="flex-1 min-w-0">
+              <DimensionContent
+                name="Rot"
+                description="When to update"
+                criteria={charter.rot.criteria}
+                status={charter.rot.status}
+                validationStatus={validation.rot}
+                activeCriteria={activeCriteria}
+                onEdit={onEditCriterion ? (i, v) => onEditCriterion('rot', i, v) : undefined}
+                onAdd={onAddCriterion ? (v) => onAddCriterion('rot', v) : undefined}
+              />
+            </div>
+            {renderSuggestionBox(rotSuggestions, 'Rot')}
+          </div>
+        </div>
       </div>
-      <pre className="text-foreground/80 font-mono whitespace-pre-wrap break-words text-[11px] leading-relaxed max-h-24 overflow-hidden">
-        {entry.content}
-      </pre>
     </div>
   )
 }
 
-// --- Dimension Section ---
+/* ── Helpers ── */
 
-function DimensionSection({
+function dimensionScore(_status: DimensionStatus | string, validationStatus: string, criteriaCount: number): { value: number; status: 'pending' | 'weak' | 'good' | 'pass' | 'fail' | 'untested' } {
+  if (criteriaCount === 0) return { value: 0, status: 'pending' }
+
+  // Base score from content: more criteria = higher score, scaling smoothly
+  const contentScore = Math.min(1, criteriaCount / 5)
+
+  // If validated, blend content score with validation result
+  if (validationStatus !== 'untested') {
+    if (validationStatus === 'good' || validationStatus === 'pass') return { value: Math.max(contentScore, 1), status: validationStatus as 'good' | 'pass' }
+    if (validationStatus === 'weak') return { value: Math.max(contentScore, 0.6), status: 'weak' }
+    if (validationStatus === 'fail') return { value: Math.max(contentScore * 0.5, 0.3), status: 'fail' }
+  }
+
+  // Pending: score purely from content
+  return { value: contentScore, status: 'pending' }
+}
+
+function buildRadarDimensions(charter: Charter, validation: Validation) {
+  const dims: Array<{ label: string; value: number; status: 'pending' | 'weak' | 'good' | 'pass' | 'fail' | 'untested' }> = []
+  const cov = dimensionScore(charter.coverage.status, validation.coverage, charter.coverage.criteria.length)
+  dims.push({ label: 'Coverage', ...cov })
+  const bal = dimensionScore(charter.balance.status, validation.balance, charter.balance.criteria.length)
+  dims.push({ label: 'Balance', ...bal })
+  if (charter.alignment.length > 0) {
+    const contentScore = Math.min(1, charter.alignment.length / 4)
+    const passCount = validation.alignment.filter(v => v.status === 'pass' || v.status === 'good').length
+    const hasValidation = validation.alignment.length > 0
+    if (hasValidation) {
+      const validationRatio = passCount / Math.max(1, charter.alignment.length)
+      const value = Math.max(contentScore * 0.5, validationRatio)
+      const status: 'good' | 'weak' | 'pending' = passCount === charter.alignment.length ? 'good' : 'weak'
+      dims.push({ label: 'Alignment', value, status })
+    } else {
+      dims.push({ label: 'Alignment', value: contentScore, status: 'pending' })
+    }
+  } else {
+    dims.push({ label: 'Alignment', value: 0, status: 'pending' })
+  }
+  const rot = dimensionScore(charter.rot.status, validation.rot, charter.rot.criteria.length)
+  dims.push({ label: 'Rot', ...rot })
+  const taskFilled = [charter.task.input_description, charter.task.output_description].filter(Boolean).length
+  dims.push({ label: 'Task', value: taskFilled / 2, status: taskFilled === 2 ? 'good' : taskFilled > 0 ? 'weak' : 'pending' })
+  return dims
+}
+
+function completionLabel(_status: DimensionStatus | string, validationStatus: string, criteriaCount: number): string {
+  if (criteriaCount === 0) return ''
+  if (validationStatus !== 'untested') {
+    if (validationStatus === 'good' || validationStatus === 'pass') return 'complete'
+    if (validationStatus === 'weak') return 'needs refinement'
+    if (validationStatus === 'fail') return 'needs work'
+  }
+  return `${criteriaCount} item${criteriaCount !== 1 ? 's' : ''}`
+}
+
+
+
+function badgeVariant(label: string): 'success' | 'warning' | 'danger' | 'muted' {
+  if (label === 'complete') return 'success'
+  if (label.includes('item')) return 'muted'
+  if (label === 'needs refinement') return 'warning'
+  if (label === 'needs work') return 'danger'
+  return 'muted'
+}
+
+/* ── DimensionContent: Section wrapper + criteria list ── */
+
+function DimensionContent({
   name,
   description,
   criteria,
-  percent,
-  softOkThreshold,
+  status,
+  validationStatus,
   activeCriteria,
-  dimension,
   onEdit,
   onAdd,
-  suggestions = [],
-  onAcceptSuggestion,
-  onDismissSuggestion,
-  onHeaderClick,
 }: {
   name: string
   description: string
   criteria: string[]
-  percent: number
-  softOkThreshold: number
+  status: DimensionStatus
+  validationStatus: string
   activeCriteria: string[]
-  dimension: string
-  onEdit?: (dimension: string, index: number, value: string) => void
-  onAdd?: (dimension: string, value: string) => void
-  suggestions?: Suggestion[]
-  onAcceptSuggestion?: (s: Suggestion) => void
-  onDismissSuggestion?: (s: Suggestion) => void
-  onHeaderClick?: () => void
+  onEdit?: (index: number, value: string) => void
+  onAdd?: (value: string) => void
 }) {
-  const [showAdd, setShowAdd] = useState(false)
+  const [adding, setAdding] = useState(false)
   const [newValue, setNewValue] = useState('')
-  const actionText = percentToActionText(percent)
+  const label = completionLabel(status, validationStatus, criteria.length)
 
   const handleAdd = () => {
     if (newValue.trim() && onAdd) {
-      onAdd(dimension, newValue.trim())
+      onAdd(newValue.trim())
       setNewValue('')
-      setShowAdd(false)
+      setAdding(false)
     }
   }
 
   return (
-    <section>
-      <div className="flex items-center justify-between mb-1.5">
-        <div
-          onClick={onHeaderClick}
-          className={onHeaderClick ? 'cursor-pointer hover:text-accent transition-colors' : ''}
-          title={onHeaderClick ? 'Click to discuss in chat' : undefined}
-        >
-          <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">{name}</h3>
-          <p className="text-xs text-muted-foreground">{description}</p>
-        </div>
-        <div className="text-right flex-shrink-0 ml-4">
-          <span className="text-xs font-medium text-foreground">{percent}%</span>
-          <span className="text-xs text-muted-foreground ml-1.5">{actionText}</span>
-        </div>
-      </div>
-
-      <ProgressBar percent={percent} softOkThreshold={softOkThreshold} />
-
-      <div className="mt-3 space-y-1">
-        {criteria.map((criterion, i) => {
-          const isActive = activeCriteria.includes(`${dimension}_${i}`)
-          return (
-            <CriterionRow
-              key={i}
-              text={criterion}
-              active={isActive}
-              onEdit={onEdit ? (v) => onEdit(dimension, i, v) : undefined}
-            />
-          )
-        })}
-
-        {suggestions.map((s, i) => (
-          <SuggestionRow
-            key={`sug-${i}`}
-            suggestion={s}
-            onAccept={onAcceptSuggestion}
-            onDismiss={onDismissSuggestion}
+    <Section
+      title={name}
+      subtitle={description}
+      badge={label || undefined}
+      badgeVariant={label ? badgeVariant(label) : 'muted'}
+    >
+      <div className="space-y-1">
+        {criteria.map((criterion, i) => (
+          <CriterionRow
+            key={i}
+            text={criterion}
+            active={activeCriteria.includes(`${name.toLowerCase()}_${i}`)}
+            onEdit={onEdit ? (v) => onEdit(i, v) : undefined}
           />
         ))}
-
-        {/* Add button */}
-        {showAdd ? (
-          <div className="flex items-start gap-2 pl-2 py-1">
-            <Circle className="w-1.5 h-1.5 mt-2 text-muted-foreground fill-current flex-shrink-0" />
-            <div className="flex-1">
+        {criteria.length === 0 && (
+          <p className="pl-5 text-xs text-muted-foreground italic">No criteria yet</p>
+        )}
+        {onAdd && (
+          adding ? (
+            <div className="pl-2 pt-1">
               <textarea
                 value={newValue}
                 onChange={e => setNewValue(e.target.value)}
                 onKeyDown={e => {
                   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleAdd() }
-                  if (e.key === 'Escape') { setShowAdd(false); setNewValue('') }
+                  if (e.key === 'Escape') { setNewValue(''); setAdding(false) }
                 }}
                 autoFocus
                 placeholder={`Add a ${name.toLowerCase()} criterion...`}
                 className="w-full text-sm border border-accent rounded px-2 py-1 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-accent"
                 rows={2}
               />
+              <div className="flex gap-1.5 mt-1">
+                <button onClick={handleAdd} className="px-2 py-0.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90">Add</button>
+                <button onClick={() => { setNewValue(''); setAdding(false) }} className="px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground">Cancel</button>
+              </div>
             </div>
-          </div>
-        ) : onAdd && (
-          <button
-            onClick={() => setShowAdd(true)}
-            className="flex items-center gap-1.5 pl-2 py-1 text-xs text-accent hover:text-accent/80"
-          >
-            <Plus className="w-3 h-3" />
-            Add
-          </button>
+          ) : (
+            <button
+              onClick={() => setAdding(true)}
+              className="flex items-center gap-1 pl-2 pt-1 text-xs text-muted-foreground hover:text-foreground"
+            >
+              <Plus className="w-3 h-3" />
+              Add criterion
+            </button>
+          )
         )}
       </div>
-    </section>
+    </Section>
   )
 }
 
-// --- Alignment Section ---
+/* ── AlignmentContent: Section wrapper + alignment entries ── */
 
-function AlignmentSection({
+function AlignmentContent({
   entries,
   validations,
-  percent,
-  softOkThreshold,
   activeCriteria,
   onEdit,
-  onAdd,
-  suggestions = [],
-  onAcceptSuggestion,
-  onDismissSuggestion,
-  onHeaderClick,
 }: {
   entries: AlignmentEntry[]
   validations: { feature_area: string; status: string; weak_reason: string | null }[]
-  percent: number
-  softOkThreshold: number
   activeCriteria: string[]
   onEdit?: (index: number, field: 'good' | 'bad', value: string) => void
-  onAdd?: (entry: { feature_area: string; good: string; bad: string }) => void
-  suggestions?: Suggestion[]
-  onAcceptSuggestion?: (s: Suggestion) => void
-  onDismissSuggestion?: (s: Suggestion) => void
-  onHeaderClick?: () => void
 }) {
-  const [showAdd, setShowAdd] = useState(false)
-  const [newArea, setNewArea] = useState('')
-  const [newGood, setNewGood] = useState('')
-  const [newBad, setNewBad] = useState('')
-  const actionText = percentToActionText(percent)
-
-  const handleAdd = () => {
-    if (newArea.trim() && newGood.trim() && newBad.trim() && onAdd) {
-      onAdd({ feature_area: newArea.trim(), good: newGood.trim(), bad: newBad.trim() })
-      setNewArea(''); setNewGood(''); setNewBad('')
-      setShowAdd(false)
+  const passCount = validations.filter(v => v.status === 'pass' || v.status === 'good').length
+  const total = entries.length
+  const hasValidation = validations.length > 0
+  let label = ''
+  if (total > 0) {
+    if (hasValidation) {
+      if (passCount === total) label = 'complete'
+      else if (passCount > 0) label = `${passCount}/${total} passing`
+      else label = 'needs refinement'
+    } else {
+      label = `${total} item${total !== 1 ? 's' : ''}`
     }
   }
 
   return (
-    <section>
-      <div className="flex items-center justify-between mb-1.5">
-        <div
-          onClick={onHeaderClick}
-          className={onHeaderClick ? 'cursor-pointer hover:text-accent transition-colors' : ''}
-          title={onHeaderClick ? 'Click to discuss in chat' : undefined}
-        >
-          <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Alignment</h3>
-          <p className="text-xs text-muted-foreground">What good vs bad looks like</p>
-        </div>
-        <div className="text-right flex-shrink-0 ml-4">
-          <span className="text-xs font-medium text-foreground">{percent}%</span>
-          <span className="text-xs text-muted-foreground ml-1.5">{actionText}</span>
-        </div>
-      </div>
-
-      <ProgressBar percent={percent} softOkThreshold={softOkThreshold} />
-
-      <div className="mt-3 space-y-2">
+    <Section
+      title="Alignment"
+      subtitle="What good vs bad looks like"
+      badge={label || undefined}
+      badgeVariant={label ? (label === 'complete' ? 'success' : label.includes('item') ? 'muted' : label.includes('passing') ? 'warning' : label === 'needs refinement' ? 'warning' : 'muted') : 'muted'}
+    >
+      <div className="space-y-2">
         {entries.map((entry, i) => {
           const val = validations.find(v => v.feature_area === entry.feature_area)
           const isActive = activeCriteria.includes(`alignment_${entry.feature_area}`)
@@ -670,139 +388,35 @@ function AlignmentSection({
             />
           )
         })}
-
-        {suggestions.map((s, i) => (
-          <SuggestionRow
-            key={`sug-${i}`}
-            suggestion={s}
-            onAccept={onAcceptSuggestion}
-            onDismiss={onDismissSuggestion}
-          />
-        ))}
-
-        {/* Add button */}
-        {showAdd ? (
-          <div className="p-2 rounded bg-surface border border-accent/30 space-y-1.5">
-            <input
-              autoFocus
-              className="w-full text-sm bg-transparent border-b border-border focus:border-accent outline-none pb-1"
-              placeholder="Feature area..."
-              value={newArea}
-              onChange={e => setNewArea(e.target.value)}
-            />
-            <input
-              className="w-full text-xs bg-transparent border-b border-border focus:border-accent outline-none pb-1 text-success"
-              placeholder="What good looks like..."
-              value={newGood}
-              onChange={e => setNewGood(e.target.value)}
-            />
-            <input
-              className="w-full text-xs bg-transparent border-b border-border focus:border-accent outline-none pb-1 text-danger"
-              placeholder="What bad looks like..."
-              value={newBad}
-              onChange={e => setNewBad(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === 'Enter') handleAdd()
-                if (e.key === 'Escape') { setShowAdd(false); setNewArea(''); setNewGood(''); setNewBad('') }
-              }}
-            />
-            <div className="flex gap-1.5">
-              <button onClick={handleAdd} className="px-2 py-0.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90">Add</button>
-              <button onClick={() => { setShowAdd(false); setNewArea(''); setNewGood(''); setNewBad('') }} className="px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground">Cancel</button>
-            </div>
-          </div>
-        ) : onAdd && (
-          <button
-            onClick={() => setShowAdd(true)}
-            className="flex items-center gap-1.5 pl-2 py-1 text-xs text-accent hover:text-accent/80"
-          >
-            <Plus className="w-3 h-3" />
-            Add
-          </button>
+        {entries.length === 0 && (
+          <p className="pl-5 text-xs text-muted-foreground italic">No alignment entries yet</p>
         )}
       </div>
-    </section>
+    </Section>
   )
 }
 
-// --- Shared Sub-components ---
+/* ── Leaf components ── */
 
-function SuggestionRow({
-  suggestion,
-  onAccept,
-  onDismiss,
-}: {
-  suggestion: Suggestion
-  onAccept?: (s: Suggestion) => void
-  onDismiss?: (s: Suggestion) => void
-}) {
-  return (
-    <div className="flex items-start gap-2 py-1.5 px-2 bg-accent/5 rounded">
-      <span className="text-accent font-bold text-xs mt-0.5">+</span>
-      <span className="flex-1 text-sm text-foreground">
-        {suggestion.text}
-        {suggestion.good && (
-          <span className="block text-xs text-muted-foreground mt-0.5">
-            Good: {suggestion.good} / Bad: {suggestion.bad}
-          </span>
-        )}
-      </span>
-      <div className="flex gap-1 flex-shrink-0">
-        <button
-          onClick={() => onAccept?.(suggestion)}
-          className="text-xs px-2 py-0.5 bg-accent/20 text-accent rounded hover:bg-accent/30 font-medium"
-        >
-          Add
-        </button>
-        <button
-          onClick={() => onDismiss?.(suggestion)}
-          className="text-xs px-1.5 py-0.5 text-muted-foreground hover:text-foreground"
-        >
-          dismiss
-        </button>
-      </div>
-    </div>
-  )
-}
-
-function CriterionRow({
-  text,
-  active,
-  onEdit,
-}: {
-  text: string
-  active: boolean
-  onEdit?: (value: string) => void
-}) {
+function CriterionRow({ text, active, onEdit }: { text: string; active: boolean; onEdit?: (value: string) => void }) {
   const [editing, setEditing] = useState(false)
   const [value, setValue] = useState(text)
 
-  const handleBlur = () => {
-    setEditing(false)
-    if (value !== text && onEdit) onEdit(value)
+  const handleBlur = () => { setEditing(false); if (value !== text && onEdit) onEdit(value) }
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleBlur() }
+    if (e.key === 'Escape') { setValue(text); setEditing(false) }
   }
 
   return (
     <div className={`flex items-start gap-2 pl-2 py-1 group ${active ? 'bg-accent/5 rounded' : ''}`}>
       <Circle className="w-1.5 h-1.5 mt-2 text-muted-foreground fill-current flex-shrink-0" />
       {editing ? (
-        <textarea
-          value={value}
-          onChange={e => setValue(e.target.value)}
-          onBlur={handleBlur}
-          onKeyDown={e => {
-            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleBlur() }
-            if (e.key === 'Escape') { setValue(text); setEditing(false) }
-          }}
-          autoFocus
-          className="flex-1 text-sm border border-accent rounded px-2 py-1 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-accent"
-          rows={2}
-        />
+        <textarea value={value} onChange={e => setValue(e.target.value)} onBlur={handleBlur} onKeyDown={handleKeyDown} autoFocus
+          className="flex-1 text-sm border border-accent rounded px-2 py-1 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-accent" rows={2} />
       ) : (
-        <span
-          onClick={() => onEdit && setEditing(true)}
-          className={`flex-1 text-sm text-foreground/80 ${onEdit ? 'cursor-pointer hover:bg-accent/5 rounded px-1 -mx-1' : ''}`}
-        >
+        <span onClick={() => onEdit && setEditing(true)}
+          className={`flex-1 text-sm text-foreground/80 ${onEdit ? 'cursor-pointer hover:bg-accent/5 rounded px-1 -mx-1' : ''}`}>
           {text}
         </span>
       )}
@@ -810,40 +424,27 @@ function CriterionRow({
   )
 }
 
-function AlignmentRow({
-  entry,
-  validation,
-  active,
-  onEdit,
-}: {
+function AlignmentRow({ entry, validation, active, onEdit }: {
   entry: AlignmentEntry
   validation?: { status: string; weak_reason: string | null }
   active: boolean
   onEdit?: (field: 'good' | 'bad', value: string) => void
 }) {
   const [showDetail, setShowDetail] = useState(false)
+  const status = validation?.status || 'pending'
 
   return (
     <div className={`pl-2 py-1 ${active ? 'bg-accent/5 rounded' : ''}`}>
       <div className="flex items-center gap-2">
         <Circle className="w-1.5 h-1.5 text-muted-foreground fill-current flex-shrink-0" />
         <span className="text-sm font-medium text-foreground">{entry.feature_area}</span>
-        {validation?.weak_reason && (
-          <button
-            onClick={() => setShowDetail(!showDetail)}
-            className="text-xs text-warning hover:opacity-80"
-          >
-            why?
-          </button>
+        {(status === 'weak' || status === 'fail') && validation?.weak_reason && (
+          <button onClick={() => setShowDetail(!showDetail)} className="text-xs text-warning hover:opacity-80">why?</button>
         )}
       </div>
-
       {showDetail && validation?.weak_reason && (
-        <div className="ml-4 mt-1 p-2 bg-warning/10 rounded text-xs text-warning">
-          {validation.weak_reason}
-        </div>
+        <div className="ml-4 mt-1 p-2 bg-warning/10 rounded text-xs text-warning">{validation.weak_reason}</div>
       )}
-
       <div className="ml-4 mt-1 space-y-1">
         <EditableField label="Good" value={entry.good} color="text-success" onSave={v => onEdit?.('good', v)} />
         <EditableField label="Bad" value={entry.bad} color="text-danger" onSave={v => onEdit?.('bad', v)} />
@@ -852,48 +453,199 @@ function AlignmentRow({
   )
 }
 
-function EditableField({
-  label,
-  value,
-  color,
-  onSave,
-}: {
-  label: string
-  value: string
-  color: string
-  onSave?: (value: string) => void
-}) {
+function EditableField({ label, value, color, onSave }: { label: string; value: string; color: string; onSave?: (value: string) => void }) {
   const [editing, setEditing] = useState(false)
   const [text, setText] = useState(value)
-
-  const handleBlur = () => {
-    setEditing(false)
-    if (text !== value && onSave) onSave(text)
-  }
+  const handleBlur = () => { setEditing(false); if (text !== value && onSave) onSave(text) }
 
   return (
     <div className="text-xs">
       <span className={`font-medium ${color}`}>{label}:</span>{' '}
       {editing ? (
-        <textarea
-          value={text}
-          onChange={e => setText(e.target.value)}
-          onBlur={handleBlur}
-          onKeyDown={e => {
-            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleBlur() }
-            if (e.key === 'Escape') { setText(value); setEditing(false) }
-          }}
-          autoFocus
-          className="w-full border border-accent rounded px-1 py-0.5 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-accent text-xs"
-          rows={2}
-        />
+        <textarea value={text} onChange={e => setText(e.target.value)} onBlur={handleBlur} autoFocus
+          className="w-full border border-accent rounded px-1 py-0.5 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-accent text-xs" rows={2} />
       ) : (
-        <span
-          onClick={() => onSave && setEditing(true)}
-          className={`text-muted-foreground ${onSave ? 'cursor-pointer hover:bg-accent/5 rounded px-0.5' : ''}`}
-        >
+        <span onClick={() => onSave && setEditing(true)}
+          className={`text-muted-foreground ${onSave ? 'cursor-pointer hover:bg-accent/5 rounded px-0.5' : ''}`}>
           {value}
         </span>
+      )}
+    </div>
+  )
+}
+
+/* ── TaskSection (uses Section wrapper) ── */
+
+type ImportSource = 'paste' | 'url' | 'manual' | null
+
+function TaskSection({ task, onEdit, onDetectSchema, onImportFromUrl, onApplyDetectedSchema }: {
+  task: TaskDefinition
+  onEdit?: (field: keyof TaskDefinition, value: string) => void
+  onDetectSchema?: (content: string, contentType: string) => Promise<DetectSchemaResponse>
+  onImportFromUrl?: (url: string) => Promise<ImportFromUrlResponse>
+  onApplyDetectedSchema?: (task: Partial<TaskDefinition>) => void
+}) {
+  const [importSource, setImportSource] = useState<ImportSource>(null)
+  const [importing, setImporting] = useState(false)
+  const [importError, setImportError] = useState<string | null>(null)
+  const [pasteContent, setPasteContent] = useState('')
+  const [urlInput, setUrlInput] = useState('')
+  const [detectedResult, setDetectedResult] = useState<{ input_description: string; sample_input: string } | null>(null)
+
+  const hasContent = task.input_description || task.output_description
+  const canImport = onDetectSchema || onImportFromUrl
+
+  const handleDetectFromPaste = async () => {
+    if (!onDetectSchema || !pasteContent.trim()) return
+    setImporting(true); setImportError(null)
+    try {
+      const result = await onDetectSchema(pasteContent, 'auto')
+      setDetectedResult({ input_description: result.input_description, sample_input: result.sample_input })
+    } catch (err) { setImportError(err instanceof Error ? err.message : 'Failed to detect schema') }
+    finally { setImporting(false) }
+  }
+
+  const handleImportFromUrl = async () => {
+    if (!onImportFromUrl || !urlInput.trim()) return
+    setImporting(true); setImportError(null)
+    try {
+      const result = await onImportFromUrl(urlInput)
+      onApplyDetectedSchema?.(result.task); setImportSource(null); setUrlInput('')
+    } catch (err) { setImportError(err instanceof Error ? err.message : 'Failed to import from URL') }
+    finally { setImporting(false) }
+  }
+
+  const handleApplyDetected = () => {
+    if (detectedResult && onApplyDetectedSchema) {
+      onApplyDetectedSchema({ input_description: detectedResult.input_description, sample_input: detectedResult.sample_input })
+      setImportSource(null); setPasteContent(''); setDetectedResult(null)
+    }
+  }
+
+  const handleCancelImport = () => { setImportSource(null); setPasteContent(''); setUrlInput(''); setDetectedResult(null); setImportError(null) }
+
+  return (
+    <Section
+      title="Task Definition"
+      subtitle="What your app receives and produces"
+      badge={hasContent ? 'defined' : undefined}
+      badgeVariant="success"
+    >
+      <div className="space-y-2">
+        {canImport && !importSource && (
+          <div className="flex items-center gap-2 py-2 border-b border-border mb-2">
+            <span className="text-xs text-muted-foreground">Import from:</span>
+            <button onClick={() => setImportSource('paste')} className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/10 rounded transition-colors">
+              <FileText className="w-3 h-3" /> Paste data
+            </button>
+            <button onClick={() => setImportSource('url')} className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/10 rounded transition-colors">
+              <Link className="w-3 h-3" /> URL
+            </button>
+            <button onClick={() => setImportSource('manual')} className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/10 rounded transition-colors">
+              <Wand2 className="w-3 h-3" /> Describe manually
+            </button>
+          </div>
+        )}
+
+        {importSource === 'paste' && (
+          <div className="p-3 bg-accent/5 rounded-lg border border-accent/20 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium text-foreground">Paste sample data</span>
+              <button onClick={handleCancelImport} className="text-muted-foreground hover:text-foreground"><X className="w-4 h-4" /></button>
+            </div>
+            <textarea value={pasteContent} onChange={e => setPasteContent(e.target.value)} placeholder="Paste a sample of your input data (JSON, CSV, or plain text)..."
+              className="w-full h-32 border border-border rounded px-3 py-2 bg-background text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-accent font-mono" />
+            {importError && <p className="text-xs text-danger">{importError}</p>}
+            {detectedResult ? (
+              <div className="space-y-2">
+                <p className="text-xs text-muted-foreground">Detected format:</p>
+                <p className="text-sm text-foreground">{detectedResult.input_description}</p>
+                <div className="flex gap-2">
+                  <button onClick={handleApplyDetected} className="px-3 py-1.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90">Apply</button>
+                  <button onClick={() => setDetectedResult(null)} className="px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground">Try again</button>
+                </div>
+              </div>
+            ) : (
+              <button onClick={handleDetectFromPaste} disabled={importing || !pasteContent.trim()}
+                className="flex items-center gap-2 px-3 py-1.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90 disabled:opacity-50">
+                {importing && <Loader2 className="w-3 h-3 animate-spin" />} Detect format
+              </button>
+            )}
+          </div>
+        )}
+
+        {importSource === 'url' && (
+          <div className="p-3 bg-accent/5 rounded-lg border border-accent/20 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium text-foreground">Import from URL</span>
+              <button onClick={handleCancelImport} className="text-muted-foreground hover:text-foreground"><X className="w-4 h-4" /></button>
+            </div>
+            <input type="url" value={urlInput} onChange={e => setUrlInput(e.target.value)} placeholder="https://api.example.com/schema.json or OpenAPI spec URL..."
+              className="w-full border border-border rounded px-3 py-2 bg-background text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-accent" />
+            <p className="text-xs text-muted-foreground">Supports JSON data, OpenAPI/Swagger specs, or API documentation pages.</p>
+            {importError && <p className="text-xs text-danger">{importError}</p>}
+            <button onClick={handleImportFromUrl} disabled={importing || !urlInput.trim()}
+              className="flex items-center gap-2 px-3 py-1.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90 disabled:opacity-50">
+              {importing && <Loader2 className="w-3 h-3 animate-spin" />} Import
+            </button>
+          </div>
+        )}
+
+        {importSource === 'manual' && (
+          <div className="p-3 bg-accent/5 rounded-lg border border-accent/20 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium text-foreground">Describe your format</span>
+              <button onClick={handleCancelImport} className="text-muted-foreground hover:text-foreground"><X className="w-4 h-4" /></button>
+            </div>
+            <p className="text-xs text-muted-foreground mb-2">Fill in the fields below to describe what your app receives and produces.</p>
+          </div>
+        )}
+
+        {(importSource === null || importSource === 'manual') && (
+          <>
+            <TaskField label="Input" placeholder="What does your app receive?" value={task.input_description} onSave={v => onEdit?.('input_description', v)} />
+            <TaskField label="Output" placeholder="What does your app produce?" value={task.output_description} onSave={v => onEdit?.('output_description', v)} />
+            <div className="mt-2 pt-2 border-t border-border space-y-2">
+              <TaskField label="Sample input" placeholder="Paste an example..." value={task.sample_input || ''} onSave={v => onEdit?.('sample_input', v)} multiline />
+              <TaskField label="Sample output" placeholder="Paste an example..." value={task.sample_output || ''} onSave={v => onEdit?.('sample_output', v)} multiline />
+            </div>
+          </>
+        )}
+      </div>
+    </Section>
+  )
+}
+
+function TaskField({ label, placeholder, value, onSave, multiline = false }: {
+  label: string; placeholder: string; value: string; onSave?: (value: string) => void; multiline?: boolean
+}) {
+  const [editing, setEditing] = useState(false)
+  const [text, setText] = useState(value)
+  const handleSave = () => { setEditing(false); if (text !== value && onSave) onSave(text) }
+  const handleCancel = () => { setText(value); setEditing(false) }
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSave() }
+    if (e.key === 'Escape') handleCancel()
+  }
+
+  return (
+    <div className="pl-2">
+      <span className="text-xs font-medium text-muted-foreground">{label}:</span>
+      {editing ? (
+        <div className="mt-1">
+          <textarea value={text} onChange={e => setText(e.target.value)} onKeyDown={handleKeyDown} autoFocus placeholder={placeholder}
+            className="w-full border border-accent rounded px-2 py-1 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-accent text-xs" rows={multiline ? 4 : 2} />
+          <div className="flex gap-1.5 mt-1">
+            <button onClick={handleSave} className="px-2 py-0.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90">Save</button>
+            <button onClick={handleCancel} className="px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground">Cancel</button>
+            <span className="text-[10px] text-muted-foreground ml-auto self-center">Enter to save · Esc to cancel</span>
+          </div>
+        </div>
+      ) : (
+        <div onClick={() => onSave && setEditing(true)}
+          className={`mt-0.5 text-xs whitespace-pre-wrap ${value ? 'text-foreground/80' : 'text-muted-foreground italic'} ${onSave ? 'cursor-pointer hover:bg-accent/5 rounded px-1 -mx-1 py-0.5' : ''}`}>
+          {value || placeholder}
+        </div>
       )}
     </div>
   )

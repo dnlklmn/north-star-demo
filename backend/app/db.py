@@ -36,11 +36,21 @@ async def _create_tables() -> None:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS sessions (
                 id              TEXT PRIMARY KEY,
+                name            TEXT,
                 created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
                 agent_status    TEXT NOT NULL DEFAULT 'drafting',
                 state           JSONB NOT NULL DEFAULT '{}'::jsonb,
                 conversation    JSONB NOT NULL DEFAULT '[]'::jsonb
             );
+        """)
+        # Migrate: add name and updated_at columns if missing
+        await conn.execute("""
+            DO $$ BEGIN
+                ALTER TABLE sessions ADD COLUMN IF NOT EXISTS name TEXT;
+                ALTER TABLE sessions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+            EXCEPTION WHEN others THEN NULL;
+            END $$;
         """)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS charters (
@@ -133,16 +143,17 @@ async def _create_tables() -> None:
 
 # --- Session CRUD ---
 
-async def create_session(session_id: str, state: dict) -> dict:
+async def create_session(session_id: str, state: dict, name: str | None = None) -> dict:
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO sessions (id, agent_status, state, conversation)
-            VALUES ($1, $2, $3, $4::jsonb)
-            RETURNING id, created_at, agent_status, state, conversation
+            INSERT INTO sessions (id, name, agent_status, state, conversation)
+            VALUES ($1, $2, $3, $4, $5::jsonb)
+            RETURNING id, name, created_at, updated_at, agent_status, state, conversation
             """,
             session_id,
+            name,
             state.get("agent_status", "drafting"),
             json.dumps(state),
             json.dumps([]),
@@ -154,7 +165,7 @@ async def get_session(session_id: str) -> dict | None:
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, created_at, agent_status, state, conversation FROM sessions WHERE id = $1",
+            "SELECT id, name, created_at, updated_at, agent_status, state, conversation FROM sessions WHERE id = $1",
             session_id,
         )
         if row is None:
@@ -174,14 +185,110 @@ async def update_session(session_id: str, state: dict, conversation: list[dict])
         row = await conn.fetchrow(
             """
             UPDATE sessions
-            SET agent_status = $2, state = $3, conversation = $4::jsonb
+            SET agent_status = $2, state = $3, conversation = $4::jsonb,
+                updated_at = now()
             WHERE id = $1
-            RETURNING id, created_at, agent_status, state, conversation
+            RETURNING id, name, created_at, updated_at, agent_status, state, conversation
             """,
             session_id,
             state.get("agent_status", "drafting"),
             json.dumps(state),
             json.dumps(conversation),
+        )
+        if row is None:
+            raise ValueError(f"Session {session_id} not found")
+        result = dict(row)
+        if isinstance(result["state"], str):
+            result["state"] = json.loads(result["state"])
+        if isinstance(result["conversation"], str):
+            result["conversation"] = json.loads(result["conversation"])
+        return result
+
+
+async def list_sessions(limit: int = 50) -> list[dict]:
+    """List sessions ordered by most recently updated, returning summary info."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT s.id, s.name, s.created_at, s.updated_at, s.agent_status, s.state,
+                   EXISTS(SELECT 1 FROM datasets d WHERE d.session_id = s.id) AS has_dataset
+            FROM sessions s
+            ORDER BY s.updated_at DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+        results = []
+        for r in rows:
+            row = dict(r)
+            state = row.get("state")
+            if isinstance(state, str):
+                state = json.loads(state)
+            # Compute has_charter from state
+            charter = (state or {}).get("charter", {})
+            has_charter = bool(
+                charter.get("coverage", {}).get("criteria")
+                or charter.get("alignment")
+            )
+            row["has_charter"] = has_charter
+            results.append(row)
+        return results
+
+
+async def delete_session(session_id: str) -> None:
+    """Delete a session and all associated data (cascading)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # Delete in dependency order
+        await conn.execute(
+            "DELETE FROM examples WHERE dataset_id IN (SELECT id FROM datasets WHERE session_id = $1)",
+            session_id,
+        )
+        await conn.execute(
+            "DELETE FROM judgements WHERE turn_id IN (SELECT id FROM turns WHERE session_id = $1)",
+            session_id,
+        )
+        await conn.execute("DELETE FROM datasets WHERE session_id = $1", session_id)
+        await conn.execute("DELETE FROM turns WHERE session_id = $1", session_id)
+        await conn.execute("DELETE FROM charters WHERE session_id = $1", session_id)
+        result = await conn.execute("DELETE FROM sessions WHERE id = $1", session_id)
+        if result == "DELETE 0":
+            raise ValueError(f"Session {session_id} not found")
+
+
+async def update_session_name(session_id: str, name: str) -> dict:
+    """Rename a session."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE sessions
+            SET name = $2, updated_at = now()
+            WHERE id = $1
+            RETURNING id, name, created_at, updated_at, agent_status
+            """,
+            session_id,
+            name,
+        )
+        if row is None:
+            raise ValueError(f"Session {session_id} not found")
+        return dict(row)
+
+
+async def update_session_input(session_id: str, state: dict) -> dict:
+    """Save updated input (goals/stories) without running agent — just persist state."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE sessions
+            SET state = $2, updated_at = now()
+            WHERE id = $1
+            RETURNING id, name, created_at, updated_at, agent_status, state, conversation
+            """,
+            session_id,
+            json.dumps(state),
         )
         if row is None:
             raise ValueError(f"Session {session_id} not found")

@@ -1,172 +1,192 @@
-/**
- * Radar/spider chart for visualizing multi-dimensional scores.
- * Pure SVG — no dependencies.
- */
-
-interface RadarPoint {
-  label: string
-  value: number // 0-100
-}
+import { useMemo } from 'react'
 
 interface Props {
-  points: RadarPoint[]
-  threshold?: number // 0-100, shown as a dashed ring
-  size?: number
-  className?: string
+  dimensions: Array<{
+    label: string
+    value: number // 0-1 normalized
+    status: 'pending' | 'weak' | 'good' | 'pass' | 'fail' | 'untested'
+  }>
+  size?: number // default 200
 }
 
-export default function RadarChart({ points, threshold = 70, size = 200, className = '' }: Props) {
-  if (points.length < 3) return null
+const STATUS_COLORS: Record<string, string> = {
+  good: 'hsl(var(--color-success))',
+  pass: 'hsl(var(--color-success))',
+  weak: 'hsl(var(--color-warning))',
+  fail: 'hsl(var(--color-danger))',
+  pending: 'hsl(var(--color-muted-foreground))',
+  untested: 'hsl(var(--color-muted-foreground))',
+}
 
+function polarToCartesian(
+  cx: number,
+  cy: number,
+  radius: number,
+  angleRad: number
+): { x: number; y: number } {
+  return {
+    x: cx + radius * Math.cos(angleRad),
+    y: cy + radius * Math.sin(angleRad),
+  }
+}
+
+function getPolygonPoints(
+  cx: number,
+  cy: number,
+  radius: number,
+  count: number
+): Array<{ x: number; y: number }> {
+  const angleStep = (2 * Math.PI) / count
+  // Start from top (-PI/2) so the first axis points up
+  const startAngle = -Math.PI / 2
+  return Array.from({ length: count }, (_, i) =>
+    polarToCartesian(cx, cy, radius, startAngle + i * angleStep)
+  )
+}
+
+function pointsToString(points: Array<{ x: number; y: number }>): string {
+  return points.map((p) => `${p.x},${p.y}`).join(' ')
+}
+
+export default function RadarChart({ dimensions, size = 200 }: Props) {
+  if (!dimensions || dimensions.length < 3) return null
+
+  const count = dimensions.length
+  const labelMargin = 28
   const cx = size / 2
   const cy = size / 2
-  const radius = (size / 2) - 32 // leave room for labels
-  const n = points.length
-  const angleStep = (2 * Math.PI) / n
-  const startAngle = -Math.PI / 2 // start from top
+  const radius = size / 2 - labelMargin
 
-  // Get (x, y) for a given index and radius fraction (0-1)
-  const getPoint = (index: number, fraction: number) => {
-    const angle = startAngle + index * angleStep
-    return {
-      x: cx + radius * fraction * Math.cos(angle),
-      y: cy + radius * fraction * Math.sin(angle),
-    }
-  }
+  const gridLevels = [0.25, 0.5, 0.75, 1]
 
-  // Build polygon path for a given set of fractions
-  const buildPath = (fractions: number[]) => {
-    return fractions
-      .map((f, i) => {
-        const { x, y } = getPoint(i, f)
-        return `${i === 0 ? 'M' : 'L'} ${x} ${y}`
-      })
-      .join(' ') + ' Z'
-  }
+  const axisPoints = useMemo(() => getPolygonPoints(cx, cy, radius, count), [cx, cy, radius, count])
 
-  // Grid rings at 25%, 50%, 75%, 100%
-  const gridLevels = [0.25, 0.5, 0.75, 1.0]
+  const dataPoints = useMemo(() => {
+    const angleStep = (2 * Math.PI) / count
+    const startAngle = -Math.PI / 2
+    return dimensions.map((d, i) => {
+      // Give zero values a small offset so the polygon doesn't collapse to center
+      const r = Math.max(0.05, Math.min(1, d.value)) * radius
+      return polarToCartesian(cx, cy, r, startAngle + i * angleStep)
+    })
+  }, [dimensions, cx, cy, radius, count])
 
-  // Data polygon
-  const dataFractions = points.map(p => Math.max(0, Math.min(p.value, 100)) / 100)
-  const dataPath = buildPath(dataFractions)
-
-  // Threshold ring
-  const thresholdFraction = threshold / 100
-  const thresholdPath = buildPath(Array(n).fill(thresholdFraction))
+  const labelPositions = useMemo(() => {
+    const labelRadius = radius + 14
+    const angleStep = (2 * Math.PI) / count
+    const startAngle = -Math.PI / 2
+    return dimensions.map((_, i) => {
+      const angle = startAngle + i * angleStep
+      const pos = polarToCartesian(cx, cy, labelRadius, angle)
+      // Determine text-anchor based on position relative to center
+      let anchor: 'start' | 'middle' | 'end' = 'middle'
+      if (pos.x < cx - 2) anchor = 'end'
+      else if (pos.x > cx + 2) anchor = 'start'
+      // Vertical nudge for top/bottom labels
+      let dy = '0.35em'
+      if (pos.y < cy - radius * 0.5) dy = '0.8em'
+      else if (pos.y > cy + radius * 0.5) dy = '-0.2em'
+      return { ...pos, anchor, dy }
+    })
+  }, [dimensions, cx, cy, radius, count])
 
   return (
-    <div className={className}>
-      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-        {/* Grid rings */}
-        {gridLevels.map(level => (
+    <svg
+      width={size}
+      height={size}
+      viewBox={`0 0 ${size} ${size}`}
+      className="overflow-visible"
+    >
+      {/* Background grid polygons */}
+      {gridLevels.map((level) => {
+        const points = getPolygonPoints(cx, cy, radius * level, count)
+        return (
           <polygon
             key={level}
-            points={Array.from({ length: n }, (_, i) => {
-              const { x, y } = getPoint(i, level)
-              return `${x},${y}`
-            }).join(' ')}
+            points={pointsToString(points)}
             fill="none"
-            stroke="currentColor"
-            strokeWidth="0.5"
-            className="text-border"
+            style={{
+              stroke: 'hsl(var(--color-border))',
+              opacity: 0.3,
+            }}
+            strokeWidth={1}
           />
-        ))}
+        )
+      })}
 
-        {/* Axis lines */}
-        {points.map((_, i) => {
-          const { x, y } = getPoint(i, 1)
-          return (
-            <line
-              key={i}
-              x1={cx}
-              y1={cy}
-              x2={x}
-              y2={y}
-              stroke="currentColor"
-              strokeWidth="0.5"
-              className="text-border"
-            />
-          )
-        })}
-
-        {/* Threshold ring */}
-        <polygon
-          points={Array.from({ length: n }, (_, i) => {
-            const { x, y } = getPoint(i, thresholdFraction)
-            return `${x},${y}`
-          }).join(' ')}
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1"
-          strokeDasharray="3 3"
-          className="text-muted-foreground/40"
+      {/* Axis lines from center to each vertex */}
+      {axisPoints.map((point, i) => (
+        <line
+          key={i}
+          x1={cx}
+          y1={cy}
+          x2={point.x}
+          y2={point.y}
+          style={{
+            stroke: 'hsl(var(--color-border))',
+            opacity: 0.3,
+          }}
+          strokeWidth={1}
         />
+      ))}
 
-        {/* Data fill */}
-        <path
-          d={dataPath}
-          fill="currentColor"
-          fillOpacity="0.15"
-          className="text-accent"
+      {/* Data polygon fill */}
+      <polygon
+        points={pointsToString(dataPoints)}
+        style={{
+          fill: 'hsl(var(--color-accent) / 0.1)',
+        }}
+        strokeWidth={0}
+      />
+
+      {/* Lines connecting data points */}
+      {dataPoints.map((point, i) => {
+        const next = dataPoints[(i + 1) % dataPoints.length]
+        return (
+          <line
+            key={`line-${i}`}
+            x1={point.x}
+            y1={point.y}
+            x2={next.x}
+            y2={next.y}
+            style={{
+              stroke: 'hsl(var(--color-accent))',
+            }}
+            strokeWidth={2}
+            strokeLinecap="round"
+          />
+        )
+      })}
+
+      {/* Data point circles */}
+      {dataPoints.map((point, i) => (
+        <circle
+          key={i}
+          cx={point.x}
+          cy={point.y}
+          r={4}
+          style={{
+            fill: STATUS_COLORS[dimensions[i].status] ?? STATUS_COLORS.pending,
+            stroke: 'hsl(var(--color-background))',
+          }}
+          strokeWidth={1.5}
         />
+      ))}
 
-        {/* Data outline */}
-        <path
-          d={dataPath}
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          className="text-accent"
-        />
-
-        {/* Data points */}
-        {dataFractions.map((f, i) => {
-          const { x, y } = getPoint(i, f)
-          const isGood = points[i].value >= threshold
-          return (
-            <circle
-              key={i}
-              cx={x}
-              cy={y}
-              r={3}
-              fill="currentColor"
-              className={isGood ? 'text-success' : points[i].value > 0 ? 'text-accent' : 'text-muted-foreground'}
-            />
-          )
-        })}
-
-        {/* Labels */}
-        {points.map((point, i) => {
-          const { x, y } = getPoint(i, 1.2)
-          // Determine text-anchor based on position
-          const angle = startAngle + i * angleStep
-          const cos = Math.cos(angle)
-          const textAnchor = Math.abs(cos) < 0.1 ? 'middle' : cos > 0 ? 'start' : 'end'
-          const dy = Math.sin(angle) > 0.5 ? '0.8em' : Math.sin(angle) < -0.5 ? '-0.2em' : '0.35em'
-
-          return (
-            <text
-              key={i}
-              x={x}
-              y={y}
-              textAnchor={textAnchor}
-              dy={dy}
-              className="fill-muted-foreground"
-              style={{ fontSize: '10px' }}
-            >
-              {point.label}
-              <tspan
-                dx="3"
-                className={point.value >= threshold ? 'fill-success' : point.value > 0 ? 'fill-accent' : 'fill-muted-foreground'}
-                style={{ fontWeight: 600 }}
-              >
-                {point.value}%
-              </tspan>
-            </text>
-          )
-        })}
-      </svg>
-    </div>
+      {/* Labels */}
+      {labelPositions.map((pos, i) => (
+        <text
+          key={i}
+          x={pos.x}
+          y={pos.y}
+          textAnchor={pos.anchor}
+          dy={pos.dy}
+          className="fill-muted-foreground"
+          style={{ fontSize: 10 }}
+        >
+          {dimensions[i].label}
+        </text>
+      ))}
+    </svg>
   )
 }

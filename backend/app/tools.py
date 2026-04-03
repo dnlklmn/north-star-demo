@@ -45,12 +45,27 @@ logger = logging.getLogger(__name__)
 
 _client: anthropic.Anthropic | None = None
 
+# Per-request API key (set via contextvars for thread safety)
+import contextvars
+_request_api_key: contextvars.ContextVar[str | None] = contextvars.ContextVar('_request_api_key', default=None)
+
 # Cached settings (refreshed each LLM call)
 _cached_settings: dict | None = None
 
 
+def set_request_api_key(key: str | None) -> None:
+    """Set the API key for the current request context."""
+    _request_api_key.set(key)
+
+
 def get_client() -> anthropic.Anthropic:
+    """Get an Anthropic client — uses per-request key if provided, else env var."""
     global _client
+    request_key = _request_api_key.get(None)
+    if request_key:
+        # Per-request key: create a fresh client (not cached)
+        return anthropic.Anthropic(api_key=request_key)
+    # Default: use env var (cached singleton)
     if _client is None:
         _client = anthropic.Anthropic()
     return _client
@@ -243,6 +258,36 @@ async def call_generate_suggestions(state: SessionState) -> tuple[tuple[list[Sug
         for s in data.get("user_stories", [])
     ]
     return (suggestions, suggested_stories), [meta]
+
+
+async def call_suggest_goals(goals: list[str]) -> tuple[list[str], list[dict]]:
+    """Suggest additional business goals. Returns (suggestions, call metadata list)."""
+    from .prompt import build_suggest_goals_prompt
+    await _refresh_settings()
+    prompt = build_suggest_goals_prompt(goals)
+    text, meta = _call_llm(prompt, max_tokens=512)
+    data = _extract_json(text)
+    return data.get("suggestions", []), [meta]
+
+
+async def call_evaluate_goals(goals: list[str]) -> tuple[list[dict], list[dict]]:
+    """Evaluate business goal quality. Returns (feedback list, call metadata list)."""
+    from .prompt import build_evaluate_goals_prompt
+    await _refresh_settings()
+    prompt = build_evaluate_goals_prompt(goals)
+    text, meta = _call_llm(prompt, max_tokens=512)
+    data = _extract_json(text)
+    return data.get("feedback", []), [meta]
+
+
+async def call_suggest_stories(goals: list[str], stories: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Suggest additional user stories. Returns (suggestions, call metadata list)."""
+    from .prompt import build_suggest_stories_prompt
+    await _refresh_settings()
+    prompt = build_suggest_stories_prompt(goals, stories)
+    text, meta = _call_llm(prompt, max_tokens=512)
+    data = _extract_json(text)
+    return data.get("suggestions", []), [meta]
 
 
 # --- Dataset phase tools ---

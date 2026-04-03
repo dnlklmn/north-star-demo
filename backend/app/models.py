@@ -13,7 +13,6 @@ from pydantic import BaseModel, Field
 # --- Enums ---
 
 class AgentStatus(str, Enum):
-    discovery = "discovery"
     drafting = "drafting"
     validating = "validating"
     questioning = "questioning"
@@ -25,12 +24,6 @@ class DimensionStatus(str, Enum):
     pending = "pending"
     weak = "weak"
     good = "good"
-
-
-class DiscoveryPhase(str, Enum):
-    goals = "goals"
-    users = "users"
-    stories = "stories"
 
 
 class ValidationStatus(str, Enum):
@@ -91,6 +84,8 @@ class Validation(BaseModel):
 class SessionInput(BaseModel):
     business_goals: Optional[str] = None
     user_stories: Optional[str] = None
+    goals: list[str] = Field(default_factory=list)
+    story_groups: list[dict] = Field(default_factory=list)
     conversation_history: list[dict] = Field(default_factory=list)
 
 
@@ -102,36 +97,40 @@ class SessionState(BaseModel):
     charter: Charter = Field(default_factory=Charter)
     validation: Validation = Field(default_factory=Validation)
     rounds_of_questions: int = 0
-    agent_status: AgentStatus = AgentStatus.discovery
-    discovery_phase: DiscoveryPhase = DiscoveryPhase.goals
-    extracted_goals: list[str] = Field(default_factory=list)
-    extracted_users: list[str] = Field(default_factory=list)
-    extracted_stories: list[dict] = Field(default_factory=list)
-    discovery_rounds: int = 0
+    agent_status: AgentStatus = AgentStatus.drafting
+    scorers: list[dict] = Field(default_factory=list)
 
 
 # --- API request/response models ---
 
 class CreateSessionRequest(BaseModel):
-    initial_input: SessionInput = Field(default_factory=SessionInput)
+    initial_input: SessionInput
+    name: Optional[str] = None
 
 
 class CreateSessionResponse(BaseModel):
     session_id: str
     agent_status: AgentStatus
     message: str
-    phase: str = "goals"
     suggestions: list['Suggestion'] = Field(default_factory=list)
     suggested_stories: list['SuggestedStory'] = Field(default_factory=list)
-    extracted_goals: list[str] = Field(default_factory=list)
-    extracted_users: list[str] = Field(default_factory=list)
-    extracted_stories: list[dict] = Field(default_factory=list)
-    ready_for_users: bool = False
-    ready_for_stories: bool = False
-    ready_for_charter: bool = False
-    suggested_goals: list[str] = Field(default_factory=list)
-    suggested_users: list[str] = Field(default_factory=list)
-    suggested_stories_options: list[dict] = Field(default_factory=list)
+
+
+class ProjectSummary(BaseModel):
+    """Lightweight session summary for the project list."""
+    id: str
+    name: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    agent_status: str
+    has_charter: bool = False
+    has_dataset: bool = False
+
+
+class UpdateInputRequest(BaseModel):
+    """Save structured goals + story_groups without triggering the agent."""
+    goals: list[str] = Field(default_factory=list)
+    story_groups: list[dict] = Field(default_factory=list)
 
 
 class SendMessageRequest(BaseModel):
@@ -158,31 +157,9 @@ class SendMessageResponse(BaseModel):
     message: str
     agent_status: AgentStatus
     state: SessionState
-    phase: str = "goals"
     tool_calls: list[str] = Field(default_factory=list)
     suggestions: list[Suggestion] = Field(default_factory=list)
     suggested_stories: list[SuggestedStory] = Field(default_factory=list)
-    extracted_goals: list[str] = Field(default_factory=list)
-    extracted_users: list[str] = Field(default_factory=list)
-    extracted_stories: list[dict] = Field(default_factory=list)
-    ready_for_users: bool = False
-    ready_for_stories: bool = False
-    ready_for_charter: bool = False
-    suggested_goals: list[str] = Field(default_factory=list)
-    suggested_users: list[str] = Field(default_factory=list)
-    suggested_stories_options: list[dict] = Field(default_factory=list)
-
-
-class PatchGoalsRequest(BaseModel):
-    goals: list[str]
-
-
-class PatchUsersRequest(BaseModel):
-    users: list[str]
-
-
-class PatchStoriesRequest(BaseModel):
-    stories: list[dict]
 
 
 class ProceedResponse(BaseModel):
@@ -280,6 +257,48 @@ class UpdateSettingsRequest(BaseModel):
     model_name: Optional[str] = None
     max_rounds: Optional[int] = None
     creativity: Optional[float] = None
+
+
+class ValidateResponse(BaseModel):
+    validation: Validation
+    state: SessionState
+
+
+class SuggestResponse(BaseModel):
+    suggestions: list[Suggestion] = Field(default_factory=list)
+    suggested_stories: list[SuggestedStory] = Field(default_factory=list)
+
+
+class SuggestGoalsRequest(BaseModel):
+    goals: list[str]
+
+
+class SuggestGoalsResponse(BaseModel):
+    suggestions: list[str] = Field(default_factory=list)
+
+
+class GoalFeedback(BaseModel):
+    """Feedback on a single business goal's quality."""
+    goal: str
+    issue: Optional[str] = None  # null means goal is fine
+    suggestion: Optional[str] = None  # improved version if issue exists
+
+
+class EvaluateGoalsRequest(BaseModel):
+    goals: list[str]
+
+
+class EvaluateGoalsResponse(BaseModel):
+    feedback: list[GoalFeedback] = Field(default_factory=list)
+
+
+class SuggestStoriesRequest(BaseModel):
+    goals: list[str]
+    stories: list[dict]  # each dict has who, what, why
+
+
+class SuggestStoriesResponse(BaseModel):
+    suggestions: list[dict] = Field(default_factory=list)  # each dict has who, what, why
 
 
 class EnrichRequest(BaseModel):

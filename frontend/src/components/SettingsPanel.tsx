@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
+import { Eye, EyeOff } from 'lucide-react'
 import type { Settings } from '../types'
-import { getSettings, updateSettings } from '../api'
+import { getSettings, updateSettings, getApiKey, setApiKey } from '../api'
 
 interface SettingsPanelProps {
   onClose: () => void
@@ -32,6 +33,9 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'))
+  const [apiKeyValue, setApiKeyValue] = useState(() => getApiKey())
+  const [showKey, setShowKey] = useState(false)
+  const [keySaved, setKeySaved] = useState(false)
 
   useEffect(() => {
     getSettings().then(setSettings).catch(() => setError('Failed to load settings'))
@@ -180,6 +184,50 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
 
           {tab === 'app' && (
             <>
+              {/* API Key */}
+              <div>
+                <label className="text-xs font-medium text-foreground block mb-1.5">Anthropic API Key</label>
+                <div className="flex gap-1.5">
+                  <div className="flex-1 relative">
+                    <input
+                      type={showKey ? 'text' : 'password'}
+                      value={apiKeyValue}
+                      onChange={e => { setApiKeyValue(e.target.value); setKeySaved(false) }}
+                      placeholder="sk-ant-api03-..."
+                      className="w-full text-sm bg-surface border border-border rounded-lg px-3 py-2 pr-9 text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-accent"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowKey(!showKey)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    >
+                      {showKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setApiKey(apiKeyValue)
+                      setKeySaved(true)
+                      setTimeout(() => setKeySaved(false), 2000)
+                    }}
+                    className="px-3 py-2 text-xs font-medium bg-accent text-accent-foreground rounded-lg hover:opacity-90 transition-opacity"
+                  >
+                    {keySaved ? 'Saved!' : 'Save'}
+                  </button>
+                </div>
+                <p className="text-[10px] text-muted-foreground mt-1.5">
+                  Your key is stored locally in this browser and sent with each request. It is never saved on the server.
+                  {apiKeyValue && !apiKeyValue.startsWith('sk-ant-') && (
+                    <span className="text-warning block mt-0.5">Key should start with "sk-ant-"</span>
+                  )}
+                </p>
+                {!apiKeyValue && (
+                  <p className="text-[10px] text-warning mt-1">
+                    No API key set. The server's default key will be used if available.
+                  </p>
+                )}
+              </div>
+
               {/* Theme */}
               <div>
                 <label className="text-xs font-medium text-foreground block mb-1.5">Theme</label>
