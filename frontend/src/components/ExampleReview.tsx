@@ -20,6 +20,11 @@ interface ExampleReviewProps {
   onHeaderClick?: () => void
   isFocused?: boolean
   coverageGaps?: { uncoveredCount: number; totalScenarios: number } | null
+  onSuggestRevision?: (exampleId: string) => void
+  onSuggestRevisions?: () => void
+  onAcceptRevision?: (exampleId: string) => void
+  onDismissRevision?: (exampleId: string) => void
+  revisionsLoading?: boolean
 }
 
 export default function ExampleReview({
@@ -37,6 +42,11 @@ export default function ExampleReview({
   onHeaderClick,
   isFocused,
   coverageGaps,
+  onSuggestRevision,
+  onSuggestRevisions,
+  onAcceptRevision,
+  onDismissRevision,
+  revisionsLoading,
 }: ExampleReviewProps) {
   const [filterArea, setFilterArea] = useState<string>('')
   const [filterLabel, setFilterLabel] = useState<string>('')
@@ -104,6 +114,10 @@ export default function ExampleReview({
   const selectedIndex = filtered.findIndex(e => e.id === selectedId)
   const selectedExample = filtered.find(e => e.id === selectedId)
 
+  const examplesWithIssues = examples.filter(
+    ex => ex.judge_verdict?.issues && ex.judge_verdict.issues.length > 0 && !ex.revision_suggestion
+  ).length
+
   // Keyboard navigation and shortcuts
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if (editingId || deleteConfirmId) {
@@ -138,8 +152,13 @@ export default function ExampleReview({
       case 'd': case 'D':
         if (selectedExample) { e.preventDefault(); setDeleteConfirmId(selectedExample.id) }
         break
+      case 's': case 'S':
+        if (selectedExample && onSuggestRevision && selectedExample.judge_verdict?.issues?.length && !selectedExample.revision_suggestion) {
+          e.preventDefault(); onSuggestRevision(selectedExample.id)
+        }
+        break
     }
-  }, [editingId, deleteConfirmId, selectedIndex, filtered, selectedExample, onUpdateExample])
+  }, [editingId, deleteConfirmId, selectedIndex, filtered, selectedExample, onUpdateExample, onSuggestRevision])
 
   useEffect(() => {
     if (isFocused) {
@@ -230,6 +249,15 @@ export default function ExampleReview({
           <button onClick={onAutoReview} disabled={loading || stats.pending === 0} className="px-2.5 py-1 text-xs bg-surface-raised border border-border rounded hover:bg-muted transition-colors disabled:opacity-50">
             Auto-review
           </button>
+          {onSuggestRevisions && (
+            <button
+              onClick={onSuggestRevisions}
+              disabled={loading || revisionsLoading || examplesWithIssues === 0}
+              className="px-2.5 py-1 text-xs bg-surface-raised border border-border rounded hover:bg-muted transition-colors disabled:opacity-50"
+            >
+              {revisionsLoading ? 'Suggesting...' : `Suggest revisions${examplesWithIssues > 0 ? ` (${examplesWithIssues})` : ''}`}
+            </button>
+          )}
         </div>
       </div>
 
@@ -241,7 +269,8 @@ export default function ExampleReview({
           <span className="mr-3"><span className="underline">E</span>dit</span>
           <span className="mr-3"><span className="underline">R</span>eject</span>
           <span className="mr-3">Re<span className="underline">l</span>abel</span>
-          <span><span className="underline">D</span>elete</span>
+          <span className="mr-3"><span className="underline">D</span>elete</span>
+          <span><span className="underline">S</span>uggest fix</span>
         </div>
       )}
 
@@ -300,6 +329,9 @@ export default function ExampleReview({
                   onDelete={() => setDeleteConfirmId(example.id)}
                   onStartEdit={() => setEditingId(example.id)}
                   onCancelEdit={() => setEditingId(null)}
+                  onSuggestRevision={onSuggestRevision}
+                  onAcceptRevision={onAcceptRevision}
+                  onDismissRevision={onDismissRevision}
                 />
               ))}
             </tbody>
@@ -334,6 +366,9 @@ function ExampleRow({
   onDelete,
   onStartEdit,
   onCancelEdit,
+  onSuggestRevision,
+  onAcceptRevision,
+  onDismissRevision,
 }: {
   example: Example
   isSelected: boolean
@@ -343,9 +378,13 @@ function ExampleRow({
   onDelete: () => void
   onStartEdit: () => void
   onCancelEdit: () => void
+  onSuggestRevision?: (exampleId: string) => void
+  onAcceptRevision?: (exampleId: string) => void
+  onDismissRevision?: (exampleId: string) => void
 }) {
   const [editInput, setEditInput] = useState(example.input)
   const [editOutput, setEditOutput] = useState(example.expected_output)
+  const [showRevision, setShowRevision] = useState(false)
   const rowRef = useRef<HTMLTableRowElement>(null)
 
   useEffect(() => {
@@ -360,9 +399,20 @@ function ExampleRow({
   }, [isSelected])
 
   const handleSaveEdit = () => {
-    onUpdate({ input: editInput, expected_output: editOutput, review_status: 'approved' })
+    onUpdate({ input: editInput, expected_output: editOutput, review_status: 'approved', revision_suggestion: null } as Partial<Example>)
     onCancelEdit()
   }
+
+  const handleEditWithRevision = () => {
+    if (example.revision_suggestion) {
+      setEditInput(example.revision_suggestion.input)
+      setEditOutput(example.revision_suggestion.expected_output)
+    }
+    onStartEdit()
+  }
+
+  const hasIssues = example.judge_verdict?.issues && example.judge_verdict.issues.length > 0
+  const hasRevision = !!example.revision_suggestion
 
   if (isEditing) {
     return (
@@ -407,78 +457,158 @@ function ExampleRow({
   const truncate = (text: string, max: number) => text.length > max ? text.slice(0, max) + '…' : text
 
   return (
-    <tr
-      ref={rowRef}
-      onClick={onSelect}
-      className={`border-b border-border cursor-pointer transition-colors ${
-        isSelected
-          ? 'bg-accent/5 border-l-2 border-l-accent'
-          : 'hover:bg-muted/30'
-      } ${REVIEW_COLORS[example.review_status] || ''}`}
-    >
-      {/* Scenario / coverage tags */}
-      <td className="px-3 py-2.5 align-top">
-        {example.coverage_tags.length > 0 ? (
-          <div className="flex flex-wrap gap-1">
-            {example.coverage_tags.slice(0, 2).map((tag, i) => (
-              <span key={i} className="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded">{tag}</span>
-            ))}
-            {example.coverage_tags.length > 2 && (
-              <span className="text-[10px] text-muted-foreground">+{example.coverage_tags.length - 2}</span>
-            )}
+    <>
+      <tr
+        ref={rowRef}
+        onClick={onSelect}
+        className={`border-b ${hasRevision && !showRevision ? 'border-b-amber-500/30' : 'border-border'} cursor-pointer transition-colors ${
+          isSelected
+            ? 'bg-accent/5 border-l-2 border-l-accent'
+            : 'hover:bg-muted/30'
+        } ${REVIEW_COLORS[example.review_status] || ''}`}
+      >
+        {/* Scenario / coverage tags */}
+        <td className="px-3 py-2.5 align-top">
+          {example.coverage_tags.length > 0 ? (
+            <div className="flex flex-wrap gap-1">
+              {example.coverage_tags.slice(0, 2).map((tag, i) => (
+                <span key={i} className="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded">{tag}</span>
+              ))}
+              {example.coverage_tags.length > 2 && (
+                <span className="text-[10px] text-muted-foreground">+{example.coverage_tags.length - 2}</span>
+              )}
+            </div>
+          ) : (
+            <span className="text-[10px] text-muted-foreground italic">—</span>
+          )}
+        </td>
+
+        {/* Title + labels */}
+        <td className="px-3 py-2.5 align-top">
+          <div className="flex flex-col gap-1">
+            <span className="text-xs font-medium text-foreground leading-tight">{example.feature_area}</span>
+            <div className="flex flex-wrap gap-1">
+              <Badge text={example.source} className={SOURCE_COLORS[example.source] || ''} />
+              <Badge text={example.label} className={LABEL_COLORS[example.label] || ''} />
+              {example.review_status !== 'pending' && (
+                <Badge text={example.review_status} className="bg-muted text-muted-foreground" />
+              )}
+              {hasRevision && (
+                <Badge text="revision" className="bg-amber-500/10 text-amber-400 border-amber-500/20" />
+              )}
+            </div>
           </div>
-        ) : (
-          <span className="text-[10px] text-muted-foreground italic">—</span>
-        )}
-      </td>
+        </td>
 
-      {/* Title + labels */}
-      <td className="px-3 py-2.5 align-top">
-        <div className="flex flex-col gap-1">
-          <span className="text-xs font-medium text-foreground leading-tight">{example.feature_area}</span>
-          <div className="flex flex-wrap gap-1">
-            <Badge text={example.source} className={SOURCE_COLORS[example.source] || ''} />
-            <Badge text={example.label} className={LABEL_COLORS[example.label] || ''} />
-            {example.review_status !== 'pending' && (
-              <Badge text={example.review_status} className="bg-muted text-muted-foreground" />
-            )}
+        {/* Input */}
+        <td className="px-3 py-2.5 align-top">
+          <div className="text-xs text-foreground/80 leading-relaxed line-clamp-3">
+            {truncate(example.input, 200)}
           </div>
-        </div>
-      </td>
+        </td>
 
-      {/* Input */}
-      <td className="px-3 py-2.5 align-top">
-        <div className="text-xs text-foreground/80 leading-relaxed line-clamp-3">
-          {truncate(example.input, 200)}
-        </div>
-      </td>
-
-      {/* Expected output */}
-      <td className="px-3 py-2.5 align-top">
-        <div className="text-xs text-foreground/80 leading-relaxed line-clamp-3">
-          {truncate(example.expected_output, 200)}
-        </div>
-      </td>
-
-      {/* Actions */}
-      <td className="px-3 py-2.5 align-top text-right">
-        {isSelected && (
-          <div className="flex gap-1 justify-end flex-wrap">
-            <button onClick={(e) => { e.stopPropagation(); onUpdate({ review_status: 'approved' }) }} className="px-1.5 py-0.5 text-[10px] text-success hover:bg-success/10 rounded transition-colors">
-              Approve
-            </button>
-            <button onClick={(e) => { e.stopPropagation(); onStartEdit() }} className="px-1.5 py-0.5 text-[10px] text-accent hover:bg-accent/10 rounded transition-colors">
-              Edit
-            </button>
-            <button onClick={(e) => { e.stopPropagation(); onUpdate({ review_status: 'rejected' }) }} className="px-1.5 py-0.5 text-[10px] text-danger hover:bg-danger/10 rounded transition-colors">
-              Reject
-            </button>
-            <button onClick={(e) => { e.stopPropagation(); onDelete() }} className="px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-danger rounded transition-colors">
-              Delete
-            </button>
+        {/* Expected output */}
+        <td className="px-3 py-2.5 align-top">
+          <div className="text-xs text-foreground/80 leading-relaxed line-clamp-3">
+            {truncate(example.expected_output, 200)}
           </div>
-        )}
-      </td>
-    </tr>
+        </td>
+
+        {/* Actions */}
+        <td className="px-3 py-2.5 align-top text-right">
+          {isSelected && (
+            <div className="flex gap-1 justify-end flex-wrap">
+              <button onClick={(e) => { e.stopPropagation(); onUpdate({ review_status: 'approved' }) }} className="px-1.5 py-0.5 text-[10px] text-success hover:bg-success/10 rounded transition-colors">
+                Approve
+              </button>
+              <button onClick={(e) => { e.stopPropagation(); onStartEdit() }} className="px-1.5 py-0.5 text-[10px] text-accent hover:bg-accent/10 rounded transition-colors">
+                Edit
+              </button>
+              <button onClick={(e) => { e.stopPropagation(); onUpdate({ review_status: 'rejected' }) }} className="px-1.5 py-0.5 text-[10px] text-danger hover:bg-danger/10 rounded transition-colors">
+                Reject
+              </button>
+              <button onClick={(e) => { e.stopPropagation(); onDelete() }} className="px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-danger rounded transition-colors">
+                Delete
+              </button>
+              {hasIssues && !hasRevision && onSuggestRevision && (
+                <button onClick={(e) => { e.stopPropagation(); onSuggestRevision(example.id) }} className="px-1.5 py-0.5 text-[10px] text-amber-400 hover:bg-amber-500/10 rounded transition-colors">
+                  Suggest fix
+                </button>
+              )}
+              {hasRevision && (
+                <button onClick={(e) => { e.stopPropagation(); setShowRevision(!showRevision) }} className="px-1.5 py-0.5 text-[10px] text-amber-400 hover:bg-amber-500/10 rounded transition-colors">
+                  {showRevision ? 'Hide revision' : 'View revision'}
+                </button>
+              )}
+            </div>
+          )}
+        </td>
+      </tr>
+      {/* Revision suggestion panel */}
+      {isSelected && showRevision && hasRevision && example.revision_suggestion && (
+        <tr className="border-b border-border bg-amber-500/5">
+          <td colSpan={5} className="px-3 py-3">
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-medium text-amber-400 uppercase tracking-wider">Suggested revision</span>
+                <div className="flex gap-1.5">
+                  {onAcceptRevision && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); onAcceptRevision(example.id) }}
+                      className="px-2 py-0.5 text-[10px] text-success hover:bg-success/10 border border-success/20 rounded transition-colors"
+                    >
+                      Accept
+                    </button>
+                  )}
+                  <button
+                    onClick={(e) => { e.stopPropagation(); handleEditWithRevision() }}
+                    className="px-2 py-0.5 text-[10px] text-accent hover:bg-accent/10 border border-accent/20 rounded transition-colors"
+                  >
+                    Edit
+                  </button>
+                  {onDismissRevision && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); onDismissRevision(example.id); setShowRevision(false) }}
+                      className="px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground border border-border rounded transition-colors"
+                    >
+                      Dismiss
+                    </button>
+                  )}
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground italic">{example.revision_suggestion.reasoning}</p>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <div className="text-[10px] text-muted-foreground mb-1 font-medium">Input</div>
+                  <div className="text-xs bg-background rounded p-2 border border-border">
+                    {example.revision_suggestion.input !== example.input ? (
+                      <>
+                        <div className="text-danger/60 line-through mb-1">{truncate(example.input, 300)}</div>
+                        <div className="text-success">{truncate(example.revision_suggestion.input, 300)}</div>
+                      </>
+                    ) : (
+                      <span className="text-muted-foreground">No changes</span>
+                    )}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-muted-foreground mb-1 font-medium">Expected Output</div>
+                  <div className="text-xs bg-background rounded p-2 border border-border">
+                    {example.revision_suggestion.expected_output !== example.expected_output ? (
+                      <>
+                        <div className="text-danger/60 line-through mb-1">{truncate(example.expected_output, 300)}</div>
+                        <div className="text-success">{truncate(example.revision_suggestion.expected_output, 300)}</div>
+                      </>
+                    ) : (
+                      <span className="text-muted-foreground">No changes</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
   )
 }

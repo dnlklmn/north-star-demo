@@ -1,16 +1,18 @@
 import { useState } from 'react'
 import { Sparkles, ChevronRight, Copy, Download, Loader2, ArrowRight } from 'lucide-react'
 import type { Charter, ScorerDef } from '../types'
+import { generateScorers } from '../api'
 
 interface Props {
   charter: Charter
   hasDataset: boolean
+  sessionId: string
   scorers?: ScorerDef[]
   onScorersChange?: (scorers: ScorerDef[]) => void
   onNavigateToEvaluate?: () => void
 }
 
-export default function ScorersPanel({ charter, hasDataset: _hasDataset, scorers: externalScorers, onScorersChange, onNavigateToEvaluate }: Props) {
+export default function ScorersPanel({ charter, hasDataset: _hasDataset, sessionId, scorers: externalScorers, onScorersChange, onNavigateToEvaluate }: Props) {
   const [localScorers, setLocalScorers] = useState<ScorerDef[]>([])
   const scorers = externalScorers ?? localScorers
   const setScorers = (s: ScorerDef[]) => {
@@ -19,6 +21,7 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, scorers
   }
   const [generating, setGenerating] = useState(false)
   const [expandedScorer, setExpandedScorer] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
   const hasCriteria = charter.coverage.criteria.length > 0
     || charter.balance.criteria.length > 0
@@ -27,49 +30,15 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, scorers
 
   const handleGenerate = async () => {
     setGenerating(true)
-    // Build scorers from charter criteria
-    const generated: ScorerDef[] = []
-
-    charter.coverage.criteria.forEach((criterion, i) => {
-      generated.push({
-        name: `coverage_${i + 1}`,
-        type: 'coverage',
-        description: criterion,
-        code: buildCoverageScorer(criterion, i),
-      })
-    })
-
-    charter.alignment.forEach((entry) => {
-      generated.push({
-        name: `alignment_${entry.feature_area.toLowerCase().replace(/\s+/g, '_')}`,
-        type: 'alignment',
-        description: `${entry.feature_area}: good="${entry.good}" vs bad="${entry.bad}"`,
-        code: buildAlignmentScorer(entry.feature_area, entry.good, entry.bad),
-      })
-    })
-
-    charter.balance.criteria.forEach((criterion, i) => {
-      generated.push({
-        name: `balance_${i + 1}`,
-        type: 'balance',
-        description: criterion,
-        code: buildBalanceScorer(criterion, i),
-      })
-    })
-
-    charter.rot.criteria.forEach((criterion, i) => {
-      generated.push({
-        name: `rot_${i + 1}`,
-        type: 'rot',
-        description: criterion,
-        code: buildRotScorer(criterion, i),
-      })
-    })
-
-    // Simulate async generation
-    await new Promise(r => setTimeout(r, 800))
-    setScorers(generated)
-    setGenerating(false)
+    setError(null)
+    try {
+      const result = await generateScorers(sessionId)
+      setScorers(result.scorers)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to generate scorers')
+    } finally {
+      setGenerating(false)
+    }
   }
 
   const handleCopy = (code: string) => {
@@ -143,6 +112,11 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, scorers
       </div>
 
       <div className="flex-1 overflow-y-auto p-6">
+        {error && (
+          <div className="mb-4 p-3 bg-danger/10 border border-danger/20 rounded-lg text-xs text-danger">
+            {error}
+          </div>
+        )}
         {scorers.length === 0 ? (
           <div className="max-w-lg mx-auto text-center py-12">
             <Sparkles className="w-8 h-8 text-muted-foreground/30 mx-auto mb-3" />
@@ -154,8 +128,6 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, scorers
             <div className="text-left max-w-sm mx-auto space-y-2 text-xs text-muted-foreground">
               <p><span className="font-medium text-foreground">Coverage scorers</span> — check if outputs handle specific input scenarios</p>
               <p><span className="font-medium text-foreground">Alignment scorers</span> — compare outputs against good/bad examples</p>
-              <p><span className="font-medium text-foreground">Balance scorers</span> — verify weighting and priority compliance</p>
-              <p><span className="font-medium text-foreground">Rot scorers</span> — detect when outputs need updating</p>
             </div>
           </div>
         ) : (
@@ -195,57 +167,4 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, scorers
       </div>
     </div>
   )
-}
-
-function buildCoverageScorer(criterion: string, index: number): string {
-  return `def coverage_${index + 1}(output: str, input: str) -> float:
-    """Check: ${criterion}"""
-    # LLM-as-judge scorer
-    prompt = f"""Rate how well this output addresses the following criterion:
-Criterion: ${criterion}
-Input: {input}
-Output: {output}
-
-Score 0.0 (not addressed) to 1.0 (fully addressed)."""
-    # return call_judge(prompt)
-    raise NotImplementedError("Connect to your LLM judge")`
-}
-
-function buildAlignmentScorer(featureArea: string, good: string, bad: string): string {
-  return `def alignment_${featureArea.toLowerCase().replace(/\s+/g, '_')}(output: str) -> float:
-    """Alignment: ${featureArea}
-    Good example: ${good}
-    Bad example: ${bad}"""
-    prompt = f"""Compare this output against quality examples for "${featureArea}":
-
-Good example: ${good}
-Bad example: ${bad}
-Actual output: {output}
-
-Score 0.0 (matches bad example) to 1.0 (matches good example)."""
-    # return call_judge(prompt)
-    raise NotImplementedError("Connect to your LLM judge")`
-}
-
-function buildBalanceScorer(criterion: string, index: number): string {
-  return `def balance_${index + 1}(output: str, input: str) -> float:
-    """Balance check: ${criterion}"""
-    prompt = f"""Check if this output properly balances: ${criterion}
-Input: {input}
-Output: {output}
-
-Score 0.0 (poorly balanced) to 1.0 (well balanced)."""
-    # return call_judge(prompt)
-    raise NotImplementedError("Connect to your LLM judge")`
-}
-
-function buildRotScorer(criterion: string, index: number): string {
-  return `def rot_${index + 1}(output: str) -> float:
-    """Rot detection: ${criterion}"""
-    prompt = f"""Check if this output shows signs of staleness per: ${criterion}
-Output: {output}
-
-Score 0.0 (stale/outdated) to 1.0 (fresh/current)."""
-    # return call_judge(prompt)
-    raise NotImplementedError("Connect to your LLM judge")`
 }

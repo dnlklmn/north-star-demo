@@ -7,7 +7,7 @@ import {
   validateCharter, suggestForCharter, suggestGoals, evaluateGoals, suggestStories,
   createDataset, getDataset, synthesizeExamples, updateExample as apiUpdateExample,
   deleteExample as apiDeleteExample, autoReviewExamples, getGapAnalysis, exportDataset,
-  datasetChat, updateSessionName, updateSessionInput, saveScorers,
+  datasetChat, updateSessionName, updateSessionInput, saveScorers, suggestRevisions,
 } from '../api'
 import GoalsPanel from '../components/GoalsPanel'
 import UsersPanel from '../components/UsersPanel'
@@ -105,6 +105,7 @@ export default function ProjectWorkspace() {
   // --- Scorers state (lifted up for persistence across tab switches) ---
   const [scorers, setScorers] = useState<ScorerDef[]>([])
 
+  const [revisionsLoading, setRevisionsLoading] = useState(false)
   const [gapAnalysis, setGapAnalysis] = useState<GapAnalysis | null>(null)
   const [showCoverageMap, setShowCoverageMap] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
@@ -832,6 +833,65 @@ export default function ProjectWorkspace() {
     }
   }, [dataset])
 
+  const handleSuggestRevision = useCallback(async (exampleId: string) => {
+    if (!dataset) return
+    setRevisionsLoading(true)
+    try {
+      await suggestRevisions(dataset.id, [exampleId])
+      const fullDs = await getDataset(dataset.session_id)
+      setDataset(fullDs)
+    } catch (err) {
+      console.error('Failed to suggest revision:', err)
+    } finally {
+      setRevisionsLoading(false)
+    }
+  }, [dataset])
+
+  const handleBulkSuggestRevisions = useCallback(async () => {
+    if (!dataset) return
+    setRevisionsLoading(true)
+    try {
+      await suggestRevisions(dataset.id)
+      const fullDs = await getDataset(dataset.session_id)
+      setDataset(fullDs)
+    } catch (err) {
+      console.error('Failed to suggest revisions:', err)
+    } finally {
+      setRevisionsLoading(false)
+    }
+  }, [dataset])
+
+  const handleAcceptRevision = useCallback(async (exampleId: string) => {
+    if (!dataset) return
+    const example = dataset.examples?.find(e => e.id === exampleId)
+    if (!example?.revision_suggestion) return
+    try {
+      await apiUpdateExample(dataset.id, exampleId, {
+        input: example.revision_suggestion.input,
+        expected_output: example.revision_suggestion.expected_output,
+        revision_suggestion: null,
+        review_status: 'approved',
+      } as Partial<Example>)
+      const fullDs = await getDataset(dataset.session_id)
+      setDataset(fullDs)
+    } catch (err) {
+      console.error('Failed to accept revision:', err)
+    }
+  }, [dataset])
+
+  const handleDismissRevision = useCallback(async (exampleId: string) => {
+    if (!dataset) return
+    try {
+      await apiUpdateExample(dataset.id, exampleId, {
+        revision_suggestion: null,
+      } as Partial<Example>)
+      const fullDs = await getDataset(dataset.session_id)
+      setDataset(fullDs)
+    } catch (err) {
+      console.error('Failed to dismiss revision:', err)
+    }
+  }, [dataset])
+
   const handleShowCoverageMap = useCallback(async () => {
     if (!dataset) return
     setLoading(true)
@@ -1089,6 +1149,11 @@ export default function ProjectWorkspace() {
                   onNavigateToScorers={() => setActiveTab('scorers')}
                   onHeaderClick={() => {}}
                   isFocused={true}
+                  onSuggestRevision={handleSuggestRevision}
+                  onSuggestRevisions={handleBulkSuggestRevisions}
+                  onAcceptRevision={handleAcceptRevision}
+                  onDismissRevision={handleDismissRevision}
+                  revisionsLoading={revisionsLoading}
                 />
               ) : (
                 <div className="flex-1 flex items-center justify-center">
@@ -1136,6 +1201,7 @@ export default function ProjectWorkspace() {
             <ScorersPanel
               charter={state.charter}
               hasDataset={!!dataset}
+              sessionId={sessionId || ''}
               scorers={scorers}
               onScorersChange={(newScorers) => {
                 setScorers(newScorers)

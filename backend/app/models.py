@@ -205,6 +205,7 @@ class Example(BaseModel):
     review_status: str = "pending"
     reviewer_notes: Optional[str] = None
     judge_verdict: Optional[dict] = None
+    revision_suggestion: Optional[dict] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -244,6 +245,7 @@ class UpdateExampleRequest(BaseModel):
     label_reason: Optional[str] = None
     review_status: Optional[str] = None
     reviewer_notes: Optional[str] = None
+    revision_suggestion: Optional[dict] = None
 
 
 class CreateExampleRequest(BaseModel):
@@ -307,6 +309,10 @@ class SuggestStoriesRequest(BaseModel):
 
 class SuggestStoriesResponse(BaseModel):
     suggestions: list[dict] = Field(default_factory=list)  # each dict has who, what, why
+
+
+class SuggestRevisionsRequest(BaseModel):
+    example_ids: list[str] = Field(default_factory=list)
 
 
 class EnrichRequest(BaseModel):

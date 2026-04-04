@@ -141,6 +141,7 @@ export interface Example {
   review_status: 'pending' | 'approved' | 'rejected' | 'needs_edit'
   reviewer_notes: string | null
   judge_verdict: JudgeVerdict | null
+  revision_suggestion: RevisionSuggestion | null
   created_at: string
   updated_at: string
 }
@@ -151,6 +152,12 @@ export interface JudgeVerdict {
   reasoning: string
   coverage_match: string[]
   issues: string[]
+}
+
+export interface RevisionSuggestion {
+  input: string
+  expected_output: string
+  reasoning: string
 }
 
 export interface DatasetStats {

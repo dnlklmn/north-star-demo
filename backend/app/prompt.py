@@ -1020,6 +1020,153 @@ Return ONLY valid JSON:
 }}"""
 
 
+# --- Scorer generation prompts ---
+
+def build_generate_scorers_prompt(charter: dict) -> str:
+    """Build prompt for generating evaluation scorers from charter."""
+    task = charter.get("task", {})
+    coverage = charter.get("coverage", {}).get("criteria", [])
+    balance = charter.get("balance", {}).get("criteria", [])
+    alignment = charter.get("alignment", [])
+    rot = charter.get("rot", {}).get("criteria", [])
+
+    alignment_context = ""
+    for a in alignment:
+        alignment_context += f"\n### {a.get('feature_area', '')}\nGood: {a.get('good', '')}\nBad: {a.get('bad', '')}\n"
+
+    task_context = ""
+    if task.get("input_description") or task.get("output_description"):
+        task_context = f"""## Task Definition
+**Input format**: {task.get('input_description') or 'Not specified'}
+**Output format**: {task.get('output_description') or 'Not specified'}
+
+"""
+
+    return f"""Generate Python evaluation scorer functions from this charter. Each scorer should be a complete, working function that uses an LLM-as-judge pattern.
+
+{task_context}## Charter
+
+### Coverage criteria (input scenarios):
+{json.dumps(coverage, indent=2)}
+
+### Balance criteria (weighting guidance):
+{json.dumps(balance, indent=2)}
+
+### Alignment definitions (what good/bad looks like):
+{alignment_context}
+
+### Rot triggers (staleness indicators):
+{json.dumps(rot, indent=2)}
+
+## Instructions
+
+Generate one scorer per alignment entry and one per coverage criterion. Each scorer must:
+
+1. Be a complete Python function with signature: `def scorer_name(output: str, input: str) -> float`
+2. Return a float from 0.0 (worst) to 1.0 (best)
+3. Contain a complete LLM-as-judge prompt as a string variable — the prompt should be specific and grounded in the charter criteria, not generic
+4. Call `call_judge(prompt)` to get the score (assume this helper exists and returns a float)
+5. Have a clear docstring explaining what it evaluates
+
+Scorer types:
+- **alignment**: One per alignment entry. The judge prompt should describe the specific good/bad criteria for that feature area and ask the judge to score how well the output matches "good" vs "bad".
+- **coverage**: One per coverage criterion. The judge prompt should check whether the output properly handles the specific input scenario described by the criterion.
+
+Do NOT generate balance or rot scorers — those are dataset-level concerns, not per-output scorers.
+
+Return ONLY valid JSON:
+{{
+  "scorers": [
+    {{
+      "name": "snake_case_name",
+      "type": "alignment" | "coverage",
+      "description": "one sentence describing what this scorer evaluates",
+      "code": "complete Python function as a string"
+    }}
+  ]
+}}
+
+CRITICAL RULES:
+- Function names must be valid Python identifiers (snake_case)
+- The judge prompt inside each function must be SPECIFIC to the charter criterion — not a generic "rate this output" prompt
+- Each function must be self-contained and complete
+- Do not include import statements — only the function definition
+- Use f-strings to interpolate the output and input into the judge prompt"""
+
+
+# --- Revision suggestion prompts ---
+
+def build_revise_examples_prompt(charter: dict, examples_with_verdicts: list[dict]) -> str:
+    """Build prompt for suggesting revisions to examples that failed review."""
+    task = charter.get("task", {})
+    alignment = charter.get("alignment", [])
+    coverage = charter.get("coverage", {}).get("criteria", [])
+
+    alignment_context = ""
+    for a in alignment:
+        alignment_context += f"\n### {a.get('feature_area', '')}\nGood: {a.get('good', '')}\nBad: {a.get('bad', '')}\n"
+
+    task_context = ""
+    if task.get("input_description") or task.get("output_description"):
+        task_context = f"""## Task Definition
+**Input format**: {task.get('input_description') or 'Not specified'}
+**Output format**: {task.get('output_description') or 'Not specified'}
+
+"""
+
+    examples_text = ""
+    for ex in examples_with_verdicts:
+        verdict = ex.get("judge_verdict", {}) or {}
+        issues = verdict.get("issues", [])
+        examples_text += f"""
+### Example {ex.get('id', 'unknown')}
+- **Feature area**: {ex.get('feature_area', '')}
+- **Label**: {ex.get('label', 'unlabeled')}
+- **Input**: {ex.get('input', '')}
+- **Expected output**: {ex.get('expected_output', '')}
+- **Review issues**: {json.dumps(issues)}
+- **Review reasoning**: {verdict.get('reasoning', 'No reasoning provided')}
+"""
+
+    return f"""Suggest minimal, targeted revisions to these dataset examples to fix the issues identified during review.
+
+{task_context}## Charter alignment definitions:
+{alignment_context}
+
+## Charter coverage criteria:
+{json.dumps(coverage, indent=2)}
+
+## Examples to revise:
+{examples_text}
+
+## Instructions
+
+For each example, propose a revised version that:
+1. Fixes the specific issues identified in the review
+2. Keeps changes minimal — do NOT rewrite from scratch
+3. Maintains the same feature_area and coverage intent
+4. Ensures the input matches the task's input format
+5. Ensures the expected_output matches the task's output format
+6. Aligns with the charter's good/bad definitions for the feature area
+
+If an example's input is fine and only the expected_output needs fixing, keep the input unchanged (return it as-is).
+If the label seems wrong based on the alignment definitions, the revision should match the ORIGINAL label intent — fix the output to actually be good (or bad) rather than changing what the example tests.
+
+Return ONLY valid JSON:
+{{
+  "revisions": [
+    {{
+      "example_id": "...",
+      "revised_input": "the revised input (or original if unchanged)",
+      "revised_expected_output": "the revised expected output",
+      "reasoning": "one sentence explaining what was changed and why"
+    }}
+  ]
+}}
+
+CRITICAL: Revisions must be specific and targeted. Explain exactly what you changed in the reasoning."""
+
+
 # --- Schema detection prompts ---
 
 def build_detect_schema_prompt(content: str, content_type: str = "auto") -> str:

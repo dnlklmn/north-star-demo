@@ -1,29 +1,76 @@
 # North Star
 
-An eval-driven development platform. A charter generation agent helps product and business people define what good AI output looks like for their AI features — before writing a single eval.
+An eval-driven development platform. Define what good AI output looks like — before writing a single eval.
 
-## What it does
+Users describe their AI feature through a guided conversation. The agent builds a **charter** (a structured quality definition), then helps generate a labeled dataset, derive evaluation scorers, and suggest revisions to keep examples aligned with the charter.
 
-You describe your AI feature through a guided conversation, and the agent builds a **charter** — a structured document with four dimensions:
+## The idea
 
-- **Coverage** — What input scenarios must be tested ("customer asks about a delayed order with no ETA")
-- **Balance** — Which scenarios to weight more heavily and why ("escalation cases over-represented because that's where frustration occurs")
+You start from business goals and user stories. The agent interviews you to understand what your AI feature should do, then generates a charter with four dimensions:
+
+- **Coverage** — Input scenarios that must be tested ("customer asks about a delayed order with no ETA")
+- **Balance** — Which scenarios to weight more heavily ("escalation cases over-represented because that's where frustration occurs")
 - **Alignment** — What good vs bad output looks like per feature area (observable, not intent-level)
-- **Rot** — When examples become stale ("when the return policy changes")
+- **Rot** — When criteria become stale ("when the return policy changes")
 
-The agent then helps you **generate a labeled dataset** from the charter, review examples, analyze coverage gaps, and export for evaluation.
+From the charter, you can:
 
-## Flow
+1. **Generate a golden dataset** — synthetic examples covering every criterion x feature area
+2. **Review and curate** — auto-judge examples against the charter, approve/reject/edit
+3. **Suggest revisions** — for examples that fail review, the agent proposes minimal targeted fixes you can accept or dismiss
+4. **Generate scorers** — executable Python evaluation functions derived from charter criteria
+5. **Analyze coverage gaps** — find what's missing and generate targeted examples to fill holes
 
-The app guides users through 5 phases:
+---
 
-1. **Goals** — Define business goals through one-question-at-a-time conversation
-2. **Users** — Identify user types and personas
-3. **Stories** — Describe what each user type needs to accomplish
-4. **Charter** — Agent generates and validates the charter; user refines via conversation or direct editing
-5. **Dataset** — Generate examples, review (manual or auto), analyze coverage, export
+## Phases
 
-Each discovery phase (goals, users, stories) uses structured extraction — the agent asks one question per turn and extracts entities from the conversation. Users can also edit the extracted items directly in the left panel.
+The app guides users through a structured flow. Each phase builds on the previous one.
+
+### Phase 1: Discovery (Goals, Users, Stories)
+
+Three sub-phases, each one question at a time:
+
+| Sub-phase | What the agent does | What gets extracted |
+|-----------|--------------------|--------------------|
+| **Goals** | Breaks down business objectives using issue tree decomposition, probes with 5 Whys | Business goals (deduplicated, first-40-chars matching) |
+| **Users** | Identifies user types using MECE principle — direct users, upstream providers, downstream consumers | User personas |
+| **Stories** | Elicits what each user type needs to accomplish using Jobs To Be Done framing | User stories (who/what/why) |
+
+Each turn: agent asks one question, extracts entities from the response, checks readiness to advance. Users can also edit extracted items directly in the left panel.
+
+### Phase 2: Charter Generation
+
+When the user advances from stories, the agent:
+
+1. **Generates a draft** — builds a 5-part charter (task definition + coverage/balance/alignment/rot) from the discovered goals, users, and stories
+2. **Validates** — checks each dimension for testability (Is it traceable to user input? Can you generate a concrete test? Would two judges agree?)
+3. **Determines status** — all passing = ready for review; some weak = asks follow-up questions; max rounds reached = soft OK
+4. **Generates suggestions** — concrete items the user can click to add to weak sections
+
+The user can then refine through conversation or direct editing. Each edit triggers revalidation.
+
+### Phase 3: Dataset
+
+Once the charter is finalized:
+
+- **Generate** examples from charter (coverage criterion x feature area x good/bad label)
+- **Import** from CSV or JSON
+- **Auto-review** with LLM judge — each example gets a verdict: suggested label, confidence, reasoning, issues
+- **Suggest revisions** — for examples with issues, proposes targeted fixes (original vs proposed diff). User accepts, dismisses, or edits. Never auto-applied.
+- **Gap analysis** — coverage matrix showing which scenarios lack examples
+- **Export** approved examples as JSON
+
+### Phase 4: Scorers
+
+Generates complete Python evaluation functions from the charter:
+
+- **Alignment scorers** — one per alignment entry, with an LLM-as-judge prompt specific to the good/bad definitions
+- **Coverage scorers** — one per coverage criterion, checking if the output handles that scenario
+
+Each scorer is a working function with signature `def scorer_name(output: str, input: str) -> float` returning 0.0-1.0, with a complete judge prompt baked in (not a stub).
+
+---
 
 ## Architecture
 
@@ -32,93 +79,188 @@ frontend/          React 19 + TypeScript + Tailwind CSS v4 + Vite
 backend/app/       FastAPI + Claude API + PostgreSQL
 ```
 
-### Three-column UI
-
-| Input | Charter / Dataset | Agent |
-|-------|-------------------|-------|
-| Business goals, user types, stories grouped by role | Charter dimensions with radar chart, progress bars, inline editing, suggestions | Conversational agent, one question at a time |
-
-### Backend structure
+### Backend layers
 
 The backend separates concerns into three layers:
 
-- **prompt.py** — All prompts. One function per prompt. Edit here to change what the agent says.
-- **tools.py** — LLM call wrappers. Sends prompts to Claude, parses responses. Each call returns structured data + call metadata (model, tokens, latency).
-- **agent.py** — Control flow only. Decides what to do each turn, orchestrates tool calls, logs turns. No prompts, no LLM calls.
+```
+prompt.py    All prompts. One function per prompt. Edit here to change agent behavior.
+tools.py     LLM call wrappers. Sends prompts to Claude, parses responses.
+             Each call returns (structured_data, [call_metadata]).
+agent.py     Control flow only. State transitions, orchestration.
+             No prompts, no direct LLM calls.
+main.py      API endpoints + request handling.
+models.py    Pydantic models for all request/response validation.
+db.py        PostgreSQL persistence layer.
+```
 
-### Agent flow
+### Agent orchestration (agent.py)
+
+The agent is a state machine. `run_agent_turn()` routes based on current state:
 
 ```
 User sends input
-  → agent.py decides mode (discovery / generate / chat / fallback)
-  → tools.py calls Claude (prompt from prompt.py)
-  → agent.py logs turn to DB (input, raw output, parsed result)
-  → agent.py updates state, returns result to API
+  |
+  +-- No charter + discovery phase?
+  |     -> Discovery turn (ask one question, extract entities)
+  |     -> Check readiness signals (ready_for_users, ready_for_stories, ready_for_charter)
+  |
+  +-- No charter + charter phase (or regenerate)?
+  |     -> Generate draft -> Validate -> Determine status -> Suggest
+  |
+  +-- Has charter + user message?
+  |     -> Chat turn (conversational response, optional charter-update block)
+  |     -> Parse updates + suggestions from response
+  |     -> Revalidate if charter was modified
+  |
+  -> Log turn to DB (input, raw output, parsed result, call metadata)
+  -> Update state, return result
 ```
 
-**Modes:**
+**Status transitions:**
 
-1. **Discovery** (goals/users/stories phases) — one question per turn, extract entities, signal readiness to advance
-2. **Generate** (charter phase, first entry or regenerate) — generate draft → validate → decide status → suggest
-3. **Chat** (charter exists) — conversational turn → parse charter updates + suggestions → maybe revalidate
-4. **Dataset** — generate examples, review, gap analysis, coverage map
+```
+drafting -> discovery turns -> questioning (weak criteria) -> review (all passing)
+                                    |                            |
+                                    +-> soft_ok (max rounds)     +-> finalize
+```
 
-## Database
+### Frontend structure
 
-PostgreSQL with four tables:
+Three-column layout:
 
-### sessions
-The main state store. One row per user session containing full state as JSONB (charter, validation, input, conversation history, discovery phase).
+| Input panel | Charter / Dataset | Agent conversation |
+|-------------|-------------------|--------------------|
+| Goals, user types, stories (editable) | Charter dimensions with progress indicators, inline editing, suggestions; Dataset table with review workflow | One question at a time, contextual suggestions |
 
-### charters
-Immutable snapshots created on finalization. Contains the final charter + weak criteria at time of finalization.
+---
 
-### turns
-**Every LLM interaction is logged.** One row per agent step (discover, generate, validate, chat, suggest, synthesize, review). Contains:
-- `input_snapshot` — state at time of call
-- `llm_calls` — array of `{model, prompt, raw_response, input_tokens, output_tokens, latency_ms}`
-- `parsed_output` — structured result after parsing
-- `agent_message` — final message shown to user
-- `suggestions` — suggestions returned
+## Prompts
 
-This gives you full replay capability for any interaction.
+Every LLM interaction uses a prompt function in `prompt.py`. Here's the complete catalog:
 
-### judgements
-Decoupled quality scoring. Each row links to a turn and contains:
-- `judge_model` — which model judged
-- `scores` — dimension-specific scores (0.0–1.0), varying by turn type
-- `reasoning` — judge's explanation
+### Discovery prompts
 
-## Dataset features
+| Function | Used by | Purpose |
+|----------|---------|---------|
+| `build_discovery_turn_prompt(state, user_message)` | Discovery turns | Routes to phase-specific sub-prompt (goals/users/stories). Returns conversational message + extraction block. |
 
-- **Generate examples** from charter — minimum coverage (1 per scenario) or custom amount
-- **Import** from CSV or JSON
-- **Auto-review** with LLM judge (label suggestions + confidence)
-- **Coverage map** — matrix of criteria × feature areas with radar chart visualization
-- **Gap analysis** — identify uncovered scenarios and generate targeted examples
-- **Keyboard navigation** — arrow keys, A/R/E/L shortcuts for review workflow
-- **Export** approved examples as JSON
+Internally delegates to `_build_goals_phase_prompt()`, `_build_users_phase_prompt()`, `_build_stories_phase_prompt()` based on `state.discovery_phase`.
+
+### Charter prompts
+
+| Function | Used by | Purpose |
+|----------|---------|---------|
+| `build_generate_draft_prompt(state, creativity)` | Charter generation | Generates 5-part charter JSON from goals + stories. Creativity 0.0-0.3 = strict (only stated facts), 0.6+ = creative expansion. |
+| `build_validate_charter_prompt(state)` | Validation | Checks each dimension for testability. Returns pass/weak/fail per dimension. |
+| `build_conversational_turn_prompt(state, user_message)` | Chat refinement | Conversational turn with optional `charter-update` and `suggestions` blocks in response. |
+| `build_generate_suggestions_prompt(state)` | Suggestion generation | Proposes 3-6 concrete items for empty/weak charter sections. |
+
+### Stateless helper prompts
+
+| Function | Used by | Purpose |
+|----------|---------|---------|
+| `build_suggest_goals_prompt(goals)` | Goal suggestions | Suggests 2-4 complementary business goals. |
+| `build_evaluate_goals_prompt(goals)` | Goal quality check | Flags goals that are too broad, too technical, not measurable. |
+| `build_suggest_stories_prompt(goals, stories)` | Story suggestions | Suggests 2-3 user stories aligned with existing goals. |
+
+### Dataset prompts
+
+| Function | Used by | Purpose |
+|----------|---------|---------|
+| `build_synthesize_examples_prompt(charter, feature_areas, coverage_criteria, count)` | Example generation | Generates labeled examples per coverage criterion x feature area. Inputs/outputs must match task definition format. |
+| `build_review_examples_prompt(charter, examples)` | Auto-review | Judges examples against charter. Returns suggested_label, confidence, reasoning, issues per example. |
+| `build_dataset_chat_prompt(charter, dataset_stats, user_message, history)` | Dataset chat | Conversational agent for dataset curation. Can emit `dataset-action` blocks (generate, show_coverage, auto_review, export). |
+| `build_gap_analysis_prompt(charter, dataset_stats, examples)` | Gap analysis | Analyzes coverage matrix. Identifies coverage gaps, feature area gaps, balance issues, label gaps. |
+
+### Scorer and revision prompts
+
+| Function | Used by | Purpose |
+|----------|---------|---------|
+| `build_generate_scorers_prompt(charter)` | Scorer generation | Generates complete Python LLM-as-judge functions from alignment entries and coverage criteria. One scorer per criterion. |
+| `build_revise_examples_prompt(charter, examples_with_verdicts)` | Revision suggestions | Takes examples + their review verdicts, proposes minimal targeted revisions to fix identified issues. |
+
+### Schema detection prompts
+
+| Function | Used by | Purpose |
+|----------|---------|---------|
+| `build_detect_schema_prompt(content, content_type)` | Schema detection | Detects format (JSON/CSV/freeform) and infers field structure from pasted content. |
+| `build_infer_schema_prompt(examples, charter)` | Schema inference | Infers input/output format from existing dataset examples. |
+| `build_import_url_prompt(content, url, detected_type)` | URL import | Extracts task definition from URL content (OpenAPI, JSON data, HTML docs). |
+
+---
 
 ## API endpoints
 
+### Sessions
+
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | /sessions | Create session, run initial agent turn |
-| POST | /sessions/{id}/message | Send user message, get agent response |
-| POST | /sessions/{id}/advance-phase | Advance to next discovery phase or charter |
-| GET | /sessions/{id} | Get full session state |
-| PATCH | /sessions/{id}/charter | Edit charter items |
-| PATCH | /sessions/{id}/goals | Edit extracted goals |
-| PATCH | /sessions/{id}/users | Edit extracted users |
-| PATCH | /sessions/{id}/stories | Edit extracted stories |
-| POST | /sessions/{id}/proceed | Advance to dataset phase |
-| POST | /sessions/{id}/finalize | Finalize charter |
-| POST | /datasets/{id}/synthesize | Generate examples |
-| POST | /datasets/{id}/review | Auto-review examples |
-| GET | /datasets/{id}/gaps | Coverage gap analysis |
-| POST | /datasets/{id}/export | Export approved examples |
-| POST | /judge/run | Run judge on unjudged turns |
-| GET | /judge/results | View judgement scores |
+| POST | `/sessions` | Create session, run initial agent turn |
+| GET | `/sessions` | List all sessions |
+| GET | `/sessions/{id}` | Get full session state |
+| PATCH | `/sessions/{id}/name` | Rename session |
+| PATCH | `/sessions/{id}/input` | Save goals/stories without agent |
+| DELETE | `/sessions/{id}` | Delete session and all data |
+
+### Agent interaction
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/sessions/{id}/message` | Send message, get agent response |
+| POST | `/sessions/{id}/advance-phase` | Advance discovery phase |
+| POST | `/sessions/{id}/proceed` | Proceed to review |
+| PATCH | `/sessions/{id}/charter` | Edit charter sections |
+| POST | `/sessions/{id}/validate` | Run validation |
+| POST | `/sessions/{id}/suggest` | Generate suggestions for weak sections |
+| POST | `/sessions/{id}/finalize` | Finalize charter |
+
+### Dataset
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/sessions/{id}/dataset` | Create dataset |
+| GET | `/sessions/{id}/dataset` | Get dataset with examples |
+| POST | `/datasets/{id}/synthesize` | Generate examples from charter |
+| POST | `/datasets/{id}/import` | Import examples |
+| POST | `/datasets/{id}/review` | Auto-review pending examples |
+| POST | `/datasets/{id}/suggest-revisions` | Suggest fixes for examples with issues |
+| GET | `/datasets/{id}/gaps` | Coverage gap analysis |
+| POST | `/datasets/{id}/export` | Export approved examples |
+| POST | `/datasets/{id}/examples` | Create example manually |
+| PATCH | `/datasets/{id}/examples/{eid}` | Update example |
+| DELETE | `/datasets/{id}/examples/{eid}` | Delete example |
+
+### Scorers
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/sessions/{id}/generate-scorers` | Generate scorers from charter via LLM |
+| PATCH | `/sessions/{id}/scorers` | Save scorers to session |
+
+### Schema detection
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/detect-schema` | Detect schema from pasted content |
+| POST | `/infer-schema` | Infer schema from dataset examples |
+| POST | `/import-from-url` | Extract schema from URL |
+
+---
+
+## Database
+
+PostgreSQL with five tables:
+
+| Table | Purpose |
+|-------|---------|
+| **sessions** | Main state store. Full session state as JSONB (charter, validation, input, discovery phase, conversation history). |
+| **charters** | Immutable snapshots created on finalization. |
+| **turns** | Every LLM interaction logged. Input snapshot, raw prompt/response, parsed output, token counts, latency. Full replay capability. |
+| **examples** | Dataset examples with feature_area, input, expected_output, coverage_tags, label, review_status, judge_verdict, revision_suggestion. |
+| **datasets** | Dataset metadata linking to session, with charter snapshot and stats. |
+
+---
 
 ## Setup
 
@@ -134,7 +276,7 @@ cp .env.example .env  # then edit with your values
 # DATABASE_URL=postgresql://localhost:5432/northstar
 # ANTHROPIC_API_KEY=sk-...
 
-uvicorn app.main:app --port 5000
+uvicorn app.main:app --port 5000 --reload
 ```
 
 ### Frontend
@@ -150,5 +292,5 @@ npm run dev
 |----------|---------|-------------|
 | DATABASE_URL | postgresql://localhost:5432/northstar | PostgreSQL connection |
 | ANTHROPIC_API_KEY | (required) | Claude API key |
-| MODEL_NAME | claude-sonnet-4-20250514 | Model for agent + judge |
-| MAX_QUESTION_ROUNDS | 3 | Rounds before soft_ok |
+| MODEL_NAME | claude-sonnet-4-20250514 | Model for all LLM calls |
+| MAX_QUESTION_ROUNDS | 3 | Refinement rounds before soft_ok |

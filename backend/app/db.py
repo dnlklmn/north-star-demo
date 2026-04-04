@@ -139,6 +139,10 @@ async def _create_tables() -> None:
         await conn.execute("""
             INSERT INTO settings (id) VALUES ('default') ON CONFLICT (id) DO NOTHING;
         """)
+        # Migration: add revision_suggestion column to examples
+        await conn.execute("""
+            ALTER TABLE examples ADD COLUMN IF NOT EXISTS revision_suggestion JSONB;
+        """)
 
 
 # --- Session CRUD ---
@@ -670,13 +674,14 @@ async def get_examples(
 async def update_example(example_id: str, fields: dict) -> dict:
     pool = await get_pool()
     allowed = {"feature_area", "input", "expected_output", "coverage_tags", "label",
-               "label_reason", "review_status", "reviewer_notes", "judge_verdict"}
+               "label_reason", "review_status", "reviewer_notes", "judge_verdict",
+               "revision_suggestion"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         raise ValueError("No valid fields to update")
 
     # Serialize JSON fields
-    for key in ("coverage_tags", "judge_verdict"):
+    for key in ("coverage_tags", "judge_verdict", "revision_suggestion"):
         if key in updates and not isinstance(updates[key], str):
             updates[key] = json.dumps(updates[key])
 
@@ -739,7 +744,7 @@ async def export_dataset(dataset_id: str) -> dict:
 
 def _parse_example_row(row) -> dict:
     result = dict(row)
-    for key in ("coverage_tags", "judge_verdict"):
+    for key in ("coverage_tags", "judge_verdict", "revision_suggestion"):
         if key in result and isinstance(result[key], str):
             result[key] = json.loads(result[key])
     return result

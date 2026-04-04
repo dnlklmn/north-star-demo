@@ -39,6 +39,8 @@ from .prompt import (
     build_detect_schema_prompt,
     build_infer_schema_prompt,
     build_import_url_prompt,
+    build_generate_scorers_prompt,
+    build_revise_examples_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -335,6 +337,28 @@ async def call_gap_analysis(charter: dict, dataset_stats: dict, examples: list[d
     text, meta = _call_llm(prompt, max_tokens=2048)
     data = _extract_json(text)
     return data, [meta]
+
+
+# --- Scorer generation tools ---
+
+async def call_generate_scorers(charter: dict) -> tuple[list[dict], list[dict]]:
+    """Generate evaluation scorers from charter. Returns (scorers, call metadata list)."""
+    await _refresh_settings()
+    prompt = build_generate_scorers_prompt(charter)
+    text, meta = _call_llm(prompt, max_tokens=8192)
+    data = _extract_json(text)
+    return data.get("scorers", []), [meta]
+
+
+# --- Revision suggestion tools ---
+
+async def call_revise_examples(charter: dict, examples_with_verdicts: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Suggest revisions for examples that failed review. Returns (revisions, call metadata list)."""
+    await _refresh_settings()
+    prompt = build_revise_examples_prompt(charter, examples_with_verdicts)
+    text, meta = _call_llm(prompt, max_tokens=8192)
+    data = _extract_json(text)
+    return data.get("revisions", []), [meta]
 
 
 # --- Schema detection tools ---

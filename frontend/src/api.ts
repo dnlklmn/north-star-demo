@@ -1,4 +1,4 @@
-import type { CreateSessionResponse, SendMessageResponse, SessionState, Charter, Dataset, Example, GapAnalysis, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse, ProjectSummary, StoryGroup } from './types'
+import type { CreateSessionResponse, SendMessageResponse, SessionState, Charter, Dataset, Example, GapAnalysis, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse, ProjectSummary, StoryGroup, ScorerDef } from './types'
 
 const BASE = import.meta.env.VITE_API_URL || '/api'
 
@@ -64,6 +64,15 @@ export async function saveScorers(sessionId: string, scorers: Array<{ name: stri
     body: JSON.stringify({ scorers }),
   })
   if (!res.ok) throw new Error(`Failed to save scorers: ${res.status}`)
+}
+
+export async function generateScorers(sessionId: string): Promise<{ scorers: ScorerDef[] }> {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/generate-scorers`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  })
+  if (!res.ok) throw new Error(`Failed to generate scorers: ${res.status}`)
+  return res.json()
 }
 
 // --- Project / Session management ---
@@ -327,6 +336,16 @@ export async function autoReviewExamples(datasetId: string): Promise<{ reviewed:
     method: 'POST',
   })
   if (!res.ok) throw new Error(`Failed to review: ${res.status}`)
+  return res.json()
+}
+
+export async function suggestRevisions(datasetId: string, exampleIds?: string[]): Promise<{ revised: number; revisions: Array<{ example_id: string; revised_input: string; revised_expected_output: string; reasoning: string }> }> {
+  const res = await apiFetch(`${BASE}/datasets/${datasetId}/suggest-revisions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ example_ids: exampleIds || [] }),
+  })
+  if (!res.ok) throw new Error(`Failed to suggest revisions: ${res.status}`)
   return res.json()
 }
 

@@ -62,6 +62,7 @@ from .models import (
     SuggestResponse,
     SuggestStoriesRequest,
     SuggestStoriesResponse,
+    SuggestRevisionsRequest,
     SynthesizeRequest,
     TaskDefinition,
     UpdateExampleRequest,
@@ -78,6 +79,8 @@ from .tools import (
     call_synthesize_examples,
     call_review_examples,
     call_gap_analysis,
+    call_generate_scorers,
+    call_revise_examples,
     call_detect_schema,
     call_infer_schema,
     call_import_from_url,
@@ -295,6 +298,24 @@ async def update_session_scorers(session_id: str, body: dict):
         return {"ok": True}
     except ValueError:
         raise HTTPException(status_code=404, detail="Session not found")
+
+
+@app.post("/sessions/{session_id}/generate-scorers")
+async def generate_scorers_endpoint(session_id: str):
+    """Generate evaluation scorers from charter via LLM."""
+    state, conversation = await _load_state(session_id)
+    charter = state.charter.model_dump()
+    scorers, call_meta = await call_generate_scorers(charter)
+    state.scorers = scorers
+    await _save_state(session_id, state, conversation)
+    await db.create_turn(
+        session_id=session_id,
+        turn_type="generate_scorers",
+        input_snapshot={"charter": charter},
+        llm_calls=call_meta,
+        parsed_output={"scorers": scorers},
+    )
+    return {"scorers": scorers}
 
 
 @app.delete("/sessions/{session_id}")
@@ -838,6 +859,68 @@ async def auto_review_examples(dataset_id: str):
 
     await db.update_dataset_stats(dataset_id)
     return {"reviewed": len(all_reviews), "reviews": all_reviews}
+
+
+@app.post("/datasets/{dataset_id}/suggest-revisions")
+async def suggest_revisions(dataset_id: str, req: SuggestRevisionsRequest):
+    """Suggest revisions for examples that have review issues."""
+    dataset = await db.get_dataset(dataset_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    charter = dataset["charter_snapshot"]
+
+    if req.example_ids:
+        # Fetch specific examples
+        all_examples = await db.get_examples(dataset_id)
+        examples = [ex for ex in all_examples if ex["id"] in req.example_ids]
+    else:
+        # Fetch all examples with review issues
+        all_examples = await db.get_examples(dataset_id)
+        examples = [
+            ex for ex in all_examples
+            if ex.get("judge_verdict") and ex["judge_verdict"].get("issues")
+        ]
+
+    if not examples:
+        return {"revised": 0, "message": "No examples with issues to revise"}
+
+    # Process in batches of 10
+    all_revisions = []
+    batch_size = 10
+    for i in range(0, len(examples), batch_size):
+        batch = examples[i:i + batch_size]
+        batch_for_revision = [
+            {"id": ex["id"], "feature_area": ex["feature_area"],
+             "input": ex["input"], "expected_output": ex["expected_output"],
+             "label": ex["label"], "judge_verdict": ex.get("judge_verdict")}
+            for ex in batch
+        ]
+        revisions, call_meta = await call_revise_examples(charter, batch_for_revision)
+
+        # Store revision suggestions
+        for rev in revisions:
+            eid = rev.get("example_id")
+            if eid:
+                await db.update_example(eid, {
+                    "revision_suggestion": {
+                        "input": rev.get("revised_input", ""),
+                        "expected_output": rev.get("revised_expected_output", ""),
+                        "reasoning": rev.get("reasoning", ""),
+                    }
+                })
+        all_revisions.extend(revisions)
+
+        await db.create_turn(
+            session_id=dataset["session_id"],
+            turn_type="suggest_revisions",
+            input_snapshot={"charter": charter, "example_count": len(batch)},
+            llm_calls=call_meta,
+            parsed_output={"revisions": revisions},
+        )
+
+    await db.update_dataset_stats(dataset_id)
+    return {"revised": len(all_revisions), "revisions": all_revisions}
 
 
 @app.get("/datasets/{dataset_id}/gaps")
