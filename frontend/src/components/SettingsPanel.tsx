@@ -186,14 +186,14 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
             <>
               {/* API Key */}
               <div>
-                <label className="text-xs font-medium text-foreground block mb-1.5">Anthropic API Key</label>
+                <label className="text-xs font-medium text-foreground block mb-1.5">API Key (Anthropic or OpenRouter)</label>
                 <div className="flex gap-1.5">
                   <div className="flex-1 relative">
                     <input
                       type={showKey ? 'text' : 'password'}
                       value={apiKeyValue}
                       onChange={e => { setApiKeyValue(e.target.value); setKeySaved(false) }}
-                      placeholder="sk-ant-api03-..."
+                      placeholder="sk-ant-... or sk-or-..."
                       className="w-full text-sm bg-surface border border-border rounded-lg px-3 py-2 pr-9 text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-accent"
                     />
                     <button
@@ -217,8 +217,8 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                 </div>
                 <p className="text-[10px] text-muted-foreground mt-1.5">
                   Your key is stored locally in this browser and sent with each request. It is never saved on the server.
-                  {apiKeyValue && !apiKeyValue.startsWith('sk-ant-') && (
-                    <span className="text-warning block mt-0.5">Key should start with "sk-ant-"</span>
+                  {apiKeyValue && !apiKeyValue.startsWith('sk-ant-') && !apiKeyValue.startsWith('sk-or-') && (
+                    <span className="text-warning block mt-0.5">Key should start with "sk-ant-" (Anthropic) or "sk-or-" (OpenRouter)</span>
                   )}
                 </p>
                 {!apiKeyValue && (

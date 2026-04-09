@@ -273,6 +273,9 @@ npm run dev
 | Variable | Default | Description |
 |----------|---------|-------------|
 | DATABASE_URL | postgresql://localhost:5432/northstar | PostgreSQL connection |
-| ANTHROPIC_API_KEY | (required) | Claude API key |
+| ANTHROPIC_API_KEY | —* | Claude API key (default) |
+| OPENROUTER_API_KEY | —* | OpenRouter API key (used only if `ANTHROPIC_API_KEY` is not set) |
 | MODEL_NAME | claude-sonnet-4-20250514 | Model for all LLM calls |
 | MAX_QUESTION_ROUNDS | 3 | Refinement rounds before soft_ok |
+
+*One of `ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY` must be set. Anthropic takes priority when both are present. OpenRouter keys are auto-detected by their `sk-or-` prefix.

@@ -54,6 +54,12 @@ _request_api_key: contextvars.ContextVar[str | None] = contextvars.ContextVar('_
 # Cached settings (refreshed each LLM call)
 _cached_settings: dict | None = None
 
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+def _is_openrouter_key(key: str) -> bool:
+    return key.startswith("sk-or-")
+
 
 def set_request_api_key(key: str | None) -> None:
     """Set the API key for the current request context."""
@@ -61,15 +67,26 @@ def set_request_api_key(key: str | None) -> None:
 
 
 def get_client() -> anthropic.Anthropic:
-    """Get an Anthropic client — uses per-request key if provided, else env var."""
+    """Get an Anthropic client — uses per-request key if provided, else env var.
+
+    Supports OpenRouter keys (prefix ``sk-or-``).  When an OpenRouter key is
+    detected the client is configured with OpenRouter's base URL.  Priority for
+    env-var keys: ANTHROPIC_API_KEY > OPENROUTER_API_KEY.
+    """
     global _client
     request_key = _request_api_key.get(None)
     if request_key:
         # Per-request key: create a fresh client (not cached)
+        if _is_openrouter_key(request_key):
+            return anthropic.Anthropic(api_key=request_key, base_url=OPENROUTER_BASE_URL)
         return anthropic.Anthropic(api_key=request_key)
     # Default: use env var (cached singleton)
     if _client is None:
-        _client = anthropic.Anthropic()
+        or_key = os.environ.get("OPENROUTER_API_KEY")
+        if not os.environ.get("ANTHROPIC_API_KEY") and or_key:
+            _client = anthropic.Anthropic(api_key=or_key, base_url=OPENROUTER_BASE_URL)
+        else:
+            _client = anthropic.Anthropic()
     return _client
 
 
