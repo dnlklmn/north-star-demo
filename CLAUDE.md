@@ -59,11 +59,11 @@ npx tsc --noEmit     # Type check
 | Variable | Required | Description |
 |----------|----------|-------------|
 | DATABASE_URL | Yes | PostgreSQL connection string |
-| ANTHROPIC_API_KEY | Yes* | Claude API key |
-| OPENROUTER_API_KEY | No | OpenRouter API key (used only if `ANTHROPIC_API_KEY` is not set) |
+| ANTHROPIC_API_KEY | No* | Claude API key (default) |
+| OPENROUTER_API_KEY | No* | OpenRouter API key (used only if `ANTHROPIC_API_KEY` is not set) |
 | MODEL_NAME | No | Defaults to claude-sonnet-4-20250514 |
 
-*Either `ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY` must be set. Anthropic takes priority when both are present.
+*One of `ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY` must be set. Anthropic takes priority when both are present.
 
 ## Tailwind CSS v4 notes
 
