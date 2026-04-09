@@ -36,8 +36,8 @@ backend/app/           FastAPI app
 ### Backend
 ```bash
 cd backend
-source .venv/bin/activate
-uvicorn app.main:app --port 5000 --reload
+uv sync --dev         # Install deps (creates .venv automatically)
+uv run uvicorn app.main:app --port 5000 --reload
 ```
 
 ### Frontend

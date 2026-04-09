@@ -253,12 +253,10 @@ PostgreSQL with five tables:
 ### Backend
 ```bash
 cd backend
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
+uv sync --dev         # Install deps + create .venv automatically
 
 cp .env.example .env  # edit with your values
-uvicorn app.main:app --port 8080 --reload
+uv run uvicorn app.main:app --port 8080 --reload
 ```
 
 ### Frontend
