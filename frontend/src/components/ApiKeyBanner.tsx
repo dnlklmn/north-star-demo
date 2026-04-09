@@ -28,7 +28,7 @@ export default function ApiKeyBanner({ onDismiss }: Props) {
               value={keyValue}
               onChange={e => setKeyValue(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') handleSave() }}
-              placeholder="sk-ant-api03-..."
+              placeholder="sk-ant-... or sk-or-..."
               autoFocus
               className="w-full text-sm bg-background border border-border rounded-md px-3 py-1.5 pr-8 text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-accent"
             />
@@ -56,7 +56,7 @@ export default function ApiKeyBanner({ onDismiss }: Props) {
         </div>
       ) : (
         <div className="flex items-center justify-center gap-3 text-sm">
-          <span className="text-warning font-medium">No Anthropic API key found</span>
+          <span className="text-warning font-medium">No API key configured</span>
           <button
             onClick={() => setExpanded(true)}
             className="px-3 py-1 text-xs font-medium bg-accent text-accent-foreground rounded-md hover:opacity-90 transition-opacity"

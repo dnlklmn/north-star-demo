@@ -42,7 +42,7 @@ async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
     },
   })
   if (res.status === 401) {
-    throw new Error('Invalid or missing API key. Please add your Anthropic API key in Settings.')
+    throw new Error('Invalid or missing API key. Please add your API key in Settings.')
   }
   return res
 }
