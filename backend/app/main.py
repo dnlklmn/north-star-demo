@@ -145,7 +145,7 @@ async def _save_state(session_id: str, state: SessionState, conversation: list[d
 @app.get("/health")
 async def health_check():
     """Health check that also reports whether a default API key is configured."""
-    has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    has_key = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENROUTER_API_KEY"))
     return {"status": "ok", "has_default_api_key": has_key}
 
 
