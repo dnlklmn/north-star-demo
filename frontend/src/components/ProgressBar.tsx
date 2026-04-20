@@ -61,7 +61,7 @@ export default function ProgressBar({ currentScreen, phase, onNavigate, goalCoun
                 onClick={() => canClick && onNavigate(step.screen)}
                 disabled={!canClick}
                 className={`
-                  flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-colors
+                  flex items-center gap-2 px-3 py-1.5 text-sm font-medium transition-colors
                   ${isSelected
                     ? 'bg-accent text-white'
                     : state === 'complete'
@@ -81,7 +81,7 @@ export default function ProgressBar({ currentScreen, phase, onNavigate, goalCoun
                 {step.label}
                 {badge !== null && (
                   <span className={`
-                    text-xs px-1.5 py-0.5 rounded-full min-w-[1.25rem] text-center
+                    text-xs px-1.5 py-0.5 min-w-[1.25rem] text-center
                     ${isSelected ? 'bg-white/20' : 'bg-accent/10 text-accent'}
                   `}>
                     {badge}

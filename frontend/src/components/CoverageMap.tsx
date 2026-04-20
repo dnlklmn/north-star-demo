@@ -22,7 +22,7 @@ export default function CoverageMap({ gaps, onClose, onFillGaps, loading }: Cove
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-      <div className="bg-surface-raised border border-border rounded-xl shadow-xl max-w-3xl w-full mx-4 max-h-[80vh] flex flex-col">
+      <div className="bg-surface-raised border border-border shadow-xl max-w-3xl w-full mx-4 max-h-[80vh] flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3 border-b border-border">
           <h3 className="text-sm font-semibold">Coverage Map</h3>
@@ -83,7 +83,7 @@ export default function CoverageMap({ gaps, onClose, onFillGaps, loading }: Cove
                         const count = (matrix[crit] || {})[fa] || 0
                         return (
                           <td key={fa} className="text-center p-2 border-b border-border">
-                            <span className={`w-7 h-7 rounded-md flex items-center justify-center text-xs font-medium ${cellColor(count)}`}>
+                            <span className={`w-7 h-7 flex items-center justify-center text-xs font-medium ${cellColor(count)}`}>
                               {count}
                             </span>
                           </td>
@@ -105,7 +105,7 @@ export default function CoverageMap({ gaps, onClose, onFillGaps, loading }: Cove
               <span className="text-[10px] font-medium text-danger uppercase tracking-wide">Coverage gaps</span>
               <div className="flex gap-1 flex-wrap mt-0.5">
                 {gaps.coverage_gaps.map((g, i) => (
-                  <span key={i} className="text-[10px] px-1.5 py-0.5 bg-danger/10 text-danger rounded">{g}</span>
+                  <span key={i} className="text-[10px] px-1.5 py-0.5 bg-danger/10 text-danger">{g}</span>
                 ))}
               </div>
             </div>
@@ -115,7 +115,7 @@ export default function CoverageMap({ gaps, onClose, onFillGaps, loading }: Cove
               <span className="text-[10px] font-medium text-warning uppercase tracking-wide">Feature area gaps</span>
               <div className="flex gap-1 flex-wrap mt-0.5">
                 {gaps.feature_area_gaps.map((g, i) => (
-                  <span key={i} className="text-[10px] px-1.5 py-0.5 bg-warning/10 text-warning rounded">{g}</span>
+                  <span key={i} className="text-[10px] px-1.5 py-0.5 bg-warning/10 text-warning">{g}</span>
                 ))}
               </div>
             </div>
@@ -136,7 +136,7 @@ export default function CoverageMap({ gaps, onClose, onFillGaps, loading }: Cove
             <button
               onClick={onFillGaps}
               disabled={loading}
-              className="w-full py-2.5 bg-accent text-accent-foreground rounded-lg text-sm font-medium hover:opacity-90 disabled:opacity-50 transition-opacity"
+              className="w-full py-2.5 bg-accent text-accent-foreground text-sm font-medium hover:opacity-90 disabled:opacity-50 transition-opacity"
             >
               {loading ? 'Generating...' : 'Generate examples to fill gaps'}
             </button>

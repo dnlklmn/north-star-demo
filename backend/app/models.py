@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 # --- Enums ---
 
 class AgentStatus(str, Enum):
+    discovery = "discovery"
     drafting = "drafting"
     validating = "validating"
     questioning = "questioning"
@@ -106,6 +107,10 @@ class SessionState(BaseModel):
     rounds_of_questions: int = 0
     agent_status: AgentStatus = AgentStatus.drafting
     discovery_phase: DiscoveryPhase = DiscoveryPhase.goals
+    discovery_rounds: int = 0
+    extracted_goals: list[str] = Field(default_factory=list)
+    extracted_users: list[str] = Field(default_factory=list)
+    extracted_stories: list[dict] = Field(default_factory=list)
     scorers: list[dict] = Field(default_factory=list)
 
 

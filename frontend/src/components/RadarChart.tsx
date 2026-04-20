@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useId } from 'react'
 
 interface Props {
   dimensions: Array<{
@@ -7,15 +7,6 @@ interface Props {
     status: 'pending' | 'weak' | 'good' | 'pass' | 'fail' | 'untested'
   }>
   size?: number // default 200
-}
-
-const STATUS_COLORS: Record<string, string> = {
-  good: 'hsl(var(--color-success))',
-  pass: 'hsl(var(--color-success))',
-  weak: 'hsl(var(--color-warning))',
-  fail: 'hsl(var(--color-danger))',
-  pending: 'hsl(var(--color-muted-foreground))',
-  untested: 'hsl(var(--color-muted-foreground))',
 }
 
 function polarToCartesian(
@@ -37,7 +28,6 @@ function getPolygonPoints(
   count: number
 ): Array<{ x: number; y: number }> {
   const angleStep = (2 * Math.PI) / count
-  // Start from top (-PI/2) so the first axis points up
   const startAngle = -Math.PI / 2
   return Array.from({ length: count }, (_, i) =>
     polarToCartesian(cx, cy, radius, startAngle + i * angleStep)
@@ -51,38 +41,34 @@ function pointsToString(points: Array<{ x: number; y: number }>): string {
 export default function RadarChart({ dimensions, size = 200 }: Props) {
   if (!dimensions || dimensions.length < 3) return null
 
+  const filterId = useId()
   const count = dimensions.length
-  const labelMargin = 28
+  const labelMargin = 48
   const cx = size / 2
   const cy = size / 2
   const radius = size / 2 - labelMargin
 
-  const gridLevels = [0.25, 0.5, 0.75, 1]
-
-  const axisPoints = useMemo(() => getPolygonPoints(cx, cy, radius, count), [cx, cy, radius, count])
+  const outerPoints = useMemo(() => getPolygonPoints(cx, cy, radius, count), [cx, cy, radius, count])
 
   const dataPoints = useMemo(() => {
     const angleStep = (2 * Math.PI) / count
     const startAngle = -Math.PI / 2
     return dimensions.map((d, i) => {
-      // Give zero values a small offset so the polygon doesn't collapse to center
-      const r = Math.max(0.05, Math.min(1, d.value)) * radius
+      const r = Math.max(0.08, Math.min(1, d.value)) * radius
       return polarToCartesian(cx, cy, r, startAngle + i * angleStep)
     })
   }, [dimensions, cx, cy, radius, count])
 
   const labelPositions = useMemo(() => {
-    const labelRadius = radius + 14
+    const labelRadius = radius + 20
     const angleStep = (2 * Math.PI) / count
     const startAngle = -Math.PI / 2
     return dimensions.map((_, i) => {
       const angle = startAngle + i * angleStep
       const pos = polarToCartesian(cx, cy, labelRadius, angle)
-      // Determine text-anchor based on position relative to center
       let anchor: 'start' | 'middle' | 'end' = 'middle'
       if (pos.x < cx - 2) anchor = 'end'
       else if (pos.x > cx + 2) anchor = 'start'
-      // Vertical nudge for top/bottom labels
       let dy = '0.35em'
       if (pos.y < cy - radius * 0.5) dy = '0.8em'
       else if (pos.y > cy + radius * 0.5) dy = '-0.2em'
@@ -91,102 +77,69 @@ export default function RadarChart({ dimensions, size = 200 }: Props) {
   }, [dimensions, cx, cy, radius, count])
 
   return (
-    <svg
-      width={size}
-      height={size}
-      viewBox={`0 0 ${size} ${size}`}
-      className="overflow-visible"
-    >
-      {/* Background grid polygons */}
-      {gridLevels.map((level) => {
-        const points = getPolygonPoints(cx, cy, radius * level, count)
-        return (
-          <polygon
-            key={level}
-            points={pointsToString(points)}
-            fill="none"
-            style={{
-              stroke: 'hsl(var(--color-border))',
-              opacity: 0.3,
-            }}
-            strokeWidth={1}
-          />
-        )
-      })}
+    <div className="flex justify-center">
+      <svg
+        width={size}
+        height={size}
+        viewBox={`0 0 ${size} ${size}`}
+        className="overflow-visible"
+      >
+        <defs>
+          {/* Noise texture filter matching Figma design */}
+          <filter id={filterId} x="0" y="0" width="100%" height="100%" filterUnits="userSpaceOnUse" colorInterpolationFilters="sRGB">
+            <feFlood floodOpacity="0" result="BackgroundImageFix" />
+            <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape" />
+            <feTurbulence type="fractalNoise" baseFrequency="5" stitchTiles="stitch" numOctaves="3" result="noise" seed="8513" />
+            <feColorMatrix in="noise" type="luminanceToAlpha" result="alphaNoise" />
+            <feComponentTransfer in="alphaNoise" result="coloredNoise1">
+              <feFuncA type="discrete" tableValues="1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 " />
+            </feComponentTransfer>
+            <feComposite operator="in" in2="shape" in="coloredNoise1" result="noise1Clipped" />
+            <feFlood floodColor="rgba(47, 0, 144, 0.36)" result="color1Flood" />
+            <feComposite operator="in" in2="noise1Clipped" in="color1Flood" result="color1" />
+            <feMerge>
+              <feMergeNode in="shape" />
+              <feMergeNode in="color1" />
+            </feMerge>
+          </filter>
+        </defs>
 
-      {/* Axis lines from center to each vertex */}
-      {axisPoints.map((point, i) => (
-        <line
-          key={i}
-          x1={cx}
-          y1={cy}
-          x2={point.x}
-          y2={point.y}
-          style={{
-            stroke: 'hsl(var(--color-border))',
-            opacity: 0.3,
-          }}
+        {/* Outer boundary polygon — subtle border */}
+        <polygon
+          points={pointsToString(outerPoints)}
+          fill="none"
+          stroke="var(--color-border-hint, rgba(36, 36, 36, 1))"
           strokeWidth={1}
         />
-      ))}
 
-      {/* Data polygon fill */}
-      <polygon
-        points={pointsToString(dataPoints)}
-        style={{
-          fill: 'hsl(var(--color-accent) / 0.1)',
-        }}
-        strokeWidth={0}
-      />
-
-      {/* Lines connecting data points */}
-      {dataPoints.map((point, i) => {
-        const next = dataPoints[(i + 1) % dataPoints.length]
-        return (
-          <line
-            key={`line-${i}`}
-            x1={point.x}
-            y1={point.y}
-            x2={next.x}
-            y2={next.y}
-            style={{
-              stroke: 'hsl(var(--color-accent))',
-            }}
-            strokeWidth={2}
-            strokeLinecap="round"
-          />
-        )
-      })}
-
-      {/* Data point circles */}
-      {dataPoints.map((point, i) => (
-        <circle
-          key={i}
-          cx={point.x}
-          cy={point.y}
-          r={4}
-          style={{
-            fill: STATUS_COLORS[dimensions[i].status] ?? STATUS_COLORS.pending,
-            stroke: 'hsl(var(--color-background))',
-          }}
-          strokeWidth={1.5}
+        {/* Data polygon — purple fill with noise texture */}
+        <polygon
+          points={pointsToString(dataPoints)}
+          fill="#9982DF"
+          filter={`url(#${filterId})`}
+          strokeWidth={0}
         />
-      ))}
 
-      {/* Labels */}
-      {labelPositions.map((pos, i) => (
-        <text
-          key={i}
-          x={pos.x}
-          y={pos.y}
-          textAnchor={pos.anchor}
-          dy={pos.dy}
-          className="fill-muted-foreground"
-          style={{ fontSize: 10 }}
-        >
-          {dimensions[i].label}
-        </text>
-      ))}
-    </svg>
+        {/* Labels */}
+        {labelPositions.map((pos, i) => {
+          const dim = dimensions[i]
+          // Bright label for dimensions with data, dim for pending/empty
+          const isActive = dim.value > 0.15 && dim.status !== 'pending' && dim.status !== 'untested'
+          return (
+            <text
+              key={i}
+              x={pos.x}
+              y={pos.y}
+              textAnchor={pos.anchor}
+              dy={pos.dy}
+              fill={isActive ? 'rgba(224, 224, 224, 1)' : 'rgba(142, 142, 142, 1)'}
+              style={{ fontSize: 14, fontFamily: 'Geist, sans-serif' }}
+            >
+              {dim.label}
+            </text>
+          )
+        })}
+      </svg>
+    </div>
   )
 }

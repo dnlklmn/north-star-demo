@@ -30,7 +30,7 @@ export default function ApiKeyBanner({ onDismiss }: Props) {
               onKeyDown={e => { if (e.key === 'Enter') handleSave() }}
               placeholder="sk-ant-... or sk-or-..."
               autoFocus
-              className="w-full text-sm bg-background border border-border rounded-md px-3 py-1.5 pr-8 text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-accent"
+              className="w-full text-sm bg-background border border-border px-3 py-1.5 pr-8 text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-accent"
             />
             <button
               type="button"
@@ -43,7 +43,7 @@ export default function ApiKeyBanner({ onDismiss }: Props) {
           <button
             onClick={handleSave}
             disabled={!keyValue.trim()}
-            className="px-3 py-1.5 text-xs font-medium bg-accent text-accent-foreground rounded-md hover:opacity-90 transition-opacity disabled:opacity-40"
+            className="px-3 py-1.5 text-xs font-medium bg-accent text-accent-foreground hover:opacity-90 transition-opacity disabled:opacity-40"
           >
             Save
           </button>
@@ -59,7 +59,7 @@ export default function ApiKeyBanner({ onDismiss }: Props) {
           <span className="text-warning font-medium">No API key configured</span>
           <button
             onClick={() => setExpanded(true)}
-            className="px-3 py-1 text-xs font-medium bg-accent text-accent-foreground rounded-md hover:opacity-90 transition-opacity"
+            className="px-3 py-1 text-xs font-medium bg-accent text-accent-foreground hover:opacity-90 transition-opacity"
           >
             Add now
           </button>

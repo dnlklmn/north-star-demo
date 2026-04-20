@@ -44,11 +44,11 @@ export default function Section({
   }
 
   return (
-    <div className="border border-border rounded-lg bg-surface-raised">
+    <div className="border border-border bg-surface-raised">
       <div className="flex items-center">
         <button
           onClick={() => setExpanded(!expanded)}
-          className="flex-shrink-0 p-3 hover:bg-muted/50 transition-colors rounded-tl-lg"
+          className="flex-shrink-0 p-3 hover:bg-muted/50 transition-colors"
         >
           <ChevronRight
             className={`w-3.5 h-3.5 text-muted-foreground transition-transform ${expanded ? 'rotate-90' : ''}`}

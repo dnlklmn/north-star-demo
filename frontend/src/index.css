@@ -18,61 +18,140 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* ---------- Raw scales (from styles/tokens/global.json) ---------- */
+:root {
+  --gray-50: #0a0a0a;
+  --gray-75: #101010;
+  --gray-100: #161616;
+  --gray-150: #242424;
+  --gray-200: #333333;
+  --gray-300: #4d4d4d;
+  --gray-400: #666666;
+  --gray-500: #808080;
+  --gray-550: #8e8e8e;
+  --gray-600: #999999;
+  --gray-700: #b3b3b3;
+  --gray-800: #ffffff;
+  --gray-900: #e0e0e0;
+  --gray-950: #f0f0f0;
+
+  --purple-50: #090514;
+  --purple-75: #0d071c;
+  --purple-100: #120a29;
+  --purple-150: #1b103d;
+  --purple-200: #241551;
+  --purple-300: #361f7a;
+  --purple-400: #472aa2;
+  --purple-500: #5934cb;
+  --purple-550: #6a48d0;
+  --purple-600: #7a5dd5;
+  --purple-700: #9982df;
+  --purple-800: #bdaeea;
+  --purple-900: #ded6f5;
+  --purple-950: #eeebfa;
+}
+
+/* ---------- Semantic tokens (from styles/tokens/dark.json) ---------- */
+:root {
+  --fill-neutral: var(--gray-150);
+  --fill-neutral-hover: var(--gray-200);
+  --fill-disabled: var(--gray-100);
+  --fill-dip: var(--gray-50);
+  --fill-primary: var(--purple-700);
+  --fill-primary-hover: var(--purple-800);
+  --fill-primary-pressed: var(--purple-600);
+
+  --border-hint: var(--gray-150);
+  --border-default-color: var(--gray-550);
+  --border-primary: var(--purple-700);
+
+  --background-default: var(--gray-75);
+
+  --foreground-contrast: var(--gray-900);
+  --foreground-dim: var(--gray-550);
+  --foreground-primary: var(--purple-700);
+  --foreground-match-background: var(--background-default);
+
+  /* Status colors (not in tokens — keep existing) */
+  --warning: #d97706;
+  --danger: #dc2626;
+  --success: #16a34a;
+}
+
+/* ---------- Tailwind @theme bindings ---------- */
 @theme {
   --font-sans: 'Geist', ui-sans-serif, system-ui, sans-serif;
   --font-mono: 'Geist Mono', ui-monospace, monospace;
 
-  --color-background: var(--bg);
-  --color-foreground: var(--fg);
-  --color-muted: var(--muted);
-  --color-muted-foreground: var(--muted-fg);
-  --color-border: var(--border-color);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-fg);
-  --color-surface: var(--surface);
-  --color-surface-raised: var(--surface-raised);
+  /* Raw scales — use as bg-gray-150, text-purple-700, etc. */
+  --color-gray-50: var(--gray-50);
+  --color-gray-75: var(--gray-75);
+  --color-gray-100: var(--gray-100);
+  --color-gray-150: var(--gray-150);
+  --color-gray-200: var(--gray-200);
+  --color-gray-300: var(--gray-300);
+  --color-gray-400: var(--gray-400);
+  --color-gray-500: var(--gray-500);
+  --color-gray-550: var(--gray-550);
+  --color-gray-600: var(--gray-600);
+  --color-gray-700: var(--gray-700);
+  --color-gray-800: var(--gray-800);
+  --color-gray-900: var(--gray-900);
+  --color-gray-950: var(--gray-950);
+
+  --color-purple-50: var(--purple-50);
+  --color-purple-75: var(--purple-75);
+  --color-purple-100: var(--purple-100);
+  --color-purple-150: var(--purple-150);
+  --color-purple-200: var(--purple-200);
+  --color-purple-300: var(--purple-300);
+  --color-purple-400: var(--purple-400);
+  --color-purple-500: var(--purple-500);
+  --color-purple-550: var(--purple-550);
+  --color-purple-600: var(--purple-600);
+  --color-purple-700: var(--purple-700);
+  --color-purple-800: var(--purple-800);
+  --color-purple-900: var(--purple-900);
+  --color-purple-950: var(--purple-950);
+
+  /* Semantic tokens */
+  --color-fill-neutral: var(--fill-neutral);
+  --color-fill-neutral-hover: var(--fill-neutral-hover);
+  --color-fill-disabled: var(--fill-disabled);
+  --color-fill-dip: var(--fill-dip);
+  --color-fill-primary: var(--fill-primary);
+  --color-fill-primary-hover: var(--fill-primary-hover);
+  --color-fill-primary-pressed: var(--fill-primary-pressed);
+
+  --color-border-hint: var(--border-hint);
+  --color-border-primary: var(--border-primary);
+
+  --color-bg-default: var(--background-default);
+
+  --color-fg-contrast: var(--foreground-contrast);
+  --color-fg-dim: var(--foreground-dim);
+  --color-fg-primary: var(--foreground-primary);
+
+  /* Legacy aliases (so existing components keep working until migrated) */
+  --color-background: var(--background-default);
+  --color-foreground: var(--foreground-contrast);
+  --color-muted: var(--fill-neutral);
+  --color-muted-foreground: var(--foreground-dim);
+  --color-border: var(--border-hint);
+  --color-accent: var(--fill-primary);
+  --color-accent-foreground: var(--background-default);
+  --color-surface: var(--gray-75);
+  --color-surface-raised: var(--gray-100);
+  --color-agent: var(--gray-100);
   --color-success: var(--success);
   --color-warning: var(--warning);
   --color-danger: var(--danger);
-  --color-agent: var(--agent-bg);
-}
-
-:root {
-  --bg: #ffffff;
-  --fg: #0a0a0a;
-  --muted: #f5f5f5;
-  --muted-fg: #737373;
-  --border-color: #e5e5e5;
-  --accent: #2563eb;
-  --accent-fg: #ffffff;
-  --surface: #fafafa;
-  --surface-raised: #ffffff;
-  --agent-bg: #f0f0f0;
-  --success: #16a34a;
-  --warning: #d97706;
-  --danger: #dc2626;
-}
-
-.dark {
-  --bg: #0a0a0a;
-  --fg: #fafafa;
-  --muted: #171717;
-  --muted-fg: #a3a3a3;
-  --border-color: #262626;
-  --accent: #3b82f6;
-  --accent-fg: #ffffff;
-  --surface: #0f0f0f;
-  --surface-raised: #171717;
-  --agent-bg: #050505;
-  --success: #22c55e;
-  --warning: #f59e0b;
-  --danger: #ef4444;
 }
 
 body {
   font-family: var(--font-sans);
-  background-color: var(--bg);
-  color: var(--fg);
+  background-color: var(--background-default);
+  color: var(--foreground-contrast);
 }
 
 /* Slide-in animations */

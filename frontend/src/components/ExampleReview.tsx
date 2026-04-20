@@ -203,7 +203,7 @@ export default function ExampleReview({
           {onNavigateToScorers && (
             <button
               onClick={(e) => { e.stopPropagation(); onNavigateToScorers(); }}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-accent text-accent-foreground hover:opacity-90 transition-all"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-accent text-accent-foreground hover:opacity-90 transition-all"
             >
               Set up scorers
               <ArrowRight className="w-3.5 h-3.5" />
@@ -214,17 +214,17 @@ export default function ExampleReview({
 
       {/* Subheader: filters + actions */}
       <div className="px-4 py-2 border-b border-border flex items-center gap-2 flex-shrink-0 flex-wrap">
-        <select value={filterArea} onChange={e => setFilterArea(e.target.value)} className="text-xs px-2 py-1 bg-background border border-border rounded">
+        <select value={filterArea} onChange={e => setFilterArea(e.target.value)} className="text-xs px-2 py-1 bg-background border border-border">
           <option value="">All areas</option>
           {featureAreas.map(a => <option key={a} value={a}>{a}</option>)}
         </select>
-        <select value={filterLabel} onChange={e => setFilterLabel(e.target.value)} className="text-xs px-2 py-1 bg-background border border-border rounded">
+        <select value={filterLabel} onChange={e => setFilterLabel(e.target.value)} className="text-xs px-2 py-1 bg-background border border-border">
           <option value="">All labels</option>
           <option value="good">Good</option>
           <option value="bad">Bad</option>
           <option value="unlabeled">Unlabeled</option>
         </select>
-        <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="text-xs px-2 py-1 bg-background border border-border rounded">
+        <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="text-xs px-2 py-1 bg-background border border-border">
           <option value="">All statuses</option>
           <option value="pending">Pending</option>
           <option value="approved">Approved</option>
@@ -233,27 +233,27 @@ export default function ExampleReview({
         </select>
 
         <div className="ml-auto flex gap-1.5 items-center">
-          <button onClick={(e) => { e.stopPropagation(); onShowCoverageMap(); }} className="px-2 py-1 text-xs text-muted-foreground hover:text-foreground border border-border rounded transition-colors">
+          <button onClick={(e) => { e.stopPropagation(); onShowCoverageMap(); }} className="px-2 py-1 text-xs text-muted-foreground hover:text-foreground border border-border transition-colors">
             Coverage map
           </button>
-          <button onClick={(e) => { e.stopPropagation(); onExport(); }} disabled={stats.approved === 0} className="px-2 py-1 text-xs text-muted-foreground hover:text-foreground border border-border rounded transition-colors disabled:opacity-40">
+          <button onClick={(e) => { e.stopPropagation(); onExport(); }} disabled={stats.approved === 0} className="px-2 py-1 text-xs text-muted-foreground hover:text-foreground border border-border transition-colors disabled:opacity-40">
             Export
           </button>
           <span className="w-px h-4 bg-border mx-0.5" />
-          <button onClick={onImport} disabled={loading} className="px-2.5 py-1 text-xs bg-surface-raised border border-border rounded hover:bg-muted transition-colors disabled:opacity-50">
+          <button onClick={onImport} disabled={loading} className="px-2.5 py-1 text-xs bg-surface-raised border border-border hover:bg-muted transition-colors disabled:opacity-50">
             Import
           </button>
-          <button onClick={() => setShowGenerateModal(true)} disabled={loading} className="px-2.5 py-1 text-xs bg-accent text-accent-foreground rounded hover:opacity-90 transition-opacity disabled:opacity-50">
+          <button onClick={() => setShowGenerateModal(true)} disabled={loading} className="px-2.5 py-1 text-xs bg-accent text-accent-foreground hover:opacity-90 transition-opacity disabled:opacity-50">
             {loading ? 'Generating...' : 'Generate'}
           </button>
-          <button onClick={onAutoReview} disabled={loading || stats.pending === 0} className="px-2.5 py-1 text-xs bg-surface-raised border border-border rounded hover:bg-muted transition-colors disabled:opacity-50">
+          <button onClick={onAutoReview} disabled={loading || stats.pending === 0} className="px-2.5 py-1 text-xs bg-surface-raised border border-border hover:bg-muted transition-colors disabled:opacity-50">
             Auto-review
           </button>
           {onSuggestRevisions && (
             <button
               onClick={onSuggestRevisions}
               disabled={loading || revisionsLoading || examplesWithIssues === 0}
-              className="px-2.5 py-1 text-xs bg-surface-raised border border-border rounded hover:bg-muted transition-colors disabled:opacity-50"
+              className="px-2.5 py-1 text-xs bg-surface-raised border border-border hover:bg-muted transition-colors disabled:opacity-50"
             >
               {revisionsLoading ? 'Suggesting...' : `Suggest revisions${examplesWithIssues > 0 ? ` (${examplesWithIssues})` : ''}`}
             </button>
@@ -279,7 +279,7 @@ export default function ExampleReview({
         {filtered.length === 0 && filterStatus === 'pending' && stats.total > 0 ? (
           <div className="flex flex-col items-center justify-center h-full">
             <div className="text-center max-w-sm">
-              <div className="w-12 h-12 rounded-full bg-success/10 flex items-center justify-center mx-auto mb-4">
+              <div className="w-12 h-12 bg-success/10 flex items-center justify-center mx-auto mb-4">
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-success">
                   <polyline points="20 6 9 17 4 12" />
                 </svg>
@@ -289,13 +289,13 @@ export default function ExampleReview({
                 You've reviewed all {stats.total} examples. {stats.approved} approved, {stats.rejected} rejected.
               </p>
               <div className="flex flex-col gap-3">
-                <button onClick={onShowCoverageMap} className="w-full py-2.5 px-4 bg-surface-raised border border-border rounded-lg text-sm font-medium hover:bg-muted transition-colors">
+                <button onClick={onShowCoverageMap} className="w-full py-2.5 px-4 bg-surface-raised border border-border text-sm font-medium hover:bg-muted transition-colors">
                   Check coverage gaps
                 </button>
-                <button onClick={() => setShowGenerateModal(true)} disabled={loading} className="w-full py-2.5 px-4 bg-surface-raised border border-border rounded-lg text-sm font-medium hover:bg-muted transition-colors disabled:opacity-50">
+                <button onClick={() => setShowGenerateModal(true)} disabled={loading} className="w-full py-2.5 px-4 bg-surface-raised border border-border text-sm font-medium hover:bg-muted transition-colors disabled:opacity-50">
                   Generate more examples
                 </button>
-                <button onClick={onExport} disabled={stats.approved === 0} className="w-full py-2.5 px-4 bg-accent text-accent-foreground rounded-lg text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50">
+                <button onClick={onExport} disabled={stats.approved === 0} className="w-full py-2.5 px-4 bg-accent text-accent-foreground text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50">
                   Export dataset ({stats.approved} examples)
                 </button>
               </div>
@@ -425,7 +425,7 @@ function ExampleRow({
           <textarea
             value={editInput}
             onChange={e => setEditInput(e.target.value)}
-            className="w-full p-2 text-xs bg-background border border-border rounded resize-none"
+            className="w-full p-2 text-xs bg-background border border-border resize-none"
             rows={4}
             onClick={e => e.stopPropagation()}
           />
@@ -434,14 +434,14 @@ function ExampleRow({
           <textarea
             value={editOutput}
             onChange={e => setEditOutput(e.target.value)}
-            className="w-full p-2 text-xs bg-background border border-border rounded resize-none"
+            className="w-full p-2 text-xs bg-background border border-border resize-none"
             rows={4}
             onClick={e => e.stopPropagation()}
           />
         </td>
         <td className="px-3 py-2 align-top text-right">
           <div className="flex flex-col gap-1 items-end">
-            <button onClick={(e) => { e.stopPropagation(); handleSaveEdit() }} className="px-2 py-1 text-xs bg-success text-white rounded hover:opacity-90">
+            <button onClick={(e) => { e.stopPropagation(); handleSaveEdit() }} className="px-2 py-1 text-xs bg-success text-white hover:opacity-90">
               Save
             </button>
             <button onClick={(e) => { e.stopPropagation(); onCancelEdit() }} className="px-2 py-1 text-xs text-muted-foreground hover:text-foreground">
@@ -472,7 +472,7 @@ function ExampleRow({
           {example.coverage_tags.length > 0 ? (
             <div className="flex flex-wrap gap-1">
               {example.coverage_tags.slice(0, 2).map((tag, i) => (
-                <span key={i} className="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground rounded">{tag}</span>
+                <span key={i} className="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground">{tag}</span>
               ))}
               {example.coverage_tags.length > 2 && (
                 <span className="text-[10px] text-muted-foreground">+{example.coverage_tags.length - 2}</span>
@@ -518,25 +518,25 @@ function ExampleRow({
         <td className="px-3 py-2.5 align-top text-right">
           {isSelected && (
             <div className="flex gap-1 justify-end flex-wrap">
-              <button onClick={(e) => { e.stopPropagation(); onUpdate({ review_status: 'approved' }) }} className="px-1.5 py-0.5 text-[10px] text-success hover:bg-success/10 rounded transition-colors">
+              <button onClick={(e) => { e.stopPropagation(); onUpdate({ review_status: 'approved' }) }} className="px-1.5 py-0.5 text-[10px] text-success hover:bg-success/10 transition-colors">
                 Approve
               </button>
-              <button onClick={(e) => { e.stopPropagation(); onStartEdit() }} className="px-1.5 py-0.5 text-[10px] text-accent hover:bg-accent/10 rounded transition-colors">
+              <button onClick={(e) => { e.stopPropagation(); onStartEdit() }} className="px-1.5 py-0.5 text-[10px] text-accent hover:bg-accent/10 transition-colors">
                 Edit
               </button>
-              <button onClick={(e) => { e.stopPropagation(); onUpdate({ review_status: 'rejected' }) }} className="px-1.5 py-0.5 text-[10px] text-danger hover:bg-danger/10 rounded transition-colors">
+              <button onClick={(e) => { e.stopPropagation(); onUpdate({ review_status: 'rejected' }) }} className="px-1.5 py-0.5 text-[10px] text-danger hover:bg-danger/10 transition-colors">
                 Reject
               </button>
-              <button onClick={(e) => { e.stopPropagation(); onDelete() }} className="px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-danger rounded transition-colors">
+              <button onClick={(e) => { e.stopPropagation(); onDelete() }} className="px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-danger transition-colors">
                 Delete
               </button>
               {hasIssues && !hasRevision && onSuggestRevision && (
-                <button onClick={(e) => { e.stopPropagation(); onSuggestRevision(example.id) }} className="px-1.5 py-0.5 text-[10px] text-amber-400 hover:bg-amber-500/10 rounded transition-colors">
+                <button onClick={(e) => { e.stopPropagation(); onSuggestRevision(example.id) }} className="px-1.5 py-0.5 text-[10px] text-amber-400 hover:bg-amber-500/10 transition-colors">
                   Suggest fix
                 </button>
               )}
               {hasRevision && (
-                <button onClick={(e) => { e.stopPropagation(); setShowRevision(!showRevision) }} className="px-1.5 py-0.5 text-[10px] text-amber-400 hover:bg-amber-500/10 rounded transition-colors">
+                <button onClick={(e) => { e.stopPropagation(); setShowRevision(!showRevision) }} className="px-1.5 py-0.5 text-[10px] text-amber-400 hover:bg-amber-500/10 transition-colors">
                   {showRevision ? 'Hide revision' : 'View revision'}
                 </button>
               )}
@@ -555,21 +555,21 @@ function ExampleRow({
                   {onAcceptRevision && (
                     <button
                       onClick={(e) => { e.stopPropagation(); onAcceptRevision(example.id) }}
-                      className="px-2 py-0.5 text-[10px] text-success hover:bg-success/10 border border-success/20 rounded transition-colors"
+                      className="px-2 py-0.5 text-[10px] text-success hover:bg-success/10 border border-success/20 transition-colors"
                     >
                       Accept
                     </button>
                   )}
                   <button
                     onClick={(e) => { e.stopPropagation(); handleEditWithRevision() }}
-                    className="px-2 py-0.5 text-[10px] text-accent hover:bg-accent/10 border border-accent/20 rounded transition-colors"
+                    className="px-2 py-0.5 text-[10px] text-accent hover:bg-accent/10 border border-accent/20 transition-colors"
                   >
                     Edit
                   </button>
                   {onDismissRevision && (
                     <button
                       onClick={(e) => { e.stopPropagation(); onDismissRevision(example.id); setShowRevision(false) }}
-                      className="px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground border border-border rounded transition-colors"
+                      className="px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground border border-border transition-colors"
                     >
                       Dismiss
                     </button>
@@ -580,7 +580,7 @@ function ExampleRow({
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <div className="text-[10px] text-muted-foreground mb-1 font-medium">Input</div>
-                  <div className="text-xs bg-background rounded p-2 border border-border">
+                  <div className="text-xs bg-background p-2 border border-border">
                     {example.revision_suggestion.input !== example.input ? (
                       <>
                         <div className="text-danger/60 line-through mb-1">{truncate(example.input, 300)}</div>
@@ -593,7 +593,7 @@ function ExampleRow({
                 </div>
                 <div>
                   <div className="text-[10px] text-muted-foreground mb-1 font-medium">Expected Output</div>
-                  <div className="text-xs bg-background rounded p-2 border border-border">
+                  <div className="text-xs bg-background p-2 border border-border">
                     {example.revision_suggestion.expected_output !== example.expected_output ? (
                       <>
                         <div className="text-danger/60 line-through mb-1">{truncate(example.expected_output, 300)}</div>

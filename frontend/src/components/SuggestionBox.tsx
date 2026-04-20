@@ -1,81 +1,96 @@
-import type { ReactNode } from 'react'
-import { Sparkles, Loader2, RefreshCw } from 'lucide-react'
+import type { ReactNode } from "react";
+import { Loader2 } from "lucide-react";
+import IconButton from "./ui/IconButton";
+import { RefreshIcon, DismissIcon, PlusIcon, AIIcon } from "./ui/Icons";
 
 /* ── SuggestionCard ── */
 
 interface CardProps {
-  onAccept: () => void
-  onDismiss: () => void
-  children: ReactNode
+  onAccept: () => void;
+  onDismiss: () => void;
+  children: ReactNode;
 }
 
 export function SuggestionCard({ onAccept, onDismiss, children }: CardProps) {
   return (
-    <div className="py-1.5 px-2.5 bg-accent/5 border border-accent/20 rounded-lg">
-      <div className="text-sm text-foreground">{children}</div>
-      <div className="flex gap-1 mt-1">
-        <button
-          onClick={onAccept}
-          className="text-xs px-2 py-0.5 bg-accent/20 text-accent rounded hover:bg-accent/30 font-medium"
-        >
-          Add
-        </button>
+    <div className="py-4 flex flex-col gap-3">
+      <div className="text-base text-fg-contrast leading-[1.5]">{children}</div>
+      <div className="flex items-center gap-4">
         <button
           onClick={onDismiss}
-          className="text-xs px-1.5 py-0.5 text-muted-foreground hover:text-foreground"
+          className="flex items-center gap-1.5 text-base font-mono font-semibold text-fg-dim hover:text-fg-contrast transition-colors"
         >
-          dismiss
+          <DismissIcon />
+          Dismiss
+        </button>
+        <button
+          onClick={onAccept}
+          className="flex items-center gap-1.5 text-base font-mono font-semibold text-fg-dim hover:text-fg-contrast transition-colors"
+        >
+          <PlusIcon />
+          Add
         </button>
       </div>
     </div>
-  )
+  );
 }
 
 /* ── SuggestionBox ── */
 
 interface BoxProps {
-  label?: string
-  onRefresh?: () => void
-  loading?: boolean
-  emptyText?: string
-  children?: ReactNode
+  label?: string;
+  onRefresh?: () => void;
+  loading?: boolean;
+  emptyText?: string;
+  children?: ReactNode;
 }
 
 export default function SuggestionBox({
-  label = 'Suggestions',
+  label = "Suggestions",
   onRefresh,
   loading,
   emptyText,
   children,
 }: BoxProps) {
-  const hasContent = !!children
+  const hasContent = !!children;
   return (
-    <div className="bg-surface-raised border border-border rounded-lg shadow-sm p-3">
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-1.5">
-          <Sparkles className={`w-3.5 h-3.5 ${hasContent || loading ? 'text-accent' : 'text-muted-foreground/40'}`} />
-          <span className="text-xs font-medium text-muted-foreground">{label}</span>
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <AIIcon
+            className={
+              hasContent || loading ? "text-fg-primary" : "text-fg-dim"
+            }
+          />
+          <span className="text-base font-semibold text-fg-contrast">
+            {label}
+          </span>
         </div>
         {onRefresh && (
-          <button
+          <IconButton
+            tone="dim"
             onClick={onRefresh}
             disabled={loading}
-            className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 disabled:opacity-50"
+            title="Refresh"
           >
-            {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
-          </button>
+            {loading ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <RefreshIcon />
+            )}
+          </IconButton>
         )}
       </div>
       {hasContent ? (
-        <div className="space-y-1.5">{children}</div>
+        <div className="divide-y divide-border-hint">{children}</div>
       ) : loading ? (
-        <div className="py-3 text-center">
-          <Loader2 className="w-4 h-4 text-muted-foreground animate-spin mx-auto mb-2" />
-          <p className="text-xs text-muted-foreground">Generating...</p>
+        <div className="py-4">
+          <Loader2 className="w-4 h-4 text-fg-dim animate-spin mx-auto mb-2" />
+          <p className="text-sm text-fg-dim text-center">Generating…</p>
         </div>
       ) : emptyText ? (
-        <p className="text-xs text-muted-foreground/60 py-3 text-center">{emptyText}</p>
+        <p className="text-sm text-fg-dim">{emptyText}</p>
       ) : null}
     </div>
-  )
+  );
 }

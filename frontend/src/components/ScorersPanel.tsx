@@ -76,7 +76,7 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
           {scorers.length > 0 && (
             <button
               onClick={handleDownloadAll}
-              className="px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground border border-border rounded-md transition-colors flex items-center gap-1"
+              className="px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground border border-border transition-colors flex items-center gap-1"
             >
               <Download className="w-3 h-3" />
               Download all
@@ -85,7 +85,7 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
           <button
             onClick={handleGenerate}
             disabled={!hasCriteria || generating}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {generating ? (
               <>
@@ -102,7 +102,7 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
           {onNavigateToEvaluate && (
             <button
               onClick={onNavigateToEvaluate}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-accent text-accent-foreground hover:opacity-90 transition-all"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-accent text-accent-foreground hover:opacity-90 transition-all"
             >
               Evaluate
               <ArrowRight className="w-3.5 h-3.5" />
@@ -113,7 +113,7 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
 
       <div className="flex-1 overflow-y-auto p-6">
         {error && (
-          <div className="mb-4 p-3 bg-danger/10 border border-danger/20 rounded-lg text-xs text-danger">
+          <div className="mb-4 p-3 bg-danger/10 border border-danger/20 text-xs text-danger">
             {error}
           </div>
         )}
@@ -133,7 +133,7 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
         ) : (
           <div className="max-w-2xl space-y-2">
             {scorers.map(scorer => (
-              <div key={scorer.name} className="border border-border rounded-lg bg-surface-raised">
+              <div key={scorer.name} className="border border-border bg-surface-raised">
                 <button
                   onClick={() => setExpandedScorer(expandedScorer === scorer.name ? null : scorer.name)}
                   className="w-full flex items-center justify-between p-3 hover:bg-muted/50 transition-colors"
@@ -141,7 +141,7 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
                   <div className="flex items-center gap-2">
                     <ChevronRight className={`w-3.5 h-3.5 text-muted-foreground transition-transform ${expandedScorer === scorer.name ? 'rotate-90' : ''}`} />
                     <code className="text-sm font-medium text-foreground">{scorer.name}</code>
-                    <span className={`text-[10px] px-1.5 py-0.5 rounded border ${typeColors[scorer.type]}`}>
+                    <span className={`text-[10px] px-1.5 py-0.5 border ${typeColors[scorer.type]}`}>
                       {scorer.type}
                     </span>
                   </div>
@@ -155,7 +155,7 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
                 {expandedScorer === scorer.name && (
                   <div className="px-3 pb-3">
                     <p className="text-xs text-muted-foreground mb-2">{scorer.description}</p>
-                    <pre className="text-xs bg-background rounded p-3 overflow-x-auto text-foreground/80 font-mono">
+                    <pre className="text-xs bg-background p-3 overflow-x-auto text-foreground/80 font-mono">
                       {scorer.code}
                     </pre>
                   </div>

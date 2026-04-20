@@ -95,8 +95,8 @@ async def run_agent_turn(
 
     has_charter = bool(state.charter.coverage.criteria or state.charter.alignment)
 
-    # --- Explicit regenerate ---
-    if has_charter and regenerate:
+    # --- Explicit regenerate (force charter generation, even if empty) ---
+    if regenerate:
         return await _generate_and_validate(state)
 
     # --- Charter exists → chat turn ---

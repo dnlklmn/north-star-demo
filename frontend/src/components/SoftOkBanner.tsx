@@ -25,7 +25,7 @@ export default function SoftOkBanner({ validation, onKeepRefining, onProceed }: 
   }
 
   return (
-    <div className="mx-3 my-2 p-3 bg-warning/10 border border-warning/20 rounded-lg">
+    <div className="mx-3 my-2 p-3 bg-warning/10 border border-warning/20">
       <p className="text-sm text-foreground font-medium mb-2">
         A few criteria are still uncertain:
       </p>
@@ -40,13 +40,13 @@ export default function SoftOkBanner({ validation, onKeepRefining, onProceed }: 
       <div className="flex gap-2">
         <button
           onClick={onKeepRefining}
-          className="px-3 py-1.5 text-xs border border-border rounded-md text-foreground hover:bg-muted transition-colors"
+          className="px-3 py-1.5 text-xs border border-border text-foreground hover:bg-muted transition-colors"
         >
           Keep refining
         </button>
         <button
           onClick={onProceed}
-          className="px-3 py-1.5 text-xs bg-accent text-accent-foreground rounded-md hover:opacity-90 transition-opacity"
+          className="px-3 py-1.5 text-xs bg-accent text-accent-foreground hover:opacity-90 transition-opacity"
         >
           Proceed to review
         </button>

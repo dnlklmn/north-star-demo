@@ -45,11 +45,11 @@ export default function EvaluatePanel({ dataset, onExport }: Props) {
             <button
               onClick={onExport}
               disabled={!dataset}
-              className={`w-full flex items-center gap-3 p-4 border border-border rounded-lg transition-colors ${
+              className={`w-full flex items-center gap-3 p-4 border border-border transition-colors ${
                 dataset ? 'hover:bg-muted/50 cursor-pointer' : 'opacity-50 cursor-not-allowed'
               }`}
             >
-              <div className="w-10 h-10 rounded-lg bg-accent/10 flex items-center justify-center flex-shrink-0">
+              <div className="w-10 h-10 bg-accent/10 flex items-center justify-center flex-shrink-0">
                 <Download className="w-5 h-5 text-accent" />
               </div>
               <div className="text-left">
@@ -68,9 +68,9 @@ export default function EvaluatePanel({ dataset, onExport }: Props) {
               {INTEGRATIONS.map(integration => (
                 <div
                   key={integration.name}
-                  className="flex items-center gap-3 p-4 border border-border rounded-lg hover:bg-muted/50 transition-colors"
+                  className="flex items-center gap-3 p-4 border border-border hover:bg-muted/50 transition-colors"
                 >
-                  <div className="w-10 h-10 rounded-lg bg-surface-raised border border-border flex items-center justify-center flex-shrink-0">
+                  <div className="w-10 h-10 bg-surface-raised border border-border flex items-center justify-center flex-shrink-0">
                     <span className="text-xs font-bold text-muted-foreground">{integration.icon}</span>
                   </div>
                   <div className="flex-1 min-w-0">
@@ -80,7 +80,7 @@ export default function EvaluatePanel({ dataset, onExport }: Props) {
                   <div className="flex items-center gap-2 flex-shrink-0">
                     <button
                       disabled={!dataset}
-                      className={`text-xs px-3 py-1.5 rounded-md font-medium transition-colors ${
+                      className={`text-xs px-3 py-1.5 font-medium transition-colors ${
                         dataset
                           ? 'bg-accent/10 text-accent hover:bg-accent/20'
                           : 'text-muted-foreground/40 cursor-not-allowed'

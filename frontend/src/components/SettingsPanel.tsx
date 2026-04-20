@@ -66,7 +66,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-      <div className="bg-surface-raised border border-border rounded-xl shadow-xl w-full max-w-md mx-4">
+      <div className="bg-surface-raised border border-border shadow-xl w-full max-w-md mx-4">
         {/* Header with tabs */}
         <div className="flex items-center justify-between px-5 py-3 border-b border-border">
           <div className="flex items-center gap-4">
@@ -108,7 +108,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                     <select
                       value={settings.model_name}
                       onChange={e => handleChange({ model_name: e.target.value })}
-                      className="w-full text-sm bg-surface border border-border rounded-lg px-3 py-2 text-foreground focus:outline-none focus:ring-1 focus:ring-accent"
+                      className="w-full text-sm bg-surface border border-border px-3 py-2 text-foreground focus:outline-none focus:ring-1 focus:ring-accent"
                     >
                       {MODEL_OPTIONS.map(opt => (
                         <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -159,7 +159,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                       />
                       <span className="text-[10px] text-muted-foreground">Creative</span>
                     </div>
-                    <div className="mt-2 p-2.5 bg-surface rounded-lg border border-border">
+                    <div className="mt-2 p-2.5 bg-surface border border-border">
                       <span className={`text-[10px] font-medium uppercase tracking-wide ${
                         bucket === 'strict' ? 'text-success' : bucket === 'balanced' ? 'text-warning' : 'text-accent'
                       }`}>
@@ -194,7 +194,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                       value={apiKeyValue}
                       onChange={e => { setApiKeyValue(e.target.value); setKeySaved(false) }}
                       placeholder="sk-ant-... or sk-or-..."
-                      className="w-full text-sm bg-surface border border-border rounded-lg px-3 py-2 pr-9 text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-accent"
+                      className="w-full text-sm bg-surface border border-border px-3 py-2 pr-9 text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-accent"
                     />
                     <button
                       type="button"
@@ -210,7 +210,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                       setKeySaved(true)
                       setTimeout(() => setKeySaved(false), 2000)
                     }}
-                    className="px-3 py-2 text-xs font-medium bg-accent text-accent-foreground rounded-lg hover:opacity-90 transition-opacity"
+                    className="px-3 py-2 text-xs font-medium bg-accent text-accent-foreground hover:opacity-90 transition-opacity"
                   >
                     {keySaved ? 'Saved!' : 'Save'}
                   </button>
@@ -234,7 +234,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                 <div className="flex gap-2">
                   <button
                     onClick={() => handleThemeChange(false)}
-                    className={`flex-1 text-sm px-3 py-2 rounded-lg border transition-colors ${
+                    className={`flex-1 text-sm px-3 py-2 border transition-colors ${
                       !dark
                         ? 'border-accent bg-accent/10 text-foreground'
                         : 'border-border bg-surface text-muted-foreground hover:text-foreground'
@@ -244,7 +244,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                   </button>
                   <button
                     onClick={() => handleThemeChange(true)}
-                    className={`flex-1 text-sm px-3 py-2 rounded-lg border transition-colors ${
+                    className={`flex-1 text-sm px-3 py-2 border transition-colors ${
                       dark
                         ? 'border-accent bg-accent/10 text-foreground'
                         : 'border-border bg-surface text-muted-foreground hover:text-foreground'
