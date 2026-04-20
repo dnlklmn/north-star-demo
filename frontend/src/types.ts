@@ -83,6 +83,17 @@ export interface SessionState {
 export interface Message {
   role: 'user' | 'assistant'
   content: string
+  kind?: 'hint'
+  id?: string
+  /** For hint messages: concrete detail about what the agent did. */
+  detail?: string | null
+}
+
+export interface ActivityEvent {
+  id: string
+  created_at: string
+  turn_type: string
+  detail?: string | null
 }
 
 export interface UserStory {

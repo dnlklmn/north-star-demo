@@ -1,28 +1,68 @@
-import { useState } from 'react'
-import { Circle, Link, FileText, Wand2, X, Loader2, Plus } from 'lucide-react'
-import type { Charter, Validation, DimensionStatus, AlignmentEntry, Suggestion, TaskDefinition, DetectSchemaResponse, ImportFromUrlResponse } from '../types'
-import RadarChart from './RadarChart'
-import Section from './Section'
-import SuggestionBox, { SuggestionCard } from './SuggestionBox'
+import { useState, useRef, useEffect } from "react";
+import type { ReactNode } from "react";
+import { Loader2 } from "lucide-react";
+import type {
+  Charter,
+  Validation,
+  DimensionStatus,
+  AlignmentEntry,
+  Suggestion,
+  TaskDefinition,
+} from "../types";
+import RadarChart from "./RadarChart";
+import PanelLayout from "./PanelLayout";
+import SuggestionBox, { SuggestionCard } from "./SuggestionBox";
+import ItemList, { HelpPopover } from "./ItemList";
+import Button from "./ui/Button";
+import Input from "./ui/Input";
+import IconButton from "./ui/IconButton";
+import {
+  AIIcon,
+  ReturnKeyIcon,
+  CmdReturnIcon,
+  CoverageIcon,
+  HelpIcon,
+  DragHandleIcon,
+  CloseIcon,
+  PlusIcon,
+} from "./ui/Icons";
 
 interface Props {
-  charter: Charter
-  validation: Validation
-  activeCriteria: string[]
-  onEditCriterion?: (dimension: string, index: number, value: string) => void
-  onAddCriterion?: (dimension: string, value: string) => void
-  onEditAlignment?: (index: number, field: 'good' | 'bad', value: string) => void
-  onEditTask?: (field: keyof TaskDefinition, value: string) => void
-  suggestions?: Suggestion[]
-  onAcceptSuggestion?: (suggestion: Suggestion) => void
-  onDismissSuggestion?: (suggestion: Suggestion) => void
-  onRegenSuggestions?: () => void
-  suggestionsLoading?: boolean
-  loading?: boolean
-  onDetectSchema?: (content: string, contentType: string) => Promise<DetectSchemaResponse>
-  onImportFromUrl?: (url: string) => Promise<ImportFromUrlResponse>
-  onApplyDetectedSchema?: (task: Partial<TaskDefinition>) => void
+  charter: Charter;
+  validation: Validation;
+  activeCriteria: string[];
+  onEditCriterion?: (dimension: string, index: number, value: string) => void;
+  onAddCriterion?: (dimension: string, value: string) => void;
+  onEditAlignment?: (
+    index: number,
+    field: "good" | "bad",
+    value: string,
+  ) => void;
+  onDeleteCriterion?: (dimension: string, index: number) => void;
+  onAddAlignment?: (featureArea: string, good: string, bad: string) => void;
+  onDeleteAlignment?: (index: number) => void;
+  onEditTask?: (field: keyof TaskDefinition, value: string) => void;
+  onReorderCriteria?: (dimension: string, criteria: string[]) => void;
+  onReorderAlignment?: (alignment: AlignmentEntry[]) => void;
+  suggestions?: Suggestion[];
+  onAcceptSuggestion?: (suggestion: Suggestion) => void;
+  onDismissSuggestion?: (suggestion: Suggestion) => void;
+  onRegenSuggestions?: () => void;
+  onCriteriaChanged?: () => void;
+  suggestionsLoading?: boolean;
+  loading?: boolean;
+  onBackToGoals?: () => void;
+  onNext?: () => void;
+  nextLabel?: string;
+  nextVariant?: "primary" | "neutral";
+  nextDisabled?: boolean;
+  /** Rendered in the right sidebar bottom slot (e.g. AI Assist) */
+  rightBottom?: ReactNode;
+  /** When set, expands bottom section to fill and caps Suggestions height. */
+  rightBottomExpanded?: ReactNode;
 }
+
+type CharterTab = "task" | "coverage" | "balance" | "alignment" | "rot";
 
 export default function CharterPanel({
   charter,
@@ -31,65 +71,130 @@ export default function CharterPanel({
   onEditCriterion,
   onAddCriterion,
   onEditAlignment,
+  onDeleteCriterion,
+  onAddAlignment,
+  onDeleteAlignment,
   onEditTask,
+  onReorderCriteria,
+  onReorderAlignment,
   suggestions = [],
   onAcceptSuggestion,
   onDismissSuggestion,
   onRegenSuggestions,
+  onCriteriaChanged,
   suggestionsLoading,
   loading,
-  onDetectSchema,
-  onImportFromUrl,
-  onApplyDetectedSchema,
+  onBackToGoals,
+  onNext,
+  nextLabel,
+  nextVariant = "neutral",
+  nextDisabled = false,
+  rightBottom,
+  rightBottomExpanded,
 }: Props) {
-  const isEmpty = !charter.coverage.criteria.length
-    && !charter.balance.criteria.length
-    && !charter.alignment.length
-    && !charter.rot.criteria.length
+  const [activeTab, setActiveTab] = useState<CharterTab>("coverage");
 
-  const coverageSuggestions = suggestions.filter(s => s.section === 'coverage')
-  const balanceSuggestions = suggestions.filter(s => s.section === 'balance')
-  const alignmentSuggestions = suggestions.filter(s => s.section === 'alignment')
-  const rotSuggestions = suggestions.filter(s => s.section === 'rot')
+  const isEmpty =
+    !charter.coverage.criteria.length &&
+    !charter.balance.criteria.length &&
+    !charter.alignment.length &&
+    !charter.rot.criteria.length;
 
-  const radarDimensions = buildRadarDimensions(charter, validation)
+  const radarDimensions = buildRadarDimensions(charter, validation);
+  const hasRadarData = radarDimensions.some((d) => d.value > 0);
+
+  // Filter suggestions to match the active charter tab
+  const tabSuggestions = activeTab === "task"
+    ? []
+    : suggestions.filter((s) => s.section === activeTab);
+
+  // Compute tab readiness scores (0–1)
+  const covScore = dimensionScore(charter.coverage.status, validation.coverage, charter.coverage.criteria.length).value;
+  const balScore = dimensionScore(charter.balance.status, validation.balance, charter.balance.criteria.length).value;
+  const rotScore = dimensionScore(charter.rot.status, validation.rot, charter.rot.criteria.length).value;
+
+  // Alignment score
+  const alignTotal = charter.alignment.length;
+  const alignScore = alignTotal > 0
+    ? validation.alignment.length > 0
+      ? validation.alignment.filter((v) => v.status === "pass" || v.status === "good").length / alignTotal
+      : Math.min(1, alignTotal / 4)
+    : 0;
+
+  // Task definition score
+  const taskFilled = [charter.task.input_description, charter.task.output_description].filter(Boolean).length;
+  const taskScore = taskFilled / 2;
+
+  const tabs: { id: CharterTab; label: string; score: number }[] = [
+    { id: "task", label: "Task Definition", score: taskScore },
+    { id: "coverage", label: "Coverage", score: covScore },
+    { id: "balance", label: "Balance", score: balScore },
+    { id: "alignment", label: "Alignment", score: alignScore },
+    { id: "rot", label: "Rot", score: rotScore },
+  ];
 
   if (isEmpty && suggestions.length === 0) {
     return (
-      <div className="flex-1 flex items-center justify-center p-8">
-        <div className="text-center">
+      <PanelLayout
+        title="Charter"
+        subtitle="A formal rule set to keep your dataset in check"
+        rightBottom={rightBottom}
+        rightBottomExpanded={rightBottomExpanded}
+      >
+        <div className="flex items-center justify-center py-24">
           {loading ? (
-            <>
-              <Loader2 className="w-6 h-6 text-muted-foreground animate-spin mx-auto mb-3" />
-              <p className="text-sm text-muted-foreground">Generating...</p>
-            </>
+            <div className="text-center">
+              <Loader2 className="w-6 h-6 text-fg-dim animate-spin mx-auto mb-3" />
+              <p className="text-sm text-fg-dim">Generating...</p>
+            </div>
           ) : (
-            <p className="text-sm text-muted-foreground">No charter yet. Go back and generate one.</p>
+            <p className="text-sm text-fg-dim">
+              No charter yet. Go back and generate one.
+            </p>
           )}
         </div>
-      </div>
-    )
+      </PanelLayout>
+    );
   }
 
-  const renderSuggestionBox = (items: Suggestion[], label: string) => {
-    if (items.length === 0 && !suggestionsLoading) return null
-    return (
-      <div className="w-56 flex-shrink-0">
+  return (
+    <PanelLayout
+      title="Charter"
+      subtitle="A formal rule set to keep your dataset in check"
+      rightTop={
+        hasRadarData ? (
+          <div>
+            <div className="flex items-center gap-2 mb-3">
+              <CoverageIcon className="text-fg-dim" />
+              <span className="text-base font-semibold text-fg-contrast">Coverage</span>
+            </div>
+            <div className="flex justify-center">
+              <RadarChart dimensions={radarDimensions} size={200} />
+            </div>
+          </div>
+        ) : undefined
+      }
+      right={
         <SuggestionBox
-          label={label}
           onRefresh={onRegenSuggestions}
-          loading={suggestionsLoading && items.length === 0}
+          loading={suggestionsLoading}
+          emptyText="Charter suggestions will appear here."
         >
-          {items.length > 0
-            ? items.map((s, i) => (
+          {tabSuggestions.length > 0
+            ? tabSuggestions.map((s, i) => (
                 <SuggestionCard
                   key={i}
                   onAccept={() => onAcceptSuggestion?.(s)}
                   onDismiss={() => onDismissSuggestion?.(s)}
                 >
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="font-mono text-[10px] uppercase tracking-wider text-fg-dim bg-fill-neutral px-1.5 py-0.5">
+                      {s.section}
+                    </span>
+                  </div>
                   {s.text}
                   {s.good && (
-                    <span className="block text-xs text-muted-foreground mt-0.5">
+                    <span className="block text-xs text-fg-dim mt-0.5">
                       Good: {s.good} / Bad: {s.bad}
                     </span>
                   )}
@@ -97,556 +202,723 @@ export default function CharterPanel({
               ))
             : null}
         </SuggestionBox>
+      }
+      rightBottom={rightBottom}
+      rightBottomExpanded={rightBottomExpanded}
+      footer={
+        onNext ? (
+          <Button
+            size="big"
+            variant={nextVariant}
+            shortcut={<CmdReturnIcon />}
+            onClick={onNext}
+            disabled={nextDisabled}
+          >
+            {loading ? "Generating…" : nextLabel}
+          </Button>
+        ) : undefined
+      }
+    >
+      {/* Tab bar */}
+      <div className="flex items-stretch border-b-2 border-border-hint mb-6 overflow-x-auto">
+        {tabs.map((tab) => {
+          const isActive = activeTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`flex-shrink-0 flex items-center justify-center gap-2 py-3 px-4 text-base font-medium whitespace-nowrap transition-colors ${
+                isActive
+                  ? "bg-fill-neutral text-fg-contrast"
+                  : "text-fg-dim hover:text-fg-contrast"
+              }`}
+            >
+              {tab.label}
+              {tab.score > 0 && (
+                <span
+                  className="inline-block w-2 h-2 rounded-full flex-shrink-0"
+                  style={{ backgroundColor: scoreToColor(tab.score) }}
+                />
+              )}
+            </button>
+          );
+        })}
       </div>
-    )
-  }
 
-  return (
-    <div className="flex-1 overflow-y-auto p-6">
-      <div className="flex items-start gap-12 px-6">
-        {/* Left: radar chart */}
-        {radarDimensions.length >= 3 && (
-          <div className="flex-shrink-0 sticky top-6 hidden lg:block">
-            <RadarChart dimensions={radarDimensions} size={200} />
-          </div>
-        )}
+      {/* Tab content */}
+      {activeTab === "task" && (
+        <SchemaSection task={charter.task} onEdit={onEditTask} />
+      )}
 
-        {/* Sections with per-section suggestions */}
-        <div className="flex-1 min-w-0 space-y-3">
-          <TaskSection
-            task={charter.task}
-            onEdit={onEditTask}
-            onDetectSchema={onDetectSchema}
-            onImportFromUrl={onImportFromUrl}
-            onApplyDetectedSchema={onApplyDetectedSchema}
+      {activeTab === "coverage" && (() => {
+        const covPct = Math.round(covScore * 100);
+        return (
+          <ItemList
+            title="Coverage"
+            helpTitle="Use cases and scenarios to cover"
+            helpText="List the distinct scenarios, edge cases, and user intents your AI feature needs to handle. Good coverage ensures your evals aren't blind to entire categories of input."
+            items={charter.coverage.criteria}
+            onAdd={
+              onAddCriterion ? (v) => onAddCriterion("coverage", v) : undefined
+            }
+            onEdit={
+              onEditCriterion
+                ? (i, v) => onEditCriterion("coverage", i, v)
+                : undefined
+            }
+            onDelete={
+              onDeleteCriterion
+                ? (i) => onDeleteCriterion("coverage", i)
+                : undefined
+            }
+            onReorder={
+              onReorderCriteria
+                ? (criteria) => onReorderCriteria("coverage", criteria)
+                : undefined
+            }
+            addPlaceholder="Add coverage criterion..."
+            statusText={covPct > 0 ? `${covPct}% ready` : undefined}
+            statusColor={covPct > 0 ? scoreToColor(covScore) : undefined}
+            onChanged={onCriteriaChanged}
+            emptyText="No criteria yet"
           />
+        );
+      })()}
 
-          <div className="flex gap-12 items-start">
-            <div className="flex-1 min-w-0">
-              <DimensionContent
-                name="Coverage"
-                description="Input scenarios to test"
-                criteria={charter.coverage.criteria}
-                status={charter.coverage.status}
-                validationStatus={validation.coverage}
-                activeCriteria={activeCriteria}
-                onEdit={onEditCriterion ? (i, v) => onEditCriterion('coverage', i, v) : undefined}
-                onAdd={onAddCriterion ? (v) => onAddCriterion('coverage', v) : undefined}
-              />
-            </div>
-            {renderSuggestionBox(coverageSuggestions, 'Coverage')}
-          </div>
+      {activeTab === "balance" && (() => {
+        const balPct = Math.round(balScore * 100);
+        return (
+          <ItemList
+            title="Balance"
+            helpTitle="How to distribute across scenarios"
+            helpText="Specify which scenarios deserve more weight in your dataset. Without balance criteria, your evals may over-represent easy cases and miss the hard ones."
+            items={charter.balance.criteria}
+            onAdd={
+              onAddCriterion ? (v) => onAddCriterion("balance", v) : undefined
+            }
+            onEdit={
+              onEditCriterion
+                ? (i, v) => onEditCriterion("balance", i, v)
+                : undefined
+            }
+            onDelete={
+              onDeleteCriterion
+                ? (i) => onDeleteCriterion("balance", i)
+                : undefined
+            }
+            onReorder={
+              onReorderCriteria
+                ? (criteria) => onReorderCriteria("balance", criteria)
+                : undefined
+            }
+            addPlaceholder="Add balance criterion..."
+            statusText={balPct > 0 ? `${balPct}% ready` : undefined}
+            statusColor={balPct > 0 ? scoreToColor(balScore) : undefined}
+            onChanged={onCriteriaChanged}
+            emptyText="No criteria yet"
+          />
+        );
+      })()}
 
-          <div className="flex gap-12 items-start">
-            <div className="flex-1 min-w-0">
-              <DimensionContent
-                name="Balance"
-                description="What to weight more heavily"
-                criteria={charter.balance.criteria}
-                status={charter.balance.status}
-                validationStatus={validation.balance}
-                activeCriteria={activeCriteria}
-                onEdit={onEditCriterion ? (i, v) => onEditCriterion('balance', i, v) : undefined}
-                onAdd={onAddCriterion ? (v) => onAddCriterion('balance', v) : undefined}
-              />
-            </div>
-            {renderSuggestionBox(balanceSuggestions, 'Balance')}
-          </div>
+      {activeTab === "alignment" && (
+        <AlignmentSection
+          entries={charter.alignment}
+          validations={validation.alignment}
+          activeCriteria={activeCriteria}
+          onEdit={onEditAlignment}
+          onAdd={onAddAlignment}
+          onDelete={onDeleteAlignment}
+          onReorder={onReorderAlignment}
+          onCriteriaChanged={onCriteriaChanged}
+        />
+      )}
 
-          <div className="flex gap-12 items-start">
-            <div className="flex-1 min-w-0">
-              <AlignmentContent
-                entries={charter.alignment}
-                validations={validation.alignment}
-                activeCriteria={activeCriteria}
-                onEdit={onEditAlignment}
-              />
-            </div>
-            {renderSuggestionBox(alignmentSuggestions, 'Alignment')}
-          </div>
-
-          <div className="flex gap-12 items-start">
-            <div className="flex-1 min-w-0">
-              <DimensionContent
-                name="Rot"
-                description="When to update"
-                criteria={charter.rot.criteria}
-                status={charter.rot.status}
-                validationStatus={validation.rot}
-                activeCriteria={activeCriteria}
-                onEdit={onEditCriterion ? (i, v) => onEditCriterion('rot', i, v) : undefined}
-                onAdd={onAddCriterion ? (v) => onAddCriterion('rot', v) : undefined}
-              />
-            </div>
-            {renderSuggestionBox(rotSuggestions, 'Rot')}
-          </div>
-        </div>
-      </div>
-    </div>
-  )
+      {activeTab === "rot" && (() => {
+        const rotPct = Math.round(rotScore * 100);
+        return (
+          <ItemList
+            title="Rot"
+            helpTitle="Signals the dataset needs refreshing"
+            helpText="Define the conditions that would make your current dataset stale — new features, changed requirements, updated models. When these fire, it's time to regenerate."
+            items={charter.rot.criteria}
+            onAdd={
+              onAddCriterion ? (v) => onAddCriterion("rot", v) : undefined
+            }
+            onEdit={
+              onEditCriterion
+                ? (i, v) => onEditCriterion("rot", i, v)
+                : undefined
+            }
+            onDelete={
+              onDeleteCriterion
+                ? (i) => onDeleteCriterion("rot", i)
+                : undefined
+            }
+            onReorder={
+              onReorderCriteria
+                ? (criteria) => onReorderCriteria("rot", criteria)
+                : undefined
+            }
+            addPlaceholder="Add rot criterion..."
+            statusText={rotPct > 0 ? `${rotPct}% ready` : undefined}
+            statusColor={rotPct > 0 ? scoreToColor(rotScore) : undefined}
+            onChanged={onCriteriaChanged}
+            emptyText="No criteria yet"
+          />
+        );
+      })()}
+    </PanelLayout>
+  );
 }
 
 /* ── Helpers ── */
 
-function dimensionScore(_status: DimensionStatus | string, validationStatus: string, criteriaCount: number): { value: number; status: 'pending' | 'weak' | 'good' | 'pass' | 'fail' | 'untested' } {
-  if (criteriaCount === 0) return { value: 0, status: 'pending' }
-
-  // Base score from content: more criteria = higher score, scaling smoothly
-  const contentScore = Math.min(1, criteriaCount / 5)
-
-  // If validated, blend content score with validation result
-  if (validationStatus !== 'untested') {
-    if (validationStatus === 'good' || validationStatus === 'pass') return { value: Math.max(contentScore, 1), status: validationStatus as 'good' | 'pass' }
-    if (validationStatus === 'weak') return { value: Math.max(contentScore, 0.6), status: 'weak' }
-    if (validationStatus === 'fail') return { value: Math.max(contentScore * 0.5, 0.3), status: 'fail' }
+/** Map a 0–1 readiness score to a red→amber→green color */
+function scoreToColor(score: number): string {
+  const clamped = Math.max(0, Math.min(1, score));
+  if (clamped <= 0.5) {
+    // red (0) → amber (0.5)
+    const t = clamped / 0.5;
+    const r = Math.round(220 + t * (220 - 220));
+    const g = Math.round(60 + t * (160 - 60));
+    const b = Math.round(60 + t * (40 - 60));
+    return `rgb(${r}, ${g}, ${b})`;
   }
+  // amber (0.5) → green (1)
+  const t = (clamped - 0.5) / 0.5;
+  const r = Math.round(220 + t * (74 - 220));
+  const g = Math.round(160 + t * (222 - 160));
+  const b = Math.round(40 + t * (128 - 40));
+  return `rgb(${r}, ${g}, ${b})`;
+}
 
-  // Pending: score purely from content
-  return { value: contentScore, status: 'pending' }
+function dimensionScore(
+  _status: DimensionStatus | string,
+  validationStatus: string,
+  criteriaCount: number,
+): {
+  value: number;
+  status: "pending" | "weak" | "good" | "pass" | "fail" | "untested";
+} {
+  if (criteriaCount === 0) return { value: 0, status: "pending" };
+  const contentScore = Math.min(1, criteriaCount / 5);
+  if (validationStatus !== "untested") {
+    if (validationStatus === "good" || validationStatus === "pass")
+      return {
+        value: Math.max(contentScore, 1),
+        status: validationStatus as "good" | "pass",
+      };
+    if (validationStatus === "weak")
+      return { value: Math.max(contentScore, 0.6), status: "weak" };
+    if (validationStatus === "fail")
+      return { value: Math.max(contentScore * 0.5, 0.3), status: "fail" };
+  }
+  return { value: contentScore, status: "pending" };
 }
 
 function buildRadarDimensions(charter: Charter, validation: Validation) {
-  const dims: Array<{ label: string; value: number; status: 'pending' | 'weak' | 'good' | 'pass' | 'fail' | 'untested' }> = []
-  const cov = dimensionScore(charter.coverage.status, validation.coverage, charter.coverage.criteria.length)
-  dims.push({ label: 'Coverage', ...cov })
-  const bal = dimensionScore(charter.balance.status, validation.balance, charter.balance.criteria.length)
-  dims.push({ label: 'Balance', ...bal })
+  const dims: Array<{
+    label: string;
+    value: number;
+    status: "pending" | "weak" | "good" | "pass" | "fail" | "untested";
+  }> = [];
+
+  // Schema (top vertex)
+  const taskFilled = [
+    charter.task.input_description,
+    charter.task.output_description,
+  ].filter(Boolean).length;
+  dims.push({
+    label: "Schema",
+    value: taskFilled / 2,
+    status: taskFilled === 2 ? "good" : taskFilled > 0 ? "weak" : "pending",
+  });
+
+  // Coverage (top-right)
+  const cov = dimensionScore(
+    charter.coverage.status,
+    validation.coverage,
+    charter.coverage.criteria.length,
+  );
+  dims.push({ label: "Coverage", ...cov });
+
+  // Balance (bottom-right)
+  const bal = dimensionScore(
+    charter.balance.status,
+    validation.balance,
+    charter.balance.criteria.length,
+  );
+  dims.push({ label: "Balance", ...bal });
+
+  // Alignment (bottom-left)
   if (charter.alignment.length > 0) {
-    const contentScore = Math.min(1, charter.alignment.length / 4)
-    const passCount = validation.alignment.filter(v => v.status === 'pass' || (v.status as string) === 'good').length
-    const hasValidation = validation.alignment.length > 0
+    const contentScore = Math.min(1, charter.alignment.length / 4);
+    const passCount = validation.alignment.filter(
+      (v) => v.status === "pass" || (v.status as string) === "good",
+    ).length;
+    const hasValidation = validation.alignment.length > 0;
     if (hasValidation) {
-      const validationRatio = passCount / Math.max(1, charter.alignment.length)
-      const value = Math.max(contentScore * 0.5, validationRatio)
-      const status: 'good' | 'weak' | 'pending' = passCount === charter.alignment.length ? 'good' : 'weak'
-      dims.push({ label: 'Alignment', value, status })
+      const validationRatio = passCount / Math.max(1, charter.alignment.length);
+      const value = Math.max(contentScore * 0.5, validationRatio);
+      const status: "good" | "weak" | "pending" =
+        passCount === charter.alignment.length ? "good" : "weak";
+      dims.push({ label: "Alignment", value, status });
     } else {
-      dims.push({ label: 'Alignment', value: contentScore, status: 'pending' })
+      dims.push({ label: "Alignment", value: contentScore, status: "pending" });
     }
   } else {
-    dims.push({ label: 'Alignment', value: 0, status: 'pending' })
+    dims.push({ label: "Alignment", value: 0, status: "pending" });
   }
-  const rot = dimensionScore(charter.rot.status, validation.rot, charter.rot.criteria.length)
-  dims.push({ label: 'Rot', ...rot })
-  const taskFilled = [charter.task.input_description, charter.task.output_description].filter(Boolean).length
-  dims.push({ label: 'Task', value: taskFilled / 2, status: taskFilled === 2 ? 'good' : taskFilled > 0 ? 'weak' : 'pending' })
-  return dims
+
+  // Rot (top-left)
+  const rot = dimensionScore(
+    charter.rot.status,
+    validation.rot,
+    charter.rot.criteria.length,
+  );
+  dims.push({ label: "Rot", ...rot });
+
+  return dims;
 }
 
-function completionLabel(_status: DimensionStatus | string, validationStatus: string, criteriaCount: number): string {
-  if (criteriaCount === 0) return ''
-  if (validationStatus !== 'untested') {
-    if (validationStatus === 'good' || validationStatus === 'pass') return 'complete'
-    if (validationStatus === 'weak') return 'needs refinement'
-    if (validationStatus === 'fail') return 'needs work'
+function completionLabel(
+  _status: DimensionStatus | string,
+  validationStatus: string,
+  criteriaCount: number,
+): string {
+  if (criteriaCount === 0) return "";
+  if (validationStatus !== "untested") {
+    if (validationStatus === "good" || validationStatus === "pass")
+      return "complete";
+    if (validationStatus === "weak") return "needs refinement";
+    if (validationStatus === "fail") return "needs work";
   }
-  return `${criteriaCount} item${criteriaCount !== 1 ? 's' : ''}`
+  return `${criteriaCount} item${criteriaCount !== 1 ? "s" : ""}`;
 }
 
-
-
-function badgeVariant(label: string): 'success' | 'warning' | 'danger' | 'muted' {
-  if (label === 'complete') return 'success'
-  if (label.includes('item')) return 'muted'
-  if (label === 'needs refinement') return 'warning'
-  if (label === 'needs work') return 'danger'
-  return 'muted'
+function badgeVariant(
+  label: string,
+): "success" | "warning" | "danger" | "muted" {
+  if (label === "complete") return "success";
+  if (label.includes("item")) return "muted";
+  if (label === "needs refinement") return "warning";
+  if (label === "needs work") return "danger";
+  return "muted";
 }
 
-/* ── DimensionContent: Section wrapper + criteria list ── */
+/* HelpPopover is now imported from ItemList.tsx */
 
-function DimensionContent({
-  name,
-  description,
-  criteria,
-  status,
-  validationStatus,
-  activeCriteria,
+/* ── SchemaSection ── */
+
+function SchemaSection({
+  task,
   onEdit,
-  onAdd,
 }: {
-  name: string
-  description: string
-  criteria: string[]
-  status: DimensionStatus
-  validationStatus: string
-  activeCriteria: string[]
-  onEdit?: (index: number, value: string) => void
-  onAdd?: (value: string) => void
+  task: TaskDefinition;
+  onEdit?: (field: keyof TaskDefinition, value: string) => void;
 }) {
-  const [adding, setAdding] = useState(false)
-  const [newValue, setNewValue] = useState('')
-  const label = completionLabel(status, validationStatus, criteria.length)
-
-  const handleAdd = () => {
-    if (newValue.trim() && onAdd) {
-      onAdd(newValue.trim())
-      setNewValue('')
-      setAdding(false)
-    }
-  }
-
   return (
-    <Section
-      title={name}
-      subtitle={description}
-      badge={label || undefined}
-      badgeVariant={label ? badgeVariant(label) : 'muted'}
-    >
-      <div className="space-y-1">
-        {criteria.map((criterion, i) => (
-          <CriterionRow
-            key={i}
-            text={criterion}
-            active={activeCriteria.includes(`${name.toLowerCase()}_${i}`)}
-            onEdit={onEdit ? (v) => onEdit(i, v) : undefined}
-          />
-        ))}
-        {criteria.length === 0 && (
-          <p className="pl-5 text-xs text-muted-foreground italic">No criteria yet</p>
-        )}
-        {onAdd && (
-          adding ? (
-            <div className="pl-2 pt-1">
-              <textarea
-                value={newValue}
-                onChange={e => setNewValue(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleAdd() }
-                  if (e.key === 'Escape') { setNewValue(''); setAdding(false) }
-                }}
-                autoFocus
-                placeholder={`Add a ${name.toLowerCase()} criterion...`}
-                className="w-full text-sm border border-accent rounded px-2 py-1 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-accent"
-                rows={2}
-              />
-              <div className="flex gap-1.5 mt-1">
-                <button onClick={handleAdd} className="px-2 py-0.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90">Add</button>
-                <button onClick={() => { setNewValue(''); setAdding(false) }} className="px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground">Cancel</button>
-              </div>
-            </div>
-          ) : (
-            <button
-              onClick={() => setAdding(true)}
-              className="flex items-center gap-1 pl-2 pt-1 text-xs text-muted-foreground hover:text-foreground"
-            >
-              <Plus className="w-3 h-3" />
-              Add criterion
-            </button>
-          )
-        )}
+    <div>
+      <div className="flex items-center gap-2 mb-4">
+        <h3 className="text-base font-medium text-fg-contrast">Schema</h3>
+        <HelpPopover title="What your app receives and produces" text="Define the shape of your AI feature's input and output. This helps generate realistic test data that matches your actual use case." />
       </div>
-    </Section>
-  )
+      <div className="flex flex-col gap-4">
+        <div>
+          <label className="text-sm font-medium text-fg-contrast mb-1.5 block">
+            Input
+          </label>
+          <Input
+            value={task.input_description}
+            onChange={(e) => onEdit?.("input_description", e.target.value)}
+            placeholder="Paste an example, a JSON schema, or just describe it"
+          />
+        </div>
+        <div>
+          <label className="text-sm font-medium text-fg-contrast mb-1.5 block">
+            Output
+          </label>
+          <Input
+            value={task.output_description}
+            onChange={(e) => onEdit?.("output_description", e.target.value)}
+            placeholder="Paste an example, a JSON schema, or just describe it"
+          />
+        </div>
+      </div>
+    </div>
+  );
 }
 
-/* ── AlignmentContent: Section wrapper + alignment entries ── */
+/* DimensionSection and CriterionRow have been replaced by ItemList */
 
-function AlignmentContent({
+/* ── AlignmentSection ── */
+
+function AlignmentSection({
   entries,
   validations,
   activeCriteria,
   onEdit,
+  onAdd,
+  onDelete,
+  onReorder,
+  onCriteriaChanged,
 }: {
-  entries: AlignmentEntry[]
-  validations: { feature_area: string; status: string; weak_reason: string | null }[]
-  activeCriteria: string[]
-  onEdit?: (index: number, field: 'good' | 'bad', value: string) => void
+  entries: AlignmentEntry[];
+  validations: {
+    feature_area: string;
+    status: string;
+    weak_reason: string | null;
+  }[];
+  activeCriteria: string[];
+  onEdit?: (index: number, field: "good" | "bad", value: string) => void;
+  onAdd?: (featureArea: string, good: string, bad: string) => void;
+  onDelete?: (index: number) => void;
+  onReorder?: (entries: AlignmentEntry[]) => void;
+  onCriteriaChanged?: () => void;
 }) {
-  const passCount = validations.filter(v => v.status === 'pass' || v.status === 'good').length
-  const total = entries.length
-  const hasValidation = validations.length > 0
-  let label = ''
-  if (total > 0) {
-    if (hasValidation) {
-      if (passCount === total) label = 'complete'
-      else if (passCount > 0) label = `${passCount}/${total} passing`
-      else label = 'needs refinement'
-    } else {
-      label = `${total} item${total !== 1 ? 's' : ''}`
+  const total = entries.length;
+  const passCount = validations.filter(
+    (v) => v.status === "pass" || v.status === "good",
+  ).length;
+  const score = total > 0
+    ? validations.length > 0
+      ? passCount / total
+      : Math.min(1, total / 4)
+    : 0;
+  const pct = Math.round(score * 100);
+
+  const [adding, setAdding] = useState(false);
+  const [featureArea, setFeatureArea] = useState("");
+  const [good, setGood] = useState("");
+  const [bad, setBad] = useState("");
+  const addRowRef = useRef<HTMLDivElement>(null);
+
+  // Click-outside to dismiss add row
+  useEffect(() => {
+    if (!adding) return;
+    const handler = (e: MouseEvent) => {
+      if (addRowRef.current && !addRowRef.current.contains(e.target as Node)) {
+        setAdding(false);
+        setFeatureArea("");
+        setGood("");
+        setBad("");
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [adding]);
+
+  const canSubmit = featureArea.trim() && good.trim() && bad.trim();
+
+  const handleAddSubmit = () => {
+    if (featureArea.trim() && good.trim() && bad.trim() && onAdd) {
+      onAdd(featureArea.trim(), good.trim(), bad.trim());
+      setFeatureArea("");
+      setGood("");
+      setBad("");
+      setAdding(false);
+      onCriteriaChanged?.();
     }
-  }
+  };
+
+  const dismissAdd = () => {
+    setFeatureArea("");
+    setGood("");
+    setBad("");
+    setAdding(false);
+  };
+
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+
+  const handleDragStart = (index: number) => setDragIndex(index);
+  const handleDragOver = (index: number, e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOverIndex(index);
+  };
+  const handleDrop = (index: number) => {
+    if (dragIndex === null || dragIndex === index) {
+      setDragIndex(null);
+      setDragOverIndex(null);
+      return;
+    }
+    const updated = [...entries];
+    const [moved] = updated.splice(dragIndex, 1);
+    updated.splice(index, 0, moved);
+    onReorder?.(updated);
+    setDragIndex(null);
+    setDragOverIndex(null);
+  };
+  const handleDragEnd = () => {
+    setDragIndex(null);
+    setDragOverIndex(null);
+  };
+
+  const dragEnabled = !!onReorder && entries.length > 1;
 
   return (
-    <Section
-      title="Alignment"
-      subtitle="What good vs bad looks like"
-      badge={label || undefined}
-      badgeVariant={label ? (label === 'complete' ? 'success' : label.includes('item') ? 'muted' : label.includes('passing') ? 'warning' : label === 'needs refinement' ? 'warning' : 'muted') : 'muted'}
-    >
-      <div className="space-y-2">
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <h3 className="text-base font-medium text-fg-contrast">Alignment</h3>
+          <HelpPopover title="Good vs bad output per feature" text="Define what good and bad output looks like for specific feature areas. These examples guide the AI to produce on-brand, on-spec responses." />
+        </div>
+        <div className="flex items-center gap-3">
+          {pct > 0 && (
+            <span
+              className="text-base"
+              style={{ color: scoreToColor(score) }}
+            >
+              {pct}% ready
+            </span>
+          )}
+          {onAdd && (
+            <Button size="small" variant="neutral" onClick={() => setAdding(true)} disabled={adding}>
+              <PlusIcon />
+              Add
+            </Button>
+          )}
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-0.5">
+        {adding && (
+          <div ref={addRowRef} className="flex flex-col gap-2.5 p-4 bg-fill-neutral">
+            <div className="flex items-stretch gap-2.5">
+              <Input
+                autoFocus
+                value={featureArea}
+                onChange={(e) => setFeatureArea(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") dismissAdd();
+                }}
+                placeholder="Feature area..."
+              />
+              <Input
+                value={good}
+                onChange={(e) => setGood(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") dismissAdd();
+                }}
+                placeholder="Good example..."
+              />
+            </div>
+            <div className="flex items-stretch gap-2.5">
+              <Input
+                value={bad}
+                onChange={(e) => setBad(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    handleAddSubmit();
+                  }
+                  if (e.key === "Escape") dismissAdd();
+                }}
+                placeholder="Bad example..."
+              />
+              <Button
+                size="big"
+                variant={canSubmit ? "primary" : "neutral"}
+                onClick={handleAddSubmit}
+                disabled={!canSubmit}
+                shortcut={<ReturnKeyIcon />}
+              >
+                Submit
+              </Button>
+            </div>
+          </div>
+        )}
         {entries.map((entry, i) => {
-          const val = validations.find(v => v.feature_area === entry.feature_area)
-          const isActive = activeCriteria.includes(`alignment_${entry.feature_area}`)
+          const val = validations.find(
+            (v) => v.feature_area === entry.feature_area,
+          );
+          const isActive = activeCriteria.includes(
+            `alignment_${entry.feature_area}`,
+          );
+          const showDropIndicator =
+            dragIndex !== null && dragOverIndex === i && dragIndex !== i;
           return (
-            <AlignmentRow
-              key={i}
-              entry={entry}
-              validation={val}
-              active={isActive}
-              onEdit={onEdit ? (field, value) => onEdit(i, field, value) : undefined}
-            />
-          )
+            <div key={i}>
+              {showDropIndicator && (
+                <div className="h-0.5 -my-px bg-purple-700 relative z-10" />
+              )}
+              <AlignmentRow
+                entry={entry}
+                validation={val}
+                active={isActive}
+                onEdit={
+                  onEdit ? (field, value) => onEdit(i, field, value) : undefined
+                }
+                onDelete={onDelete ? () => { onDelete(i); onCriteriaChanged?.(); } : undefined}
+                draggable={dragEnabled}
+                onDragStart={() => handleDragStart(i)}
+                onDragOver={(e) => handleDragOver(i, e)}
+                onDrop={() => handleDrop(i)}
+                onDragEnd={handleDragEnd}
+                isDragging={dragIndex === i}
+              />
+            </div>
+          );
         })}
-        {entries.length === 0 && (
-          <p className="pl-5 text-xs text-muted-foreground italic">No alignment entries yet</p>
+        {entries.length === 0 && !adding && (
+          <p className="text-sm text-fg-dim italic py-4">
+            No alignment entries yet
+          </p>
         )}
       </div>
-    </Section>
-  )
-}
-
-/* ── Leaf components ── */
-
-function CriterionRow({ text, active, onEdit }: { text: string; active: boolean; onEdit?: (value: string) => void }) {
-  const [editing, setEditing] = useState(false)
-  const [value, setValue] = useState(text)
-
-  const handleBlur = () => { setEditing(false); if (value !== text && onEdit) onEdit(value) }
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleBlur() }
-    if (e.key === 'Escape') { setValue(text); setEditing(false) }
-  }
-
-  return (
-    <div className={`flex items-start gap-2 pl-2 py-1 group ${active ? 'bg-accent/5 rounded' : ''}`}>
-      <Circle className="w-1.5 h-1.5 mt-2 text-muted-foreground fill-current flex-shrink-0" />
-      {editing ? (
-        <textarea value={value} onChange={e => setValue(e.target.value)} onBlur={handleBlur} onKeyDown={handleKeyDown} autoFocus
-          className="flex-1 text-sm border border-accent rounded px-2 py-1 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-accent" rows={2} />
-      ) : (
-        <span onClick={() => onEdit && setEditing(true)}
-          className={`flex-1 text-sm text-foreground/80 ${onEdit ? 'cursor-pointer hover:bg-accent/5 rounded px-1 -mx-1' : ''}`}>
-          {text}
-        </span>
-      )}
     </div>
-  )
+  );
 }
 
-function AlignmentRow({ entry, validation, active, onEdit }: {
-  entry: AlignmentEntry
-  validation?: { status: string; weak_reason: string | null }
-  active: boolean
-  onEdit?: (field: 'good' | 'bad', value: string) => void
+/* ── AlignmentRow ── */
+
+function AlignmentRow({
+  entry,
+  validation,
+  active,
+  onEdit,
+  onDelete,
+  draggable,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  onDragEnd,
+  isDragging,
+}: {
+  entry: AlignmentEntry;
+  validation?: { status: string; weak_reason: string | null };
+  active: boolean;
+  onEdit?: (field: "good" | "bad", value: string) => void;
+  onDelete?: () => void;
+  draggable?: boolean;
+  onDragStart?: () => void;
+  onDragOver?: (e: React.DragEvent) => void;
+  onDrop?: () => void;
+  onDragEnd?: () => void;
+  isDragging?: boolean;
 }) {
-  const [showDetail, setShowDetail] = useState(false)
-  const status = validation?.status || 'pending'
+  const [showDetail, setShowDetail] = useState(false);
+  const status = validation?.status || "pending";
 
   return (
-    <div className={`pl-2 py-1 ${active ? 'bg-accent/5 rounded' : ''}`}>
-      <div className="flex items-center gap-2">
-        <Circle className="w-1.5 h-1.5 text-muted-foreground fill-current flex-shrink-0" />
-        <span className="text-sm font-medium text-foreground">{entry.feature_area}</span>
-        {(status === 'weak' || status === 'fail') && validation?.weak_reason && (
-          <button onClick={() => setShowDetail(!showDetail)} className="text-xs text-warning hover:opacity-80">why?</button>
-        )}
+    <div
+      draggable={draggable}
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+      onDragEnd={onDragEnd}
+      className={`group py-4 px-4 bg-fill-neutral ${active ? "bg-purple-700/5" : ""} ${isDragging ? "opacity-30" : ""}`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-base font-medium text-fg-contrast">
+          {entry.feature_area}
+        </span>
+        <div className="flex items-center gap-2">
+          {(status === "weak" || status === "fail") &&
+            validation?.weak_reason && (
+              <button
+                onClick={() => setShowDetail(!showDetail)}
+                className="text-xs text-amber-500 hover:opacity-80"
+              >
+                why?
+              </button>
+            )}
+          {onDelete && (
+            <IconButton
+              tone="dim"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDelete();
+              }}
+              className="opacity-0 group-hover:opacity-100 transition-opacity"
+              title="Remove"
+            >
+              <CloseIcon />
+            </IconButton>
+          )}
+          <div
+            className={`w-10 h-10 flex items-center justify-center flex-shrink-0 transition-colors ${
+              draggable
+                ? "text-fg-dim hover:text-fg-contrast cursor-grab"
+                : "text-fg-dim"
+            }`}
+          >
+            <DragHandleIcon />
+          </div>
+        </div>
       </div>
       {showDetail && validation?.weak_reason && (
-        <div className="ml-4 mt-1 p-2 bg-warning/10 rounded text-xs text-warning">{validation.weak_reason}</div>
+        <div className="mt-2 p-2 bg-amber-500/10 text-xs text-amber-500">
+          {validation.weak_reason}
+        </div>
       )}
-      <div className="ml-4 mt-1 space-y-1">
-        <EditableField label="Good" value={entry.good} color="text-success" onSave={v => onEdit?.('good', v)} />
-        <EditableField label="Bad" value={entry.bad} color="text-danger" onSave={v => onEdit?.('bad', v)} />
+      <div className="mt-2 space-y-1">
+        <EditableField
+          label="Good"
+          value={entry.good}
+          color="text-green-500"
+          onSave={(v) => onEdit?.("good", v)}
+        />
+        <EditableField
+          label="Bad"
+          value={entry.bad}
+          color="text-red-500"
+          onSave={(v) => onEdit?.("bad", v)}
+        />
       </div>
     </div>
-  )
+  );
 }
 
-function EditableField({ label, value, color, onSave }: { label: string; value: string; color: string; onSave?: (value: string) => void }) {
-  const [editing, setEditing] = useState(false)
-  const [text, setText] = useState(value)
-  const handleBlur = () => { setEditing(false); if (text !== value && onSave) onSave(text) }
+/* ── EditableField ── */
+
+function EditableField({
+  label,
+  value,
+  color,
+  onSave,
+}: {
+  label: string;
+  value: string;
+  color: string;
+  onSave?: (value: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(value);
+  const handleBlur = () => {
+    setEditing(false);
+    if (text !== value && onSave) onSave(text);
+  };
 
   return (
-    <div className="text-xs">
-      <span className={`font-medium ${color}`}>{label}:</span>{' '}
+    <div className="text-sm">
+      <span className={`font-medium ${color}`}>{label}:</span>{" "}
       {editing ? (
-        <textarea value={text} onChange={e => setText(e.target.value)} onBlur={handleBlur} autoFocus
-          className="w-full border border-accent rounded px-1 py-0.5 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-accent text-xs" rows={2} />
+        <input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onBlur={handleBlur}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              handleBlur();
+            }
+            if (e.key === "Escape") {
+              setText(value);
+              setEditing(false);
+            }
+          }}
+          autoFocus
+          className="bg-transparent text-sm text-fg-contrast border-b border-purple-700 focus:outline-none caret-purple-700"
+        />
       ) : (
-        <span onClick={() => onSave && setEditing(true)}
-          className={`text-muted-foreground ${onSave ? 'cursor-pointer hover:bg-accent/5 rounded px-0.5' : ''}`}>
+        <span
+          onClick={() => onSave && setEditing(true)}
+          className={`text-fg-dim ${onSave ? "cursor-pointer hover:text-fg-contrast transition-colors" : ""}`}
+        >
           {value}
         </span>
       )}
     </div>
-  )
-}
-
-/* ── TaskSection (uses Section wrapper) ── */
-
-type ImportSource = 'paste' | 'url' | 'manual' | null
-
-function TaskSection({ task, onEdit, onDetectSchema, onImportFromUrl, onApplyDetectedSchema }: {
-  task: TaskDefinition
-  onEdit?: (field: keyof TaskDefinition, value: string) => void
-  onDetectSchema?: (content: string, contentType: string) => Promise<DetectSchemaResponse>
-  onImportFromUrl?: (url: string) => Promise<ImportFromUrlResponse>
-  onApplyDetectedSchema?: (task: Partial<TaskDefinition>) => void
-}) {
-  const [importSource, setImportSource] = useState<ImportSource>(null)
-  const [importing, setImporting] = useState(false)
-  const [importError, setImportError] = useState<string | null>(null)
-  const [pasteContent, setPasteContent] = useState('')
-  const [urlInput, setUrlInput] = useState('')
-  const [detectedResult, setDetectedResult] = useState<{ input_description: string; sample_input: string } | null>(null)
-
-  const hasContent = task.input_description || task.output_description
-  const canImport = onDetectSchema || onImportFromUrl
-
-  const handleDetectFromPaste = async () => {
-    if (!onDetectSchema || !pasteContent.trim()) return
-    setImporting(true); setImportError(null)
-    try {
-      const result = await onDetectSchema(pasteContent, 'auto')
-      setDetectedResult({ input_description: result.input_description, sample_input: result.sample_input })
-    } catch (err) { setImportError(err instanceof Error ? err.message : 'Failed to detect schema') }
-    finally { setImporting(false) }
-  }
-
-  const handleImportFromUrl = async () => {
-    if (!onImportFromUrl || !urlInput.trim()) return
-    setImporting(true); setImportError(null)
-    try {
-      const result = await onImportFromUrl(urlInput)
-      onApplyDetectedSchema?.(result.task); setImportSource(null); setUrlInput('')
-    } catch (err) { setImportError(err instanceof Error ? err.message : 'Failed to import from URL') }
-    finally { setImporting(false) }
-  }
-
-  const handleApplyDetected = () => {
-    if (detectedResult && onApplyDetectedSchema) {
-      onApplyDetectedSchema({ input_description: detectedResult.input_description, sample_input: detectedResult.sample_input })
-      setImportSource(null); setPasteContent(''); setDetectedResult(null)
-    }
-  }
-
-  const handleCancelImport = () => { setImportSource(null); setPasteContent(''); setUrlInput(''); setDetectedResult(null); setImportError(null) }
-
-  return (
-    <Section
-      title="Task Definition"
-      subtitle="What your app receives and produces"
-      badge={hasContent ? 'defined' : undefined}
-      badgeVariant="success"
-    >
-      <div className="space-y-2">
-        {canImport && !importSource && (
-          <div className="flex items-center gap-2 py-2 border-b border-border mb-2">
-            <span className="text-xs text-muted-foreground">Import from:</span>
-            <button onClick={() => setImportSource('paste')} className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/10 rounded transition-colors">
-              <FileText className="w-3 h-3" /> Paste data
-            </button>
-            <button onClick={() => setImportSource('url')} className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/10 rounded transition-colors">
-              <Link className="w-3 h-3" /> URL
-            </button>
-            <button onClick={() => setImportSource('manual')} className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-accent/10 rounded transition-colors">
-              <Wand2 className="w-3 h-3" /> Describe manually
-            </button>
-          </div>
-        )}
-
-        {importSource === 'paste' && (
-          <div className="p-3 bg-accent/5 rounded-lg border border-accent/20 space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-sm font-medium text-foreground">Paste sample data</span>
-              <button onClick={handleCancelImport} className="text-muted-foreground hover:text-foreground"><X className="w-4 h-4" /></button>
-            </div>
-            <textarea value={pasteContent} onChange={e => setPasteContent(e.target.value)} placeholder="Paste a sample of your input data (JSON, CSV, or plain text)..."
-              className="w-full h-32 border border-border rounded px-3 py-2 bg-background text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-accent font-mono" />
-            {importError && <p className="text-xs text-danger">{importError}</p>}
-            {detectedResult ? (
-              <div className="space-y-2">
-                <p className="text-xs text-muted-foreground">Detected format:</p>
-                <p className="text-sm text-foreground">{detectedResult.input_description}</p>
-                <div className="flex gap-2">
-                  <button onClick={handleApplyDetected} className="px-3 py-1.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90">Apply</button>
-                  <button onClick={() => setDetectedResult(null)} className="px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground">Try again</button>
-                </div>
-              </div>
-            ) : (
-              <button onClick={handleDetectFromPaste} disabled={importing || !pasteContent.trim()}
-                className="flex items-center gap-2 px-3 py-1.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90 disabled:opacity-50">
-                {importing && <Loader2 className="w-3 h-3 animate-spin" />} Detect format
-              </button>
-            )}
-          </div>
-        )}
-
-        {importSource === 'url' && (
-          <div className="p-3 bg-accent/5 rounded-lg border border-accent/20 space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-sm font-medium text-foreground">Import from URL</span>
-              <button onClick={handleCancelImport} className="text-muted-foreground hover:text-foreground"><X className="w-4 h-4" /></button>
-            </div>
-            <input type="url" value={urlInput} onChange={e => setUrlInput(e.target.value)} placeholder="https://api.example.com/schema.json or OpenAPI spec URL..."
-              className="w-full border border-border rounded px-3 py-2 bg-background text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-accent" />
-            <p className="text-xs text-muted-foreground">Supports JSON data, OpenAPI/Swagger specs, or API documentation pages.</p>
-            {importError && <p className="text-xs text-danger">{importError}</p>}
-            <button onClick={handleImportFromUrl} disabled={importing || !urlInput.trim()}
-              className="flex items-center gap-2 px-3 py-1.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90 disabled:opacity-50">
-              {importing && <Loader2 className="w-3 h-3 animate-spin" />} Import
-            </button>
-          </div>
-        )}
-
-        {importSource === 'manual' && (
-          <div className="p-3 bg-accent/5 rounded-lg border border-accent/20 space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-sm font-medium text-foreground">Describe your format</span>
-              <button onClick={handleCancelImport} className="text-muted-foreground hover:text-foreground"><X className="w-4 h-4" /></button>
-            </div>
-            <p className="text-xs text-muted-foreground mb-2">Fill in the fields below to describe what your app receives and produces.</p>
-          </div>
-        )}
-
-        {(importSource === null || importSource === 'manual') && (
-          <>
-            <TaskField label="Input" placeholder="What does your app receive?" value={task.input_description} onSave={v => onEdit?.('input_description', v)} />
-            <TaskField label="Output" placeholder="What does your app produce?" value={task.output_description} onSave={v => onEdit?.('output_description', v)} />
-            <div className="mt-2 pt-2 border-t border-border space-y-2">
-              <TaskField label="Sample input" placeholder="Paste an example..." value={task.sample_input || ''} onSave={v => onEdit?.('sample_input', v)} multiline />
-              <TaskField label="Sample output" placeholder="Paste an example..." value={task.sample_output || ''} onSave={v => onEdit?.('sample_output', v)} multiline />
-            </div>
-          </>
-        )}
-      </div>
-    </Section>
-  )
-}
-
-function TaskField({ label, placeholder, value, onSave, multiline = false }: {
-  label: string; placeholder: string; value: string; onSave?: (value: string) => void; multiline?: boolean
-}) {
-  const [editing, setEditing] = useState(false)
-  const [text, setText] = useState(value)
-  const handleSave = () => { setEditing(false); if (text !== value && onSave) onSave(text) }
-  const handleCancel = () => { setText(value); setEditing(false) }
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSave() }
-    if (e.key === 'Escape') handleCancel()
-  }
-
-  return (
-    <div className="pl-2">
-      <span className="text-xs font-medium text-muted-foreground">{label}:</span>
-      {editing ? (
-        <div className="mt-1">
-          <textarea value={text} onChange={e => setText(e.target.value)} onKeyDown={handleKeyDown} autoFocus placeholder={placeholder}
-            className="w-full border border-accent rounded px-2 py-1 bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-accent text-xs" rows={multiline ? 4 : 2} />
-          <div className="flex gap-1.5 mt-1">
-            <button onClick={handleSave} className="px-2 py-0.5 text-xs bg-accent text-accent-foreground rounded hover:opacity-90">Save</button>
-            <button onClick={handleCancel} className="px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground">Cancel</button>
-            <span className="text-[10px] text-muted-foreground ml-auto self-center">Enter to save · Esc to cancel</span>
-          </div>
-        </div>
-      ) : (
-        <div onClick={() => onSave && setEditing(true)}
-          className={`mt-0.5 text-xs whitespace-pre-wrap ${value ? 'text-foreground/80' : 'text-muted-foreground italic'} ${onSave ? 'cursor-pointer hover:bg-accent/5 rounded px-1 -mx-1 py-0.5' : ''}`}>
-          {value || placeholder}
-        </div>
-      )}
-    </div>
-  )
+  );
 }

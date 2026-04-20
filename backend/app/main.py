@@ -489,6 +489,133 @@ async def get_session_turns(session_id: str):
     return {"turns": turns}
 
 
+def _summarize_turn(turn_type: str, parsed_output: dict | None) -> str | None:
+    """Produce a concrete one-liner about what the agent actually did in this turn."""
+    if not parsed_output:
+        return None
+
+    if turn_type == "generate":
+        coverage = len(parsed_output.get("coverage", {}).get("criteria", []) or [])
+        alignment = len(parsed_output.get("alignment", []) or [])
+        balance = len(parsed_output.get("balance", {}).get("criteria", []) or [])
+        rot = len(parsed_output.get("rot", {}).get("criteria", []) or [])
+        return (
+            f"Drafted charter · {coverage} coverage, {balance} balance, "
+            f"{alignment} alignment, {rot} rot"
+        )
+
+    if turn_type == "validate":
+        overall = parsed_output.get("overall") or "unknown"
+        weak = []
+        for key in ("coverage", "balance", "rot"):
+            if parsed_output.get(key) in ("weak", "fail"):
+                weak.append(key)
+        alignment = parsed_output.get("alignment") or []
+        weak_align = sum(1 for a in alignment if a.get("status") in ("weak", "fail"))
+        if weak_align:
+            weak.append(f"{weak_align} alignment")
+        detail = f"Validated · overall {overall}"
+        if weak:
+            detail += f" · weak: {', '.join(weak)}"
+        return detail
+
+    if turn_type == "suggest":
+        s = parsed_output.get("suggestions") or []
+        stories = parsed_output.get("stories") or []
+        parts = []
+        if s:
+            parts.append(f"{len(s)} criteria")
+        if stories:
+            parts.append(f"{len(stories)} stories")
+        return "Suggested " + ", ".join(parts) if parts else "Generated suggestions"
+
+    if turn_type in ("synthesize", "enrich"):
+        n = parsed_output.get("examples_generated")
+        return f"Generated {n} examples" if n is not None else None
+
+    if turn_type == "review":
+        reviews = parsed_output.get("reviews") or []
+        return f"Reviewed {len(reviews)} examples" if reviews else None
+
+    if turn_type == "generate_scorers":
+        scorers = parsed_output.get("scorers") or []
+        return f"Generated {len(scorers)} scorers" if scorers else None
+
+    if turn_type == "suggest_revisions":
+        revisions = parsed_output.get("revisions") or []
+        return f"Suggested {len(revisions)} revisions" if revisions else None
+
+    if turn_type == "gap_analysis":
+        coverage_gaps = len(parsed_output.get("coverage_gaps") or [])
+        feature_gaps = len(parsed_output.get("feature_area_gaps") or [])
+        balance = len(parsed_output.get("balance_issues") or [])
+        parts = []
+        if coverage_gaps:
+            parts.append(f"{coverage_gaps} coverage")
+        if feature_gaps:
+            parts.append(f"{feature_gaps} feature")
+        if balance:
+            parts.append(f"{balance} balance")
+        if not parts:
+            return "No gaps found"
+        return "Found gaps · " + ", ".join(parts)
+
+    if turn_type == "discovery":
+        goals = len(parsed_output.get("goals") or [])
+        users = len(parsed_output.get("users") or [])
+        stories = len(parsed_output.get("stories") or [])
+        parts = []
+        if goals:
+            parts.append(f"{goals} goals")
+        if users:
+            parts.append(f"{users} users")
+        if stories:
+            parts.append(f"{stories} stories")
+        return "Extracted " + ", ".join(parts) if parts else None
+
+    if turn_type == "detect_schema":
+        fmt = parsed_output.get("detected_format") or "unknown"
+        fields = len(parsed_output.get("fields") or [])
+        return f"Detected schema · {fmt}, {fields} fields"
+
+    if turn_type == "import_from_url":
+        detected = parsed_output.get("detected_type") or "unknown"
+        return f"Imported · {detected}"
+
+    if turn_type == "infer_schema":
+        conf = parsed_output.get("confidence") or "unknown"
+        n = parsed_output.get("example_count")
+        return f"Inferred schema · confidence {conf}" + (f", {n} examples" if n else "")
+
+    return None
+
+
+@app.get("/sessions/{session_id}/activity")
+async def get_session_activity(session_id: str, after: str | None = None):
+    """Activity feed for the Polaris panel — turn_type, timestamp, and a summary detail."""
+    from datetime import datetime
+
+    after_dt = None
+    if after:
+        try:
+            after_dt = datetime.fromisoformat(after.replace("Z", "+00:00"))
+        except ValueError:
+            after_dt = None
+
+    items = await db.get_activity(session_id, after=after_dt)
+    return {
+        "activity": [
+            {
+                "id": item["id"],
+                "created_at": item["created_at"].isoformat(),
+                "turn_type": item["turn_type"],
+                "detail": _summarize_turn(item["turn_type"], item.get("parsed_output")),
+            }
+            for item in items
+        ]
+    }
+
+
 @app.post("/judge/run")
 async def run_judge(session_id: str | None = None, limit: int = 50):
     """Run judge scoring on unjudged turns. Call this manually when you want to evaluate agent quality."""

@@ -393,6 +393,47 @@ async def get_turns(session_id: str) -> list[dict]:
         return [_parse_turn_row(r) for r in rows]
 
 
+async def get_activity(
+    session_id: str,
+    after: datetime | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    """Turn list for the Polaris activity feed: id, created_at, turn_type, parsed_output."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if after is not None:
+            rows = await conn.fetch(
+                """
+                SELECT id, created_at, turn_type, parsed_output
+                FROM turns
+                WHERE session_id = $1 AND created_at > $2
+                ORDER BY created_at ASC
+                LIMIT $3
+                """,
+                session_id, after, limit,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT id, created_at, turn_type, parsed_output
+                FROM turns
+                WHERE session_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2
+                """,
+                session_id, limit,
+            )
+            # Oldest first for consistent ordering on the client
+            rows = list(reversed(rows))
+        results = []
+        for r in rows:
+            d = dict(r)
+            if isinstance(d.get("parsed_output"), str):
+                d["parsed_output"] = json.loads(d["parsed_output"])
+            results.append(d)
+        return results
+
+
 async def get_unjudged_turns(session_id: str | None = None) -> list[dict]:
     pool = await get_pool()
     async with pool.acquire() as conn:

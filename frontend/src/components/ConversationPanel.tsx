@@ -1,10 +1,14 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { Send } from 'lucide-react'
+import { Send, ChevronDown, ChevronRight } from 'lucide-react'
 import type { Message, AgentStatus, Validation } from '../types'
+import { StarIcon } from './ui/Icons'
 
 type Phase = 'goals' | 'users' | 'stories' | 'charter' | 'dataset'
 type ExtractedStory = { who: string; what: string; why: string }
 import SoftOkBanner from './SoftOkBanner'
+
+const USER_MESSAGE_COLLAPSE_LINES = 5
+const USER_MESSAGE_COLLAPSE_CHARS = 280
 
 const STATUS_SEQUENCES: Record<string, string[]> = {
   init: ['Initializing...'],
@@ -172,11 +176,7 @@ export default function ConversationPanel({
   }, [])
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="px-4 h-12 border-b border-border bg-surface-raised flex items-center">
-        <h2 className="text-sm font-semibold text-foreground">Agent</h2>
-      </div>
-
+    <div className="flex flex-col h-full min-h-0">
       {/* Messages */}
       <div
         ref={messagesAreaRef}
@@ -189,26 +189,37 @@ export default function ConversationPanel({
           </p>
         )}
 
-        {messages.map((msg, i) => (
-          <div
-            key={i}
-            className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-          >
-            <div
-              className={`max-w-[85%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed ${
-                msg.role === 'user'
-                  ? 'bg-accent text-accent-foreground'
-                  : 'bg-muted text-foreground'
-              }`}
-            >
-              {formatMessage(msg.content, handleQuestionClick)}
+        {messages.map((msg, i) => {
+          if (msg.kind === 'hint') {
+            return (
+              <HintPill
+                key={msg.id ?? i}
+                content={msg.content}
+                detail={msg.detail ?? null}
+              />
+            )
+          }
+          if (msg.role === 'user') {
+            return (
+              <CollapsibleUserMessage
+                key={i}
+                content={msg.content}
+                onQuestionClick={handleQuestionClick}
+              />
+            )
+          }
+          return (
+            <div key={i} className="flex justify-start">
+              <div className="max-w-[85%] px-3.5 py-2.5 text-sm leading-relaxed bg-muted text-foreground">
+                {formatMessage(msg.content, handleQuestionClick)}
+              </div>
             </div>
-          </div>
-        ))}
+          )
+        })}
 
         {loading && (
           <div className="flex justify-start">
-            <div className="bg-muted px-4 py-2.5 rounded-2xl flex items-center gap-2">
+            <div className="bg-muted px-4 py-2.5 flex items-center gap-2">
               <span className="text-sm italic text-muted-foreground">
                 {statusSequence[statusIndex]}
               </span>
@@ -227,7 +238,7 @@ export default function ConversationPanel({
       {/* Context menu */}
       {contextMenu && (
         <div
-          className="fixed z-50 bg-surface-raised border border-border rounded-lg shadow-lg py-1"
+          className="fixed z-50 bg-surface-raised border border-border shadow-lg py-1"
           style={{ left: contextMenu.x, top: contextMenu.y - 40 }}
           onClick={e => e.stopPropagation()}
         >
@@ -257,7 +268,7 @@ export default function ConversationPanel({
               <button
                 key={i}
                 onClick={() => onAcceptSuggestedGoal?.(goal)}
-                className="px-3 py-1.5 text-xs bg-accent/10 text-accent rounded-full hover:bg-accent/20 transition-colors text-left"
+                className="px-3 py-1.5 text-xs bg-accent/10 text-accent hover:bg-accent/20 transition-colors text-left"
               >
                 + {goal}
               </button>
@@ -274,7 +285,7 @@ export default function ConversationPanel({
               <button
                 key={i}
                 onClick={() => onAcceptSuggestedUser?.(user)}
-                className="px-3 py-1.5 text-xs bg-accent/10 text-accent rounded-full hover:bg-accent/20 transition-colors text-left"
+                className="px-3 py-1.5 text-xs bg-accent/10 text-accent hover:bg-accent/20 transition-colors text-left"
               >
                 + {user}
               </button>
@@ -291,7 +302,7 @@ export default function ConversationPanel({
               <button
                 key={i}
                 onClick={() => onAcceptSuggestedStory?.(story)}
-                className="px-3 py-1.5 text-xs bg-accent/10 text-accent rounded-full hover:bg-accent/20 transition-colors text-left"
+                className="px-3 py-1.5 text-xs bg-accent/10 text-accent hover:bg-accent/20 transition-colors text-left"
               >
                 + {story.who}: {story.what}
               </button>
@@ -311,7 +322,7 @@ export default function ConversationPanel({
               <button
                 key={i}
                 onClick={() => onActionSuggestion?.(suggestion.action)}
-                className="px-2.5 py-1.5 text-xs bg-accent/10 text-accent rounded-lg hover:bg-accent/20 transition-colors text-left"
+                className="px-2.5 py-1.5 text-xs bg-accent/10 text-accent hover:bg-accent/20 transition-colors text-left"
                 title={suggestion.reason}
               >
                 {suggestion.label}
@@ -330,12 +341,12 @@ export default function ConversationPanel({
             value={input}
             onChange={e => setInput(e.target.value)}
             placeholder={placeholder}
-            className="flex-1 px-3 py-2 border border-border rounded-lg text-sm bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-accent"
+            className="flex-1 px-3 py-2 border border-border text-sm bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-accent"
           />
           <button
             type="submit"
             disabled={!input.trim()}
-            className="p-2 bg-accent text-accent-foreground rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
+            className="p-2 bg-accent text-accent-foreground hover:opacity-90 disabled:opacity-50 transition-opacity"
           >
             <Send className="w-4 h-4" />
           </button>
@@ -347,6 +358,79 @@ export default function ConversationPanel({
           >
             Proceed to review
           </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function HintPill({ content, detail }: { content: string; detail: string | null }) {
+  return (
+    <div className="flex justify-start py-0.5">
+      <div className="inline-flex items-start gap-1.5 px-2.5 py-1 rounded-md bg-muted/40 border border-border-hint/60 max-w-full">
+        <StarIcon className="shrink-0 text-muted-foreground/70 mt-0.5" width={11} height={11} />
+        <div className="min-w-0 flex flex-col gap-0.5">
+          <span className="text-[11px] text-muted-foreground">
+            {content}
+          </span>
+          {detail && (
+            <span className="text-[11px] text-foreground/80 font-mono break-words">
+              {detail}
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function CollapsibleUserMessage({
+  content,
+  onQuestionClick,
+}: {
+  content: string
+  onQuestionClick: (section: string, question: string) => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const lines = content.split('\n')
+  const isLong =
+    content.length > USER_MESSAGE_COLLAPSE_CHARS ||
+    lines.length > USER_MESSAGE_COLLAPSE_LINES
+
+  if (!isLong) {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[85%] px-3.5 py-2.5 text-sm leading-relaxed bg-accent text-accent-foreground">
+          {formatMessage(content, onQuestionClick)}
+        </div>
+      </div>
+    )
+  }
+
+  const firstLine = lines[0].trim()
+  const summary = firstLine.length > 100 ? firstLine.slice(0, 100) + '…' : firstLine
+
+  return (
+    <div className="flex justify-end">
+      <div className="max-w-[85%] text-sm leading-relaxed bg-accent text-accent-foreground overflow-hidden">
+        <button
+          onClick={() => setExpanded(e => !e)}
+          className="w-full flex items-center gap-1.5 px-3.5 py-2 text-left hover:bg-black/10 transition-colors"
+          title={expanded ? 'Collapse' : 'Expand'}
+        >
+          {expanded ? (
+            <ChevronDown className="w-3.5 h-3.5 shrink-0 opacity-70" />
+          ) : (
+            <ChevronRight className="w-3.5 h-3.5 shrink-0 opacity-70" />
+          )}
+          <span className={expanded ? 'font-medium' : 'opacity-90 truncate'}>
+            {expanded ? 'Your message' : summary}
+          </span>
+        </button>
+        {expanded && (
+          <div className="px-3.5 pb-2.5 pt-0.5">
+            {formatMessage(content, onQuestionClick)}
+          </div>
         )}
       </div>
     </div>
@@ -410,7 +494,7 @@ function formatMessage(content: string, onQuestionClick?: (section: string, ques
             <div key={bi} className="space-y-1">
               <button
                 onClick={() => onQuestionClick?.(block.section!, block.question!)}
-                className="text-left w-full hover:bg-accent/10 rounded px-1 -mx-1 transition-colors"
+                className="text-left w-full hover:bg-accent/10 px-1 -mx-1 transition-colors"
               >
                 <span className="font-semibold text-foreground">{block.section}</span>
                 <p className="text-foreground/80">{block.question}</p>
@@ -454,7 +538,7 @@ function formatInline(text: string): React.ReactNode {
       parts.push(
         <span
           key={match.index}
-          className="inline-block px-1.5 py-0.5 mr-0.5 text-xs bg-accent/10 text-accent rounded font-medium"
+          className="inline-block px-1.5 py-0.5 mr-0.5 text-xs bg-accent/10 text-accent font-medium"
         >
           {match[1]}
         </span>

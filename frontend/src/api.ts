@@ -1,4 +1,4 @@
-import type { CreateSessionResponse, SendMessageResponse, SessionState, Charter, Dataset, Example, GapAnalysis, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse, ProjectSummary, StoryGroup, ScorerDef } from './types'
+import type { ActivityEvent, CreateSessionResponse, SendMessageResponse, SessionState, Charter, Dataset, Example, GapAnalysis, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse, ProjectSummary, StoryGroup, ScorerDef } from './types'
 
 const BASE = import.meta.env.VITE_API_URL || '/api'
 
@@ -160,6 +160,18 @@ export async function getSession(
 ): Promise<{ session_id: string; state: SessionState; conversation: Array<{ role: string; content: string }> }> {
   const res = await apiFetch(`${BASE}/sessions/${sessionId}`)
   if (!res.ok) throw new Error(`Failed to get session: ${res.status}`)
+  return res.json()
+}
+
+export async function getActivity(
+  sessionId: string,
+  after?: string
+): Promise<{ activity: ActivityEvent[] }> {
+  const url = after
+    ? `${BASE}/sessions/${sessionId}/activity?after=${encodeURIComponent(after)}`
+    : `${BASE}/sessions/${sessionId}/activity`
+  const res = await apiFetch(url)
+  if (!res.ok) throw new Error(`Failed to get activity: ${res.status}`)
   return res.json()
 }
 
