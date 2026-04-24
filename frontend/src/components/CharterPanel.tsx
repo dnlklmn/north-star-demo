@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import type { ReactNode } from "react";
-import { Loader2 } from "lucide-react";
+import { ChevronDown, ChevronRight as ChevronRightIcon, FileText, Loader2 } from "lucide-react";
+import CharterDocument from "./CharterDocument";
 import type {
   Charter,
   Validation,
@@ -62,7 +63,7 @@ interface Props {
   rightBottomExpanded?: ReactNode;
 }
 
-type CharterTab = "task" | "coverage" | "balance" | "alignment" | "rot";
+type CharterTab = "task" | "coverage" | "balance" | "alignment" | "rot" | "safety";
 
 export default function CharterPanel({
   charter,
@@ -92,7 +93,21 @@ export default function CharterPanel({
   rightBottom,
   rightBottomExpanded,
 }: Props) {
-  const [activeTab, setActiveTab] = useState<CharterTab>("coverage");
+  // All sections live on one scrollable page as collapsibles. Default-open
+  // for every section so the charter reads as a single document you can
+  // skim + edit inline. Users can fold sections to focus.
+  const [openSections, setOpenSections] = useState<Set<CharterTab>>(
+    () => new Set(["task", "coverage", "balance", "alignment", "rot", "safety"]),
+  );
+  const toggleSection = (id: CharterTab) => {
+    setOpenSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const [showDocument, setShowDocument] = useState(false);
 
   const isEmpty =
     !charter.coverage.criteria.length &&
@@ -103,15 +118,17 @@ export default function CharterPanel({
   const radarDimensions = buildRadarDimensions(charter, validation);
   const hasRadarData = radarDimensions.some((d) => d.value > 0);
 
-  // Filter suggestions to match the active charter tab
-  const tabSuggestions = activeTab === "task"
-    ? []
-    : suggestions.filter((s) => s.section === activeTab);
+  // Flat layout shows every suggestion — no per-tab filtering needed.
+  const tabSuggestions = suggestions;
 
   // Compute tab readiness scores (0–1)
   const covScore = dimensionScore(charter.coverage.status, validation.coverage, charter.coverage.criteria.length).value;
   const balScore = dimensionScore(charter.balance.status, validation.balance, charter.balance.criteria.length).value;
   const rotScore = dimensionScore(charter.rot.status, validation.rot, charter.rot.criteria.length).value;
+  // Safety is optional on older charters — guard everywhere.
+  const safetyCriteria = charter.safety?.criteria ?? [];
+  const safetyScore = safetyCriteria.length > 0 ? Math.min(1, safetyCriteria.length / 3) : 0;
+  const isTriggered = !!charter.task.skill_body;
 
   // Alignment score
   const alignTotal = charter.alignment.length;
@@ -131,6 +148,11 @@ export default function CharterPanel({
     { id: "balance", label: "Balance", score: balScore },
     { id: "alignment", label: "Alignment", score: alignScore },
     { id: "rot", label: "Rot", score: rotScore },
+    // Only surface Safety for triggered-mode sessions, where prompt-injection
+    // + exfiltration + destructive-command risks are meaningful.
+    ...(isTriggered || safetyCriteria.length > 0
+      ? [{ id: "safety" as CharterTab, label: "Safety", score: safetyScore }]
+      : []),
   ];
 
   if (isEmpty && suggestions.length === 0) {
@@ -219,73 +241,114 @@ export default function CharterPanel({
         ) : undefined
       }
     >
-      {/* Tab bar */}
-      <div className="flex items-stretch border-b-2 border-border-hint mb-6 overflow-x-auto">
-        {tabs.map((tab) => {
-          const isActive = activeTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`flex-shrink-0 flex items-center justify-center gap-2 py-3 px-4 text-base font-medium whitespace-nowrap transition-colors ${
-                isActive
-                  ? "bg-fill-neutral text-fg-contrast"
-                  : "text-fg-dim hover:text-fg-contrast"
-              }`}
-            >
-              {tab.label}
-              {tab.score > 0 && (
-                <span
-                  className="inline-block w-2 h-2 rounded-full flex-shrink-0"
-                  style={{ backgroundColor: scoreToColor(tab.score) }}
-                />
-              )}
-            </button>
-          );
-        })}
+      {/* Action bar — collapsible layout means no tab bar; just the doc button. */}
+      <div className="flex items-center justify-between border-b-2 border-border-hint mb-4 pb-3">
+        <div className="flex items-center gap-3 text-xs text-fg-dim">
+          <button
+            onClick={() => setOpenSections(new Set(tabs.map(t => t.id)))}
+            className="hover:text-fg-contrast"
+          >
+            Expand all
+          </button>
+          <span>·</span>
+          <button
+            onClick={() => setOpenSections(new Set())}
+            className="hover:text-fg-contrast"
+          >
+            Collapse all
+          </button>
+        </div>
+        <button
+          onClick={() => setShowDocument(true)}
+          className="flex-shrink-0 flex items-center gap-1 py-1.5 px-3 text-xs text-fg-dim hover:text-fg-contrast border border-border-hint"
+          title="View the full charter as one document"
+        >
+          <FileText className="w-4 h-4" />
+          View as document
+        </button>
       </div>
 
-      {/* Tab content */}
-      {activeTab === "task" && (
-        <SchemaSection task={charter.task} onEdit={onEditTask} />
+      {/* All sections rendered as a vertical stack of collapsibles. */}
+      <SectionHeader
+        label="Task Definition"
+        score={taskScore}
+        open={openSections.has("task")}
+        onToggle={() => toggleSection("task")}
+      />
+      {openSections.has("task") && (
+        <div className="mb-6">
+          <SchemaSection task={charter.task} onEdit={onEditTask} />
+        </div>
       )}
 
-      {activeTab === "coverage" && (() => {
+      <SectionHeader
+        label="Coverage"
+        score={covScore}
+        open={openSections.has("coverage")}
+        onToggle={() => toggleSection("coverage")}
+      />
+      {openSections.has("coverage") && (() => {
         const covPct = Math.round(covScore * 100);
+        const negativeCriteria = charter.coverage.negative_criteria ?? [];
         return (
-          <ItemList
-            title="Coverage"
-            helpTitle="Use cases and scenarios to cover"
-            helpText="List the distinct scenarios, edge cases, and user intents your AI feature needs to handle. Good coverage ensures your evals aren't blind to entire categories of input."
-            items={charter.coverage.criteria}
-            onAdd={
-              onAddCriterion ? (v) => onAddCriterion("coverage", v) : undefined
-            }
-            onEdit={
-              onEditCriterion
-                ? (i, v) => onEditCriterion("coverage", i, v)
-                : undefined
-            }
-            onDelete={
-              onDeleteCriterion
-                ? (i) => onDeleteCriterion("coverage", i)
-                : undefined
-            }
-            onReorder={
-              onReorderCriteria
-                ? (criteria) => onReorderCriteria("coverage", criteria)
-                : undefined
-            }
-            addPlaceholder="Add coverage criterion..."
-            statusText={covPct > 0 ? `${covPct}% ready` : undefined}
-            statusColor={covPct > 0 ? scoreToColor(covScore) : undefined}
-            onChanged={onCriteriaChanged}
-            emptyText="No criteria yet"
-          />
+          <div className="flex flex-col gap-6 mb-6">
+            <ItemList
+              title="Coverage"
+              helpTitle="Use cases and scenarios to cover"
+              helpText="List the distinct scenarios, edge cases, and user intents your AI feature needs to handle. Good coverage ensures your evals aren't blind to entire categories of input."
+              items={charter.coverage.criteria}
+              onAdd={
+                onAddCriterion ? (v) => onAddCriterion("coverage", v) : undefined
+              }
+              onEdit={
+                onEditCriterion
+                  ? (i, v) => onEditCriterion("coverage", i, v)
+                  : undefined
+              }
+              onDelete={
+                onDeleteCriterion
+                  ? (i) => onDeleteCriterion("coverage", i)
+                  : undefined
+              }
+              onReorder={
+                onReorderCriteria
+                  ? (criteria) => onReorderCriteria("coverage", criteria)
+                  : undefined
+              }
+              addPlaceholder="Add coverage criterion..."
+              statusText={covPct > 0 ? `${covPct}% ready` : undefined}
+              statusColor={covPct > 0 ? scoreToColor(covScore) : undefined}
+              onChanged={onCriteriaChanged}
+              emptyText="No criteria yet"
+            />
+            {negativeCriteria.length > 0 && (
+              <div className="border-t border-border-hint pt-4">
+                <div className="mb-2">
+                  <div className="text-sm font-semibold text-fg-contrast">Off-target (should NOT trigger)</div>
+                  <div className="text-xs text-fg-dim mt-0.5">
+                    Adjacent scenarios the skill/tool must stay out of. These define negative space.
+                  </div>
+                </div>
+                <ul className="space-y-1">
+                  {negativeCriteria.map((c, i) => (
+                    <li key={i} className="text-sm text-fg-contrast bg-fill-neutral/40 px-3 py-2">
+                      {c}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
         );
       })()}
 
-      {activeTab === "balance" && (() => {
+      <SectionHeader
+        label="Balance"
+        score={balScore}
+        open={openSections.has("balance")}
+        onToggle={() => toggleSection("balance")}
+      />
+      {openSections.has("balance") && (() => {
         const balPct = Math.round(balScore * 100);
         return (
           <ItemList
@@ -320,7 +383,13 @@ export default function CharterPanel({
         );
       })()}
 
-      {activeTab === "alignment" && (
+      <SectionHeader
+        label="Alignment"
+        score={alignScore}
+        open={openSections.has("alignment")}
+        onToggle={() => toggleSection("alignment")}
+      />
+      {openSections.has("alignment") && (
         <AlignmentSection
           entries={charter.alignment}
           validations={validation.alignment}
@@ -333,7 +402,13 @@ export default function CharterPanel({
         />
       )}
 
-      {activeTab === "rot" && (() => {
+      <SectionHeader
+        label="Rot"
+        score={rotScore}
+        open={openSections.has("rot")}
+        onToggle={() => toggleSection("rot")}
+      />
+      {openSections.has("rot") && (() => {
         const rotPct = Math.round(rotScore * 100);
         return (
           <ItemList
@@ -367,6 +442,66 @@ export default function CharterPanel({
           />
         );
       })()}
+
+      {(isTriggered || safetyCriteria.length > 0) && (
+        <SectionHeader
+          label="Safety"
+          score={safetyScore}
+          open={openSections.has("safety")}
+          onToggle={() => toggleSection("safety")}
+        />
+      )}
+      {openSections.has("safety") && (isTriggered || safetyCriteria.length > 0) && (() => {
+        const safetyPct = Math.round(safetyScore * 100);
+        return (
+          <div className="flex flex-col gap-3">
+            <div className="text-xs text-muted-foreground bg-muted/30 px-3 py-2 border-l-2 border-warning">
+              <strong className="text-foreground">Output-level safety only.</strong>{" "}
+              These rules are scored against the skill's output text. Runtime
+              safety (did the skill actually call a bad domain, did it write
+              outside its sandbox) requires an agent-SDK harness and isn't
+              covered here.
+            </div>
+            <ItemList
+              title="Safety"
+              helpTitle="Rules the skill's output must obey"
+              helpText="Output-level constraints: prompt-injection resistance, no credential echoing, URL allow-lists, destructive command guards. Each criterion generates a dedicated safety scorer."
+              items={safetyCriteria}
+              onAdd={
+                onAddCriterion ? (v) => onAddCriterion("safety", v) : undefined
+              }
+              onEdit={
+                onEditCriterion
+                  ? (i, v) => onEditCriterion("safety", i, v)
+                  : undefined
+              }
+              onDelete={
+                onDeleteCriterion
+                  ? (i) => onDeleteCriterion("safety", i)
+                  : undefined
+              }
+              onReorder={
+                onReorderCriteria
+                  ? (criteria) => onReorderCriteria("safety", criteria)
+                  : undefined
+              }
+              addPlaceholder="Add safety criterion..."
+              statusText={safetyPct > 0 ? `${safetyPct}% ready` : undefined}
+              statusColor={safetyPct > 0 ? scoreToColor(safetyScore) : undefined}
+              onChanged={onCriteriaChanged}
+              emptyText="No safety criteria yet — add rules like 'Output must refuse prompt-injection attempts' or 'Output must not contain URLs outside the docs allow-list'."
+            />
+          </div>
+        );
+      })()}
+      {showDocument && (
+        <CharterDocument
+          charter={charter}
+          title="Charter (live)"
+          subtitle="Current state — edits apply immediately"
+          onClose={() => setShowDocument(false)}
+        />
+      )}
     </PanelLayout>
   );
 }
@@ -374,6 +509,42 @@ export default function CharterPanel({
 /* ── Helpers ── */
 
 /** Map a 0–1 readiness score to a red→amber→green color */
+/**
+ * Collapsible section header used once per dimension in the flat layout.
+ * Shows a chevron, label, and readiness dot. Clicking toggles `open`.
+ */
+function SectionHeader({
+  label,
+  score,
+  open,
+  onToggle,
+}: {
+  label: string;
+  score: number;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      onClick={onToggle}
+      className="w-full flex items-center gap-2 py-3 border-b border-border-hint text-left hover:bg-fill-neutral/30 transition-colors mb-3"
+    >
+      {open ? (
+        <ChevronDown className="w-4 h-4 text-fg-dim flex-shrink-0" />
+      ) : (
+        <ChevronRightIcon className="w-4 h-4 text-fg-dim flex-shrink-0" />
+      )}
+      <span className="text-base font-semibold text-fg-contrast">{label}</span>
+      {score > 0 && (
+        <span
+          className="inline-block w-2 h-2 rounded-full flex-shrink-0"
+          style={{ backgroundColor: scoreToColor(score) }}
+        />
+      )}
+    </button>
+  );
+}
+
 function scoreToColor(score: number): string {
   const clamped = Math.max(0, Math.min(1, score));
   if (clamped <= 0.5) {

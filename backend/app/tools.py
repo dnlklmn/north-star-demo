@@ -190,15 +190,23 @@ async def call_generate_draft(state: SessionState) -> tuple[Charter, list[dict]]
     charter_data = _extract_json(text)
 
     task_data = charter_data.get("task", {})
+    # Preserve skill metadata from the existing state — the generation prompt doesn't re-emit it.
+    existing_task = state.charter.task
+    coverage_data = charter_data.get("coverage", {})
+    safety_data = charter_data.get("safety", {}) or {}
     charter = Charter(
         task=TaskDefinition(
             input_description=task_data.get("input_description", ""),
             output_description=task_data.get("output_description", ""),
             sample_input=task_data.get("sample_input"),
             sample_output=task_data.get("sample_output"),
+            skill_name=existing_task.skill_name,
+            skill_description=existing_task.skill_description,
+            skill_body=existing_task.skill_body,
         ),
         coverage=DimensionCriteria(
-            criteria=charter_data.get("coverage", {}).get("criteria", []),
+            criteria=coverage_data.get("criteria", []),
+            negative_criteria=coverage_data.get("negative_criteria", []) or [],
             status=DimensionStatus.pending,
         ),
         balance=DimensionCriteria(
@@ -216,6 +224,10 @@ async def call_generate_draft(state: SessionState) -> tuple[Charter, list[dict]]
         ],
         rot=DimensionCriteria(
             criteria=charter_data.get("rot", {}).get("criteria", []),
+            status=DimensionStatus.pending,
+        ),
+        safety=DimensionCriteria(
+            criteria=safety_data.get("criteria", []) or [],
             status=DimensionStatus.pending,
         ),
     )
@@ -276,7 +288,7 @@ async def call_generate_suggestions(state: SessionState) -> tuple[tuple[list[Sug
         SuggestedStory(who=s["who"], what=s["what"], why=s.get("why", ""))
         for s in data.get("user_stories", [])
     ]
-    return (suggestions, suggested_stories), [meta]
+    return (_dedupe_suggestions(suggestions), _dedupe_stories(suggested_stories)), [meta]
 
 
 async def call_suggest_goals(goals: list[str]) -> tuple[list[str], list[dict]]:
@@ -407,6 +419,42 @@ async def call_import_from_url(content: str, url: str, detected_type: str) -> tu
     return data, [meta]
 
 
+async def call_suggest_improvements(
+    skill_body: str,
+    eval_run: dict,
+    charter: dict,
+) -> tuple[dict, list[dict]]:
+    """Analyze eval failures + current SKILL.md, propose targeted edits.
+
+    Returns dict with keys: summary, suggestions (list).
+    """
+    from .prompt import build_suggest_improvements_prompt
+    await _refresh_settings()
+    prompt = build_suggest_improvements_prompt(skill_body, eval_run, charter)
+    text, meta = _call_llm(prompt, max_tokens=4096)
+    data = _extract_json(text)
+    return data, [meta]
+
+
+async def call_skill_seed(
+    skill_body: str,
+    skill_name: str | None,
+    skill_description: str | None,
+) -> tuple[dict, list[dict]]:
+    """Seed goals/users/stories/task from a SKILL.md body.
+
+    Returns a dict with keys: goals, users, positive_stories, off_target_stories,
+    task, summary. Used in triggered mode to bootstrap a session from the skill
+    the user wants to evaluate.
+    """
+    from .prompt import build_skill_seed_prompt
+    await _refresh_settings()
+    prompt = build_skill_seed_prompt(skill_body, skill_name, skill_description)
+    text, meta = _call_llm(prompt, max_tokens=4096)
+    data = _extract_json(text)
+    return data, [meta]
+
+
 # --- Response parsing helpers ---
 
 def parse_charter_update(text: str) -> tuple[dict | None, str]:
@@ -425,6 +473,38 @@ def parse_charter_update(text: str) -> tuple[dict | None, str]:
     except (ValueError, json.JSONDecodeError) as e:
         logger.warning(f"Failed to parse charter update: {e}")
         return None, text
+
+
+def _dedupe_suggestions(items: list[Suggestion]) -> list[Suggestion]:
+    """Collapse near-duplicate suggestions within a batch.
+
+    Key = (section, first 40 chars of lowercased/whitespace-collapsed text).
+    The LLM sometimes emits 3 variants of the same idea with trivial rewording
+    ('fires' vs 'activates' vs 'triggers') — this catches those before they
+    reach the UI."""
+    seen: set[tuple[str, str]] = set()
+    result: list[Suggestion] = []
+    for s in items:
+        normalized = " ".join((s.text or "").lower().split())[:40]
+        key = (s.section, normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(s)
+    return result
+
+
+def _dedupe_stories(items: list[SuggestedStory]) -> list[SuggestedStory]:
+    seen: set[tuple[str, str]] = set()
+    result: list[SuggestedStory] = []
+    for s in items:
+        normalized = " ".join((s.what or "").lower().split())[:40]
+        key = ((s.who or "").lower(), normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(s)
+    return result
 
 
 def parse_suggestions(text: str) -> tuple[list[Suggestion], list[SuggestedStory], str]:
@@ -453,7 +533,7 @@ def parse_suggestions(text: str) -> tuple[list[Suggestion], list[SuggestedStory]
             for s in sug_data.get("user_stories", [])
         ]
         remaining = text[:text.index("```suggestions")] + text[end + 3:]
-        return suggestions, stories, remaining
+        return _dedupe_suggestions(suggestions), _dedupe_stories(stories), remaining
     except (ValueError, json.JSONDecodeError) as e:
         logger.warning(f"Failed to parse suggestions: {e}")
         return [], [], text

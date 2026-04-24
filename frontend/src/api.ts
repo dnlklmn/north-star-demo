@@ -1,4 +1,4 @@
-import type { ActivityEvent, CreateSessionResponse, SendMessageResponse, SessionState, Charter, Dataset, Example, GapAnalysis, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse, ProjectSummary, StoryGroup, ScorerDef } from './types'
+import type { ActivityEvent, CreateSessionResponse, CreateSkillVersionRequest, EvalMode, EvalRunSummary, RunEvalRequest, SendMessageResponse, SessionState, SkillVersion, SuggestImprovementsResponse, Charter, Dataset, Example, GapAnalysis, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse, ProjectSummary, StoryGroup, ScorerDef } from './types'
 
 const BASE = import.meta.env.VITE_API_URL || '/api'
 
@@ -20,6 +20,27 @@ export function setApiKey(key: string): void {
 
 export function hasApiKey(): boolean {
   return !!getApiKey()
+}
+
+// Braintrust API key — stored separately from Anthropic. Only sent on eval-run
+// requests. Lives in localStorage so runs survive page reloads.
+
+const BRAINTRUST_KEY_STORAGE_KEY = 'northstar_braintrust_api_key'
+
+export function getBraintrustApiKey(): string {
+  return localStorage.getItem(BRAINTRUST_KEY_STORAGE_KEY) || ''
+}
+
+export function setBraintrustApiKey(key: string): void {
+  if (key.trim()) {
+    localStorage.setItem(BRAINTRUST_KEY_STORAGE_KEY, key.trim())
+  } else {
+    localStorage.removeItem(BRAINTRUST_KEY_STORAGE_KEY)
+  }
+}
+
+export function hasBraintrustApiKey(): boolean {
+  return !!getBraintrustApiKey()
 }
 
 // --- Fetch wrapper that attaches API key header ---
@@ -172,6 +193,140 @@ export async function getActivity(
     : `${BASE}/sessions/${sessionId}/activity`
   const res = await apiFetch(url)
   if (!res.ok) throw new Error(`Failed to get activity: ${res.status}`)
+  return res.json()
+}
+
+export async function setSessionMode(
+  sessionId: string,
+  mode: EvalMode
+): Promise<{ eval_mode: EvalMode; state: SessionState }> {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/mode`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ eval_mode: mode }),
+  })
+  if (!res.ok) throw new Error(`Failed to set mode: ${res.status}`)
+  return res.json()
+}
+
+export async function seedFromSkill(
+  sessionId: string,
+  body: { skill_body: string; skill_name?: string; skill_description?: string }
+): Promise<{ state: SessionState; message: string }> {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/skill-seed`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(`Failed to seed from skill: ${res.status}`)
+  return res.json()
+}
+
+export async function runEval(
+  sessionId: string,
+  req: RunEvalRequest
+): Promise<EvalRunSummary> {
+  const braintrustKey = getBraintrustApiKey()
+  if (!braintrustKey) {
+    throw new Error('Braintrust API key required. Add it in the Evaluations tab.')
+  }
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/run-eval`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Braintrust-Key': braintrustKey,
+    },
+    body: JSON.stringify(req),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(text || `Failed to start eval run: ${res.status}`)
+  }
+  return res.json()
+}
+
+export async function getEvalRun(
+  sessionId: string,
+  runId: string
+): Promise<EvalRunSummary> {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/eval-runs/${runId}`)
+  if (!res.ok) throw new Error(`Failed to fetch eval run: ${res.status}`)
+  return res.json()
+}
+
+export async function listEvalRuns(
+  sessionId: string
+): Promise<EvalRunSummary[]> {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/eval-runs`)
+  if (!res.ok) throw new Error(`Failed to list eval runs: ${res.status}`)
+  return res.json()
+}
+
+// --- Skill versioning + improvement suggestions ---
+
+export async function listSkillVersions(sessionId: string): Promise<SkillVersion[]> {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/skill-versions`)
+  if (!res.ok) throw new Error(`Failed to list skill versions: ${res.status}`)
+  return res.json()
+}
+
+export async function createSkillVersion(
+  sessionId: string,
+  req: CreateSkillVersionRequest
+): Promise<SkillVersion> {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/skill-versions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(text || `Failed to create skill version: ${res.status}`)
+  }
+  return res.json()
+}
+
+export async function restoreSkillVersion(
+  sessionId: string,
+  versionId: string
+): Promise<SkillVersion> {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/skill-versions/restore`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ version_id: versionId }),
+  })
+  if (!res.ok) throw new Error(`Failed to restore skill version: ${res.status}`)
+  return res.json()
+}
+
+export async function suggestImprovements(
+  sessionId: string,
+  runId: string
+): Promise<SuggestImprovementsResponse> {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/suggest-improvements`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ run_id: runId }),
+  })
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(text || `Failed to suggest improvements: ${res.status}`)
+  }
+  return res.json()
+}
+
+export async function exportForSkillCreator(
+  datasetId: string
+): Promise<{
+  dataset_id: string
+  session_id: string
+  skill_name: string | null
+  skill_description: string | null
+  rows: Array<{ prompt: string; should_trigger: boolean; tags: string[]; notes: string | null }>
+  counts: { total: number; should_trigger: number; should_not_trigger: number }
+}> {
+  const res = await apiFetch(`${BASE}/datasets/${datasetId}/export/skill-creator`)
+  if (!res.ok) throw new Error(`Failed to export for skill-creator: ${res.status}`)
   return res.json()
 }
 

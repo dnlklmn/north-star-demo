@@ -1,6 +1,6 @@
 import { useRef, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight, Loader2, Sparkles } from "lucide-react";
 import { ReturnKeyIcon, CmdReturnIcon } from "./ui/Icons";
 import type { StoryGroup, SuggestedStory } from "../types";
 import PanelLayout from "./PanelLayout";
@@ -29,6 +29,16 @@ interface Props {
   rightBottom?: ReactNode;
   /** When set, expands bottom section to fill and caps Suggestions height. */
   rightBottomExpanded?: ReactNode;
+
+  // Shortcuts — skip directly to dataset / scorers / both. Each ensures
+  // the charter exists first (regenerates if needed). Async so the panel
+  // can show a spinner while the downstream work runs in the background.
+  onGenerateDataset?: () => Promise<void>;
+  onGenerateScorers?: () => Promise<void>;
+  onGenerateBoth?: () => Promise<void>;
+  generatingDataset?: boolean;
+  generatingScorers?: boolean;
+  generatingBoth?: boolean;
 }
 
 export default function UsersPanel({
@@ -48,6 +58,12 @@ export default function UsersPanel({
   hasCharter,
   rightBottom,
   rightBottomExpanded,
+  onGenerateDataset,
+  onGenerateScorers,
+  onGenerateBoth,
+  generatingDataset,
+  generatingScorers,
+  generatingBoth,
 }: Props) {
   // Track which roles have been committed (Enter pressed)
   const [committedRoles, setCommittedRoles] = useState<Set<number>>(new Set());
@@ -443,15 +459,68 @@ export default function UsersPanel({
         </SuggestionBox>
       }
       footer={
-        <Button
-          size="big"
-          variant={nextVariant}
-          shortcut={<CmdReturnIcon />}
-          onClick={onNext}
-          disabled={nextDisabled}
-        >
-          {loading ? "Generating..." : nextLabel}
-        </Button>
+        (onGenerateDataset || onGenerateScorers || onGenerateBoth) && storyGroups.some(g => g.stories.some(s => s.what.trim())) ? (
+          // Replaces the old single "Review charter" button. Three actions
+          // covering the common paths out of the User Stories screen.
+          <div className="flex flex-wrap gap-2 justify-end">
+            {onGenerateDataset && (
+              <Button
+                size="big"
+                variant="neutral"
+                onClick={() => void onGenerateDataset()}
+                disabled={!!(generatingDataset || generatingBoth || generatingScorers)}
+              >
+                {generatingDataset ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Sparkles className="w-4 h-4" />
+                )}
+                Generate dataset
+              </Button>
+            )}
+            {onGenerateScorers && (
+              <Button
+                size="big"
+                variant="neutral"
+                onClick={() => void onGenerateScorers()}
+                disabled={!!(generatingScorers || generatingBoth || generatingDataset)}
+              >
+                {generatingScorers ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Sparkles className="w-4 h-4" />
+                )}
+                Generate scorers
+              </Button>
+            )}
+            {onGenerateBoth && (
+              <Button
+                size="big"
+                variant="primary"
+                onClick={() => void onGenerateBoth()}
+                disabled={!!(generatingBoth || generatingDataset || generatingScorers)}
+              >
+                {generatingBoth ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Sparkles className="w-4 h-4" />
+                )}
+                Generate dataset and scorers
+              </Button>
+            )}
+          </div>
+        ) : (
+          // Fallback when shortcut handlers aren't wired in (scratch mode, etc).
+          <Button
+            size="big"
+            variant={nextVariant}
+            shortcut={<CmdReturnIcon />}
+            onClick={onNext}
+            disabled={nextDisabled}
+          >
+            {loading ? "Generating..." : nextLabel}
+          </Button>
+        )
       }
     >
       {/* Initial role input — only when no roles committed yet */}
@@ -632,6 +701,7 @@ export default function UsersPanel({
           )}
         </div>
       )}
+
     </PanelLayout>
   );
 }
@@ -801,10 +871,20 @@ function RoleContent({
                     onDragOver={(e) => handleStoryDragOver(gi, si, e)}
                     onDrop={() => handleStoryDrop(gi, si)}
                     onDragEnd={handleStoryDragEnd}
-                    className={`group flex items-center gap-4 px-4 py-4 bg-fill-neutral ${
-                      isStoryDragging ? "opacity-30" : ""
-                    }`}
+                    className={`group flex items-center gap-4 px-4 py-4 ${
+                      story.kind === "off_target"
+                        ? "bg-warning/10 border-l-2 border-warning"
+                        : "bg-fill-neutral"
+                    } ${isStoryDragging ? "opacity-30" : ""}`}
                   >
+                    {story.kind === "off_target" && !isEditing && (
+                      <span
+                        className="flex-shrink-0 text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 bg-warning/20 text-warning"
+                        title="Off-target: the skill should NOT fire on this"
+                      >
+                        Off-target
+                      </span>
+                    )}
                     {isEditing ? (
                       <input
                         ref={editWhatRef}

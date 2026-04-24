@@ -53,6 +53,12 @@ export default function ExampleCard({
   }
 
   const verdict = example.judge_verdict
+  const triggerVerdict = verdict?.trigger_verdict
+  const triggerLabel = example.should_trigger === true
+    ? 'should trigger'
+    : example.should_trigger === false
+      ? 'should NOT trigger'
+      : null
 
   return (
     <div
@@ -77,12 +83,34 @@ export default function ExampleCard({
             className="bg-muted text-muted-foreground"
           />
         )}
-        {verdict && (
+        {triggerLabel && (
+          <Badge
+            text={triggerLabel}
+            className={example.should_trigger
+              ? 'bg-accent/10 text-accent'
+              : 'bg-warning/15 text-warning'}
+          />
+        )}
+        {example.is_adversarial && (
+          <Badge
+            text="adversarial"
+            className="bg-danger/15 text-danger"
+          />
+        )}
+        {verdict?.suggested_label && verdict.confidence && (
           <Badge
             text={`judge: ${verdict.suggested_label} (${verdict.confidence})`}
             className={verdict.confidence === 'high'
               ? 'bg-accent/10 text-accent'
               : 'bg-warning/10 text-warning'}
+          />
+        )}
+        {triggerVerdict && (
+          <Badge
+            text={`router: ${triggerVerdict.correct ? 'correct' : 'wrong'}`}
+            className={triggerVerdict.correct
+              ? 'bg-success/10 text-success'
+              : 'bg-danger/10 text-danger'}
           />
         )}
       </div>
@@ -144,13 +172,20 @@ export default function ExampleCard({
           {verdict?.reasoning && (
             <div className="mb-2 p-2 bg-muted text-[11px] text-muted-foreground">
               <span className="font-medium">Judge:</span> {verdict.reasoning}
-              {verdict.issues?.length > 0 && (
+              {(verdict.issues?.length ?? 0) > 0 && (
                 <div className="mt-1">
-                  {verdict.issues.map((issue, i) => (
+                  {verdict.issues!.map((issue, i) => (
                     <div key={i} className="text-warning">- {issue}</div>
                   ))}
                 </div>
               )}
+            </div>
+          )}
+
+          {/* Trigger verdict (router) — triggered-mode only */}
+          {triggerVerdict && (
+            <div className="mb-2 p-2 bg-muted text-[11px] text-muted-foreground">
+              <span className="font-medium">Router:</span> expected {triggerVerdict.expected_fire ? 'fire' : 'no fire'}, would {triggerVerdict.would_fire ? 'fire' : 'not fire'} — {triggerVerdict.reasoning}
             </div>
           )}
 

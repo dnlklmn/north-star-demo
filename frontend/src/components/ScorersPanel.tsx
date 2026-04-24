@@ -118,16 +118,40 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
           </div>
         )}
         {scorers.length === 0 ? (
-          <div className="max-w-lg mx-auto text-center py-12">
-            <Sparkles className="w-8 h-8 text-muted-foreground/30 mx-auto mb-3" />
-            <h3 className="text-sm font-medium text-foreground mb-2">Generate custom scorers</h3>
-            <p className="text-sm text-muted-foreground mb-6">
-              Create evaluation scorers from your charter criteria. Each charter dimension becomes a scorer
-              that can check whether outputs meet your quality standards.
-            </p>
-            <div className="text-left max-w-sm mx-auto space-y-2 text-xs text-muted-foreground">
-              <p><span className="font-medium text-foreground">Coverage scorers</span> — check if outputs handle specific input scenarios</p>
-              <p><span className="font-medium text-foreground">Alignment scorers</span> — compare outputs against good/bad examples</p>
+          <div className="h-full flex items-center justify-center">
+            <div className="max-w-md text-center">
+              <Sparkles className="w-10 h-10 text-muted-foreground/30 mx-auto mb-4" />
+              <h3 className="text-base font-semibold text-foreground mb-2">Generate scorers from your charter</h3>
+              <p className="text-sm text-muted-foreground mb-6">
+                One scorer per alignment entry, coverage criterion, and safety criterion.
+                Each is a working LLM-as-judge function.
+              </p>
+              <button
+                onClick={handleGenerate}
+                disabled={!hasCriteria || generating}
+                className={`inline-flex items-center gap-2 px-5 py-2.5 text-sm font-medium ${
+                  hasCriteria && !generating
+                    ? 'bg-accent text-accent-foreground hover:opacity-90'
+                    : 'bg-muted text-muted-foreground cursor-not-allowed'
+                }`}
+              >
+                {generating ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Generating scorers...
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-4 h-4" />
+                    Generate scorers
+                  </>
+                )}
+              </button>
+              {!hasCriteria && (
+                <p className="text-xs text-muted-foreground mt-3">
+                  Build a charter first — scorers are derived from its criteria.
+                </p>
+              )}
             </div>
           </div>
         ) : (

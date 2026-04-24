@@ -2,7 +2,12 @@ import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { Plus, Trash2, Loader2 } from "lucide-react";
 import type { ProjectSummary } from "../types";
-import { listSessions, createSession, deleteSession } from "../api";
+import {
+  createSession,
+  deleteSession,
+  listSessions,
+  setSessionMode,
+} from "../api";
 import Button from "../components/ui/Button";
 import IconButton from "../components/ui/IconButton";
 import { GearIcon, StarIcon } from "../components/ui/Icons";
@@ -49,10 +54,18 @@ export default function Home() {
     fetchProjects();
   }, [fetchProjects]);
 
+  // "New skill eval" creates an empty triggered-mode session immediately and
+  // jumps to the workspace. The Skill tab renders its empty-state paste form
+  // so the first screen after clicking is the same screen as where users
+  // land after a seed. The Skill tab's "Start from scratch" link flips the
+  // session to standard mode for the legacy goals-first flow.
   const handleNewProject = async () => {
     setCreating(true);
     try {
-      const res = await createSession({ name: "Untitled project" });
+      const res = await createSession({ name: "Untitled skill eval" });
+      // Stamp the session as triggered so the sidebar correctly gates other
+      // tabs behind a skill_body. User can still escape via the Skill tab.
+      await setSessionMode(res.session_id, "triggered");
       navigate(`/project/${res.session_id}`);
     } catch (err) {
       console.error("Failed to create project:", err);
@@ -88,12 +101,8 @@ export default function Home() {
             onClick={handleNewProject}
             disabled={creating}
           >
-            {creating ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Plus className="w-4 h-4" />
-            )}
-            New project
+            {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+            New skill eval
           </Button>
         </div>
       </header>
@@ -111,8 +120,7 @@ export default function Home() {
                 No projects yet
               </h2>
               <p className="text-sm text-fg-dim mb-6 max-w-sm">
-                Create a project to start defining what good AI output looks
-                like for your feature.
+                Paste a SKILL.md to build a charter, generate a dataset, and run evals.
               </p>
               <Button
                 size="big"
@@ -120,12 +128,8 @@ export default function Home() {
                 onClick={handleNewProject}
                 disabled={creating}
               >
-                {creating ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Plus className="w-4 h-4" />
-                )}
-                New project
+                {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                New skill eval
               </Button>
             </div>
           ) : (

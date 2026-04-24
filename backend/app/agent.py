@@ -338,8 +338,11 @@ def _apply_charter_update(state: SessionState, update_data: dict) -> None:
     """Apply a partial charter update from a conversational turn."""
     if "coverage" in update_data:
         cov = update_data["coverage"]
-        if isinstance(cov, dict) and "criteria" in cov:
-            state.charter.coverage.criteria = cov["criteria"]
+        if isinstance(cov, dict):
+            if "criteria" in cov:
+                state.charter.coverage.criteria = cov["criteria"]
+            if "negative_criteria" in cov:
+                state.charter.coverage.negative_criteria = cov["negative_criteria"]
         elif isinstance(cov, list):
             state.charter.coverage.criteria = cov
 
@@ -356,6 +359,13 @@ def _apply_charter_update(state: SessionState, update_data: dict) -> None:
             state.charter.rot.criteria = rot["criteria"]
         elif isinstance(rot, list):
             state.charter.rot.criteria = rot
+
+    if "safety" in update_data:
+        saf = update_data["safety"]
+        if isinstance(saf, dict) and "criteria" in saf:
+            state.charter.safety.criteria = saf["criteria"]
+        elif isinstance(saf, list):
+            state.charter.safety.criteria = saf
 
     if "alignment" in update_data:
         state.charter.alignment = [

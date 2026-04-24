@@ -31,6 +31,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import db
 from .agent import run_agent_turn, run_dataset_chat
+from .eval_runner import EvalResult, run_eval_sync
 from .models import (
     AgentStatus,
     Charter,
@@ -38,14 +39,18 @@ from .models import (
     CreateExampleRequest,
     CreateSessionRequest,
     CreateSessionResponse,
+    CreateSkillVersionRequest,
     DetectedField,
     DetectSchemaRequest,
     DetectSchemaResponse,
     EnrichRequest,
+    EvalMode,
+    EvalRunSummary,
     EvaluateGoalsRequest,
     EvaluateGoalsResponse,
     FinalizeResponse,
     GoalFeedback,
+    ImprovementSuggestion,
     ImportExamplesRequest,
     ImportFromUrlRequest,
     ImportFromUrlResponse,
@@ -53,12 +58,20 @@ from .models import (
     PatchCharterRequest,
     ProceedResponse,
     ProjectSummary,
+    RestoreSkillVersionRequest,
+    RunEvalRequest,
     SendMessageRequest,
     SendMessageResponse,
     SessionState,
+    SetModeRequest,
     Settings,
+    SkillSeedRequest,
+    SkillSeedResponse,
+    SkillVersion,
     SuggestGoalsRequest,
     SuggestGoalsResponse,
+    SuggestImprovementsRequest,
+    SuggestImprovementsResponse,
     SuggestResponse,
     SuggestStoriesRequest,
     SuggestStoriesResponse,
@@ -84,6 +97,7 @@ from .tools import (
     call_detect_schema,
     call_infer_schema,
     call_import_from_url,
+    call_skill_seed,
     set_request_api_key,
 )
 
@@ -120,6 +134,10 @@ class ApiKeyMiddleware(BaseHTTPMiddleware):
         return response
 
 
+# Eval runs are persisted in the eval_runs DB table. The background task
+# writes status transitions + final results directly to the row.
+
+
 app.add_middleware(ApiKeyMiddleware)
 
 
@@ -138,6 +156,51 @@ async def _load_state(session_id: str) -> tuple[SessionState, list[dict]]:
 async def _save_state(session_id: str, state: SessionState, conversation: list[dict]) -> None:
     """Persist session state to DB."""
     await db.update_session(session_id, state.model_dump(), conversation)
+
+
+def _next_skill_version_number(state: SessionState) -> int:
+    if not state.skill_versions:
+        return 1
+    return max((v.get("version", 0) for v in state.skill_versions), default=0) + 1
+
+
+def _stamp_lineage(state: SessionState, *artifacts: str) -> None:
+    """Record that these artifacts were just generated against the current
+    active SKILL.md version. UI uses this to show 'Regenerate' affordances
+    when the active version later advances past what a tab was built from.
+    """
+    if not state.active_skill_version_id:
+        return
+    for artifact in artifacts:
+        state.generated_at_skill_version[artifact] = state.active_skill_version_id
+
+
+def _append_skill_version(
+    state: SessionState,
+    body: str,
+    created_from: str,
+    notes: Optional[str] = None,
+    applied_suggestion_ids: Optional[list[str]] = None,
+) -> dict:
+    """Create a new SkillVersion entry, set it active, and return the record.
+
+    Caller is responsible for also updating charter.task.skill_body if this
+    version should become the live one.
+    """
+    from datetime import datetime, timezone
+
+    version = SkillVersion(
+        version=_next_skill_version_number(state),
+        body=body,
+        notes=notes,
+        created_from=created_from,
+        applied_suggestion_ids=applied_suggestion_ids or [],
+        created_at=datetime.now(timezone.utc),
+    )
+    record = version.model_dump(mode="json")
+    state.skill_versions.append(record)
+    state.active_skill_version_id = version.id
+    return record
 
 
 # --- Endpoints ---
@@ -288,6 +351,125 @@ async def update_session_input(session_id: str, req: UpdateInputRequest):
         raise HTTPException(status_code=404, detail="Session not found")
 
 
+@app.patch("/sessions/{session_id}/mode")
+async def set_session_mode(session_id: str, req: SetModeRequest):
+    """Set the eval mode for a session.
+
+    - standard: existing flow, no routing decision modeled.
+    - triggered: skill/tool/agent under evaluation — enables off-target stories,
+      negative coverage, and should_trigger dataset labels.
+    """
+    state, conversation = await _load_state(session_id)
+    state.eval_mode = req.eval_mode
+    await _save_state(session_id, state, conversation)
+    return {"eval_mode": state.eval_mode.value, "state": state.model_dump()}
+
+
+@app.post("/sessions/{session_id}/skill-seed", response_model=SkillSeedResponse)
+async def seed_from_skill(session_id: str, req: SkillSeedRequest):
+    """Seed goals/users/stories/task from a pasted SKILL.md body.
+
+    Switches the session to triggered mode and populates extracted state. The
+    user can review and edit before the charter is generated.
+    """
+    state, conversation = await _load_state(session_id)
+
+    data, call_meta = await call_skill_seed(
+        req.skill_body, req.skill_name, req.skill_description,
+    )
+
+    # Switch to triggered mode and stamp skill metadata onto the task def.
+    state.eval_mode = EvalMode.triggered
+    state.charter.task.skill_name = req.skill_name or state.charter.task.skill_name
+    state.charter.task.skill_description = req.skill_description or state.charter.task.skill_description
+    state.charter.task.skill_body = req.skill_body
+
+    # Snapshot this seeded body as v1 so we can diff against future edits.
+    _append_skill_version(
+        state,
+        body=req.skill_body,
+        created_from="seed",
+        notes="Seeded from SKILL.md paste.",
+    )
+    # Stamp lineage so the UI knows these artifacts were generated against v1.
+    _stamp_lineage(state, "goals", "users", "stories")
+
+    task_data = data.get("task") or {}
+    if task_data.get("input_description"):
+        state.charter.task.input_description = task_data["input_description"]
+    if task_data.get("output_description"):
+        state.charter.task.output_description = task_data["output_description"]
+    if task_data.get("sample_input"):
+        state.charter.task.sample_input = task_data["sample_input"]
+    if task_data.get("sample_output"):
+        state.charter.task.sample_output = task_data["sample_output"]
+
+    # Populate extracted state — dedup against any existing entries.
+    goals_lower = {g.lower() for g in state.extracted_goals}
+    for g in data.get("goals", []):
+        if g and g.lower() not in goals_lower:
+            state.extracted_goals.append(g)
+            goals_lower.add(g.lower())
+
+    users_lower = {u.lower() for u in state.extracted_users}
+    for u in data.get("users", []):
+        if u and u.lower() not in users_lower:
+            state.extracted_users.append(u)
+            users_lower.add(u.lower())
+
+    story_keys = {
+        (s.get("who", "").lower(), s.get("what", "").lower().strip()[:40])
+        for s in state.extracted_stories
+    }
+    for s in data.get("positive_stories", []) or []:
+        if s.get("who") and s.get("what"):
+            key = (s["who"].lower(), s["what"].lower().strip()[:40])
+            if key not in story_keys:
+                state.extracted_stories.append({**s, "kind": "positive"})
+                story_keys.add(key)
+    for s in data.get("off_target_stories", []) or []:
+        if s.get("who") and s.get("what"):
+            key = (s["who"].lower(), s["what"].lower().strip()[:40])
+            if key not in story_keys:
+                state.extracted_stories.append({**s, "kind": "off_target"})
+                story_keys.add(key)
+
+    # Mirror extracted state into the structured input fields the UI reads.
+    # Without this, the Goals/Users/Stories panels render empty after seeding
+    # even though skill-seed successfully pulled everything out of the SKILL.md.
+    state.input.goals = list(state.extracted_goals)
+    role_to_stories: dict[str, list[dict]] = {}
+    for s in state.extracted_stories:
+        who = s.get("who", "").strip()
+        if not who:
+            continue
+        bucket = role_to_stories.setdefault(who, [])
+        bucket.append({
+            "what": s.get("what", ""),
+            "why": s.get("why", ""),
+            "kind": s.get("kind", "positive"),
+        })
+    state.input.story_groups = [
+        {"role": role, "stories": stories}
+        for role, stories in role_to_stories.items()
+    ]
+
+    await _save_state(session_id, state, conversation)
+
+    await db.create_turn(
+        session_id=session_id,
+        turn_type="skill_seed",
+        input_snapshot={"skill_name": req.skill_name, "skill_body_len": len(req.skill_body)},
+        llm_calls=call_meta,
+        parsed_output=data,
+    )
+
+    return SkillSeedResponse(
+        state=state,
+        message=data.get("summary") or "Seeded from SKILL.md. Review goals/users/stories and advance when ready.",
+    )
+
+
 @app.patch("/sessions/{session_id}/scorers")
 async def update_session_scorers(session_id: str, body: dict):
     """Save generated scorers to session state."""
@@ -307,6 +489,7 @@ async def generate_scorers_endpoint(session_id: str):
     charter = state.charter.model_dump()
     scorers, call_meta = await call_generate_scorers(charter)
     state.scorers = scorers
+    _stamp_lineage(state, "scorers")
     await _save_state(session_id, state, conversation)
     await db.create_turn(
         session_id=session_id,
@@ -392,6 +575,8 @@ async def patch_charter(session_id: str, req: PatchCharterRequest):
         state.charter.alignment = req.alignment
     if req.rot is not None:
         state.charter.rot = req.rot
+    if req.safety is not None:
+        state.charter.safety = req.safety
 
     await _save_state(session_id, state, conversation)
 
@@ -470,6 +655,8 @@ async def finalize_session(session_id: str):
 
     # Finalize it
     await db.finalize_charter(charter_row["id"])
+
+    _stamp_lineage(state, "charter")
 
     state.agent_status = AgentStatus.review
     await _save_state(session_id, state, conversation)
@@ -827,11 +1014,13 @@ async def import_examples(dataset_id: str, req: ImportExamplesRequest):
         normalized.append({
             "feature_area": ex.get("feature_area", "unassigned"),
             "input": ex.get("input", ""),
-            "expected_output": ex.get("expected_output", ""),
+            "expected_output": ex.get("expected_output", "") or "",
             "coverage_tags": ex.get("coverage_tags", []),
             "source": "imported",
             "label": ex.get("label", "unlabeled"),
             "label_reason": ex.get("label_reason"),
+            "should_trigger": ex.get("should_trigger"),
+            "is_adversarial": ex.get("is_adversarial"),
         })
 
     created = await db.bulk_create_examples(dataset_id, normalized)
@@ -868,6 +1057,11 @@ async def synthesize_examples(dataset_id: str, req: SynthesizeRequest):
         llm_calls=call_meta,
         parsed_output={"examples_generated": len(created)},
     )
+
+    # Stamp lineage — dataset generated against the current active skill version.
+    state, conversation = await _load_state(dataset["session_id"])
+    _stamp_lineage(state, "dataset")
+    await _save_state(dataset["session_id"], state, conversation)
 
     stats = await db.update_dataset_stats(dataset_id)
     return {"generated": len(created), "examples": created, "stats": stats}
@@ -908,6 +1102,8 @@ async def add_example(dataset_id: str, req: CreateExampleRequest):
         source="manual",
         label=req.label,
         label_reason=req.label_reason,
+        should_trigger=req.should_trigger,
+        is_adversarial=req.is_adversarial,
     )
     await db.update_dataset_stats(dataset_id)
     return example
@@ -956,24 +1152,27 @@ async def auto_review_examples(dataset_id: str):
         batch_for_review = [
             {"id": ex["id"], "feature_area": ex["feature_area"],
              "input": ex["input"], "expected_output": ex["expected_output"],
-             "label": ex["label"]}
+             "label": ex["label"], "should_trigger": ex.get("should_trigger")}
             for ex in batch
         ]
         reviews, call_meta = await call_review_examples(charter, batch_for_review)
 
-        # Apply verdicts
+        # Apply verdicts — triggered-mode reviews carry trigger_verdict + execution_verdict.
         for review in reviews:
             eid = review.get("example_id")
             if eid:
-                await db.update_example(eid, {
-                    "judge_verdict": {
-                        "suggested_label": review.get("suggested_label"),
-                        "confidence": review.get("confidence"),
-                        "reasoning": review.get("reasoning"),
-                        "coverage_match": review.get("coverage_match", []),
-                        "issues": review.get("issues", []),
-                    }
-                })
+                verdict = {
+                    "suggested_label": review.get("suggested_label"),
+                    "confidence": review.get("confidence"),
+                    "reasoning": review.get("reasoning"),
+                    "coverage_match": review.get("coverage_match", []),
+                    "issues": review.get("issues", []),
+                }
+                if review.get("trigger_verdict") is not None:
+                    verdict["trigger_verdict"] = review.get("trigger_verdict")
+                if review.get("execution_verdict") is not None:
+                    verdict["execution_verdict"] = review.get("execution_verdict")
+                await db.update_example(eid, {"judge_verdict": verdict})
         all_reviews.extend(reviews)
 
         await db.create_turn(
@@ -1140,6 +1339,355 @@ async def export_dataset_endpoint(dataset_id: str):
         return await db.export_dataset(dataset_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.get("/datasets/{dataset_id}/export/skill-creator")
+async def export_for_skill_creator(dataset_id: str):
+    """Export triggering rows in a format skill-creator's eval harness consumes.
+
+    Emits approved rows that carry should_trigger (true or false). Each row
+    becomes {prompt, should_trigger}. Rows without should_trigger (standard
+    mode) are omitted — they belong in the execution-eval export.
+    """
+    dataset = await db.get_dataset(dataset_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    examples = await db.get_examples(dataset_id, review_status="approved")
+    trigger_rows = [
+        {
+            "prompt": ex["input"],
+            "should_trigger": ex["should_trigger"],
+            "tags": ex.get("coverage_tags", []),
+            "notes": ex.get("label_reason") or None,
+        }
+        for ex in examples
+        if ex.get("should_trigger") is not None
+    ]
+
+    charter = dataset.get("charter_snapshot", {}) or {}
+    task = charter.get("task", {}) or {}
+
+    return {
+        "dataset_id": dataset_id,
+        "session_id": dataset["session_id"],
+        "skill_name": task.get("skill_name"),
+        "skill_description": task.get("skill_description"),
+        "rows": trigger_rows,
+        "counts": {
+            "total": len(trigger_rows),
+            "should_trigger": sum(1 for r in trigger_rows if r["should_trigger"]),
+            "should_not_trigger": sum(1 for r in trigger_rows if r["should_trigger"] is False),
+        },
+    }
+
+
+# --- Eval run endpoints (Braintrust execution eval from the UI) ---
+
+def _eval_run_to_summary(run: dict) -> EvalRunSummary:
+    # DB rows have `id` not `run_id`; normalize.
+    return EvalRunSummary(
+        run_id=run.get("run_id") or run["id"],
+        status=run["status"],
+        project=run["project"],
+        experiment_name=run.get("experiment_name"),
+        experiment_url=run.get("experiment_url"),
+        rows_total=run.get("rows_total", 0) or 0,
+        rows_evaluated=run.get("rows_evaluated", 0) or 0,
+        scorer_names=run.get("scorer_names", []) or [],
+        scorer_averages=run.get("scorer_averages", {}) or {},
+        per_row=run.get("per_row", []) or [],
+        error=run.get("error"),
+        started_at=run.get("started_at"),
+        finished_at=run.get("finished_at"),
+        skill_version_id=run.get("skill_version_id"),
+        skill_version_number=run.get("skill_version_number"),
+        charter_snapshot=run.get("charter_snapshot"),
+        improvement_suggestions=run.get("improvement_suggestions"),
+        improvement_summary=run.get("improvement_summary"),
+    )
+
+
+async def _execute_eval_run(
+    run_id: str,
+    skill_body: str,
+    scorer_defs: list[dict],
+    examples: list[dict],
+    braintrust_key: str,
+    anthropic_key: str | None,
+    req: RunEvalRequest,
+) -> None:
+    """Background task: runs the blocking eval off the event loop.
+
+    All status transitions + results are written to the eval_runs DB row so
+    the UI sees them on the next poll, and history survives process restarts.
+    """
+    import asyncio
+    from datetime import datetime, timezone
+    from .eval_runner import DEFAULT_JUDGE_MODEL, DEFAULT_MODEL
+
+    await db.update_eval_run(run_id, {
+        "status": "running",
+        "started_at": datetime.now(timezone.utc),
+    })
+
+    try:
+        result: EvalResult = await asyncio.to_thread(
+            run_eval_sync,
+            skill_body=skill_body,
+            scorer_defs=scorer_defs,
+            examples=examples,
+            braintrust_api_key=braintrust_key,
+            project=req.project,
+            experiment_name=req.experiment_name,
+            anthropic_api_key=anthropic_key,
+            model=req.model or DEFAULT_MODEL,
+            judge_model=req.judge_model or DEFAULT_JUDGE_MODEL,
+            include_triggering=req.include_triggering,
+            limit=req.limit,
+        )
+        await db.update_eval_run(run_id, {
+            "status": "done",
+            "finished_at": datetime.now(timezone.utc),
+            "experiment_url": result.experiment_url,
+            "experiment_name": result.experiment_name,
+            "rows_evaluated": result.rows_evaluated,
+            "scorer_names": result.scorer_names,
+            "scorer_averages": result.scorer_averages,
+            "per_row": result.per_row,
+        })
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Eval run %s failed", run_id)
+        await db.update_eval_run(run_id, {
+            "status": "error",
+            "error": str(e),
+            "finished_at": datetime.now(timezone.utc),
+        })
+
+
+@app.post("/sessions/{session_id}/run-eval", response_model=EvalRunSummary)
+async def run_eval_for_session(session_id: str, req: RunEvalRequest, request: Request):
+    """Trigger a Braintrust eval run for this session's dataset + scorers + skill.
+
+    Braintrust API key is read from the X-Braintrust-Key header. Anthropic key
+    from X-Anthropic-Key (same pattern as other endpoints). Runs asynchronously
+    in a background task; poll GET /sessions/{id}/eval-runs/{run_id} for status.
+    """
+    import asyncio
+    import uuid as _uuid
+    from datetime import datetime, timezone
+
+    braintrust_key = request.headers.get("x-braintrust-key") or os.environ.get("BRAINTRUST_API_KEY")
+    if not braintrust_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Braintrust API key required. Add it in Settings or send X-Braintrust-Key header.",
+        )
+
+    state, conversation = await _load_state(session_id)
+    skill_body = state.charter.task.skill_body or ""
+    if not skill_body.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Session has no skill_body on its charter. Seed from a SKILL.md first.",
+        )
+
+    scorer_defs = state.scorers or []
+    if not scorer_defs:
+        raise HTTPException(
+            status_code=400,
+            detail="No scorers on this session. Generate them in the Scorers tab first.",
+        )
+
+    dataset = await db.get_dataset_by_session(session_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="No dataset for this session.")
+
+    examples = await db.get_examples(dataset["id"])
+    if not examples:
+        raise HTTPException(status_code=400, detail="Dataset is empty.")
+
+    anthropic_key = request.headers.get("x-anthropic-key") or None
+
+    # Capture the active SKILL.md version so this run is tied to a specific edit.
+    # If the session was seeded before versioning landed, auto-create v1 from
+    # the current body so later diffs have something to compare against.
+    active_ver_id = state.active_skill_version_id
+    active_ver_num: int | None = None
+    if not state.skill_versions:
+        record = _append_skill_version(
+            state,
+            body=skill_body,
+            created_from="seed",
+            notes="Backfilled v1 from existing SKILL.md body.",
+        )
+        active_ver_id = record["id"]
+        active_ver_num = record["version"]
+        await _save_state(session_id, state, conversation)
+    else:
+        for v in state.skill_versions:
+            if v.get("id") == active_ver_id:
+                active_ver_num = v.get("version")
+                break
+
+    run_id = str(_uuid.uuid4())
+    run_row = await db.create_eval_run(
+        run_id=run_id,
+        session_id=session_id,
+        project=req.project,
+        experiment_name=req.experiment_name,
+        rows_total=len(examples),
+        skill_version_id=active_ver_id,
+        skill_version_number=active_ver_num,
+        charter_snapshot=state.charter.model_dump(),
+    )
+
+    asyncio.create_task(
+        _execute_eval_run(
+            run_id=run_id,
+            skill_body=skill_body,
+            scorer_defs=scorer_defs,
+            examples=examples,
+            braintrust_key=braintrust_key,
+            anthropic_key=anthropic_key,
+            req=req,
+        )
+    )
+
+    return _eval_run_to_summary(run_row)
+
+
+@app.get("/sessions/{session_id}/eval-runs/{run_id}", response_model=EvalRunSummary)
+async def get_eval_run_endpoint(session_id: str, run_id: str):
+    """Poll an eval run's status. Returns the latest snapshot from the DB."""
+    run = await db.get_eval_run(run_id)
+    if run is None or run.get("session_id") != session_id:
+        raise HTTPException(status_code=404, detail="Eval run not found")
+    return _eval_run_to_summary(run)
+
+
+@app.get("/sessions/{session_id}/eval-runs", response_model=list[EvalRunSummary])
+async def list_eval_runs_endpoint(session_id: str):
+    """List all eval runs for this session (most recent first)."""
+    runs = await db.list_eval_runs(session_id)
+    return [_eval_run_to_summary(r) for r in runs]
+
+
+# --- Skill version endpoints (Path A: iterate SKILL.md from eval failures) ---
+
+@app.get("/sessions/{session_id}/skill-versions", response_model=list[SkillVersion])
+async def list_skill_versions(session_id: str):
+    """List all skill versions for this session (newest first)."""
+    state, _ = await _load_state(session_id)
+    versions = list(state.skill_versions)
+    versions.sort(key=lambda v: v.get("version", 0), reverse=True)
+    return [SkillVersion(**v) for v in versions]
+
+
+@app.post("/sessions/{session_id}/skill-versions", response_model=SkillVersion)
+async def create_skill_version(session_id: str, req: CreateSkillVersionRequest):
+    """Create a new SKILL.md version and set it as active.
+
+    Updates charter.task.skill_body so subsequent evals use the new body. The
+    prior body stays in skill_versions history.
+    """
+    state, conversation = await _load_state(session_id)
+
+    # If this is the first version on a legacy session, backfill v1 from the
+    # current body so the new one doesn't land as v1 with history missing.
+    if not state.skill_versions and (state.charter.task.skill_body or "").strip():
+        _append_skill_version(
+            state,
+            body=state.charter.task.skill_body or "",
+            created_from="seed",
+            notes="Backfilled v1 from existing SKILL.md body.",
+        )
+
+    record = _append_skill_version(
+        state,
+        body=req.body,
+        created_from=req.created_from or "manual",
+        notes=req.notes,
+        applied_suggestion_ids=req.applied_suggestion_ids,
+    )
+    state.charter.task.skill_body = req.body
+    await _save_state(session_id, state, conversation)
+    return SkillVersion(**record)
+
+
+@app.post("/sessions/{session_id}/skill-versions/restore", response_model=SkillVersion)
+async def restore_skill_version(session_id: str, req: RestoreSkillVersionRequest):
+    """Make a previous version the active one. Does NOT rewrite history —
+    the restored version becomes the latest active; older versions are kept."""
+    state, conversation = await _load_state(session_id)
+    target = next((v for v in state.skill_versions if v.get("id") == req.version_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Skill version not found")
+
+    state.active_skill_version_id = target["id"]
+    state.charter.task.skill_body = target["body"]
+    await _save_state(session_id, state, conversation)
+    return SkillVersion(**target)
+
+
+@app.post(
+    "/sessions/{session_id}/suggest-improvements",
+    response_model=SuggestImprovementsResponse,
+)
+async def suggest_skill_improvements(session_id: str, req: SuggestImprovementsRequest):
+    """Analyze a completed eval run and propose targeted SKILL.md edits.
+
+    Reads the run (in-memory for MVP), the current SKILL.md body, and the
+    charter. Returns a list of suggestions with rationale + row citations.
+    """
+    from .tools import call_suggest_improvements
+
+    run = await db.get_eval_run(req.run_id)
+    if run is None or run.get("session_id") != session_id:
+        raise HTTPException(status_code=404, detail="Eval run not found")
+    if run.get("status") != "done":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Eval run must be completed (current status: {run.get('status')}).",
+        )
+
+    state, _ = await _load_state(session_id)
+    skill_body = state.charter.task.skill_body or ""
+    if not skill_body.strip():
+        raise HTTPException(status_code=400, detail="Session has no active SKILL.md to improve.")
+
+    data, call_meta = await call_suggest_improvements(
+        skill_body,
+        run,
+        state.charter.model_dump(),
+    )
+
+    await db.create_turn(
+        session_id=session_id,
+        turn_type="suggest_improvements",
+        input_snapshot={"run_id": req.run_id, "skill_version_id": run.get("skill_version_id")},
+        llm_calls=call_meta,
+        parsed_output=data,
+    )
+
+    suggestions = [
+        ImprovementSuggestion(**s) for s in data.get("suggestions", []) if s.get("replacement")
+    ]
+
+    # Persist on the eval_run so the UI can show these on reload without
+    # having to re-analyze (which costs tokens + time).
+    summary = data.get("summary") or ""
+    await db.update_eval_run(req.run_id, {
+        "improvement_suggestions": [s.model_dump(mode="json") for s in suggestions],
+        "improvement_summary": summary,
+    })
+
+    return SuggestImprovementsResponse(
+        suggestions=suggestions,
+        summary=summary,
+        run_id=req.run_id,
+        skill_version_id=run.get("skill_version_id"),
+    )
 
 
 # --- Settings Endpoints ---

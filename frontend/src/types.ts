@@ -1,11 +1,16 @@
-export type AgentStatus = 'drafting' | 'validating' | 'questioning' | 'soft_ok' | 'review'
+export type AgentStatus = 'drafting' | 'validating' | 'questioning' | 'soft_ok' | 'review' | 'discovery'
 
 export type DimensionStatus = 'pending' | 'weak' | 'good'
 
 export type ValidationStatus = 'pass' | 'weak' | 'fail' | 'untested'
 
+export type EvalMode = 'standard' | 'triggered'
+
 export interface DimensionCriteria {
   criteria: string[]
+  /** Triggered-mode only: scenarios that must NOT invoke the skill/tool.
+   *  Used by coverage; other dimensions leave it empty. */
+  negative_criteria?: string[]
   status: DimensionStatus
 }
 
@@ -21,6 +26,10 @@ export interface TaskDefinition {
   output_description: string
   sample_input?: string | null
   sample_output?: string | null
+  /** Triggered-mode metadata for the skill/tool under evaluation. */
+  skill_name?: string | null
+  skill_description?: string | null
+  skill_body?: string | null
 }
 
 export interface Charter {
@@ -29,6 +38,9 @@ export interface Charter {
   balance: DimensionCriteria
   alignment: AlignmentEntry[]
   rot: DimensionCriteria
+  /** Output-level safety rules (triggered mode). Optional for backward
+   *  compatibility — older charters loaded from DB may not have this field. */
+  safety?: DimensionCriteria
 }
 
 export interface AlignmentValidation {
@@ -78,6 +90,26 @@ export interface SessionState {
   rounds_of_questions: number
   agent_status: AgentStatus
   scorers?: ScorerDef[]
+  eval_mode?: EvalMode
+  extracted_goals?: string[]
+  extracted_users?: string[]
+  extracted_stories?: ExtractedStory[]
+  /** Latest SKILL.md version id — mirrors backend active_skill_version_id. */
+  active_skill_version_id?: string | null
+  /** Which skill version was active when each artifact was last generated.
+   *  Keys: 'goals' | 'users' | 'stories' | 'charter' | 'dataset' | 'scorers'. */
+  generated_at_skill_version?: Record<string, string>
+  /** Full version history. Mirrors backend skill_versions. */
+  skill_versions?: SkillVersion[]
+}
+
+export interface ExtractedStory {
+  who: string
+  what: string
+  why?: string
+  /** Triggered-mode only. Missing or 'positive' = should fire.
+   *  'off_target' = adjacent request that should NOT fire. */
+  kind?: 'positive' | 'off_target'
 }
 
 export interface Message {
@@ -104,7 +136,7 @@ export interface UserStory {
 
 export interface StoryGroup {
   role: string
-  stories: { what: string; why: string }[]
+  stories: { what: string; why: string; kind?: 'positive' | 'off_target' }[]
 }
 
 export interface CreateSessionResponse {
@@ -116,7 +148,7 @@ export interface CreateSessionResponse {
 }
 
 export interface Suggestion {
-  section: 'coverage' | 'balance' | 'alignment' | 'rot'
+  section: 'coverage' | 'balance' | 'alignment' | 'rot' | 'safety'
   text: string
   good?: string
   bad?: string
@@ -144,6 +176,7 @@ export interface Example {
   dataset_id: string
   feature_area: string
   input: string
+  /** Empty string when should_trigger === false. */
   expected_output: string
   coverage_tags: string[]
   source: 'imported' | 'synthetic' | 'manual'
@@ -153,16 +186,37 @@ export interface Example {
   reviewer_notes: string | null
   judge_verdict: JudgeVerdict | null
   revision_suggestion: RevisionSuggestion | null
+  /** Triggered-mode label. null = standard mode. */
+  should_trigger?: boolean | null
+  /** Adversarial probe (prompt injection, credential leakage attempts, etc).
+   *  null = normal row. True = safety scorers weight this heavily. */
+  is_adversarial?: boolean | null
   created_at: string
   updated_at: string
 }
 
-export interface JudgeVerdict {
+export interface TriggerVerdict {
+  expected_fire: boolean
+  would_fire: boolean
+  correct: boolean
+  reasoning: string
+}
+
+export interface ExecutionVerdict {
   suggested_label: 'good' | 'bad'
   confidence: 'high' | 'medium' | 'low'
   reasoning: string
-  coverage_match: string[]
-  issues: string[]
+}
+
+export interface JudgeVerdict {
+  suggested_label?: 'good' | 'bad'
+  confidence?: 'high' | 'medium' | 'low'
+  reasoning?: string
+  coverage_match?: string[]
+  issues?: string[]
+  /** Triggered-mode additions. */
+  trigger_verdict?: TriggerVerdict | null
+  execution_verdict?: ExecutionVerdict | null
 }
 
 export interface RevisionSuggestion {
@@ -233,4 +287,96 @@ export interface InferSchemaResponse {
   confidence: 'high' | 'medium' | 'low'
   example_count: number
   pattern_notes: string
+}
+
+// --- Eval run (Braintrust execution eval triggered from the UI) ---
+
+export type EvalRunStatus = 'pending' | 'running' | 'done' | 'error'
+
+export interface EvalRunPerRow {
+  input: unknown
+  output: unknown
+  expected: unknown
+  scores: Record<string, number>
+  error: string | null
+  metadata: Record<string, unknown>
+}
+
+export interface EvalRunSummary {
+  run_id: string
+  status: EvalRunStatus
+  project: string
+  experiment_name: string | null
+  experiment_url: string | null
+  rows_total: number
+  rows_evaluated: number
+  scorer_names: string[]
+  scorer_averages: Record<string, number>
+  per_row: EvalRunPerRow[]
+  error: string | null
+  started_at: string | null
+  finished_at: string | null
+  skill_version_id?: string | null
+  skill_version_number?: number | null
+  /** Full charter at the moment the run started. Null for older runs
+   *  created before this column existed. */
+  charter_snapshot?: Charter | null
+  /** Improvement suggestions generated by /suggest-improvements on this run.
+   *  Null = never analyzed. Empty array = analyzed, no patterns found. */
+  improvement_suggestions?: ImprovementSuggestion[] | null
+  improvement_summary?: string | null
+}
+
+// --- Skill versioning + improvement suggestions (Path A) ---
+
+export type SkillVersionSource = 'seed' | 'suggestion' | 'manual'
+
+export interface SkillVersion {
+  id: string
+  version: number
+  body: string
+  notes: string | null
+  created_from: SkillVersionSource
+  applied_suggestion_ids: string[]
+  created_at: string | null
+}
+
+export type ImprovementKind = 'add_rule' | 'clarify_rule' | 'add_example' | 'reword' | 'other'
+
+export type ImprovementConfidence = 'low' | 'medium' | 'high'
+
+export interface ImprovementSuggestion {
+  id: string
+  kind: ImprovementKind
+  summary: string
+  rationale: string
+  /** Exact text to find in current SKILL.md — empty means append. */
+  find: string
+  replacement: string
+  source_row_ids: string[]
+  source_scorer_names: string[]
+  confidence: ImprovementConfidence
+}
+
+export interface SuggestImprovementsResponse {
+  suggestions: ImprovementSuggestion[]
+  summary: string
+  run_id: string
+  skill_version_id: string | null
+}
+
+export interface CreateSkillVersionRequest {
+  body: string
+  notes?: string
+  created_from?: SkillVersionSource
+  applied_suggestion_ids?: string[]
+}
+
+export interface RunEvalRequest {
+  project: string
+  experiment_name?: string
+  limit?: number
+  include_triggering?: boolean
+  model?: string
+  judge_model?: string
 }

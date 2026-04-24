@@ -123,7 +123,44 @@ Goals → Users → Stories → Charter → Dataset. Each step shows count badge
 - Multi-session charter comparison
 - Team collaboration (multiple users on one charter)
 - Document import
-- Production feedback loops
+- Production feedback loops (see *Connector design* below)
+
+---
+
+## Connector design
+
+North Star stops at the dataset. Running evals happens in external frameworks — `skill-creator` for triggering evals, Braintrust / Promptfoo / custom harnesses for execution. Connectors ship the dataset out and, in the two-way version, ingest signal back.
+
+### One-way vs two-way
+
+**One-way (export-only):** North Star pushes dataset rows to the target framework's format. Low commitment, ship first.
+
+**Two-way (export + ingest):** results flow back and feed two separate surfaces of the charter:
+
+| Signal source | Feeds | What it catches |
+|---------------|-------|-----------------|
+| Eval platform results (pass/fail per row, judge disagreement) | **Dataset quality** | Regression on known cases, flaky rows, flawed labels |
+| Product telemetry (thumbs, edits, escalations, unexpected prompts) | **Charter** | Missed stories, goals the user didn't state, new user types |
+
+### Implications for Rot
+
+Without two-way connectors, Rot is limited to **intent drift** — "does this charter still match the goals/users/stories the user described?" Introspective only: the agent re-reads the charter against stated intent.
+
+**Production drift** — "eval scores degrading, new failure modes emerging in the wild" — requires results flowing back. That is what makes eval-driven development iterative rather than one-shot.
+
+### Shipping order
+
+1. **Export connectors first.** One per target framework (skill-creator, Braintrust, Promptfoo, custom JSON). Immediate value.
+2. **Eval-platform ingest.** Parse results into North Star, flag regressed rows, re-run the judge on label disagreements. Feeds dataset quality.
+3. **Product telemetry ingest.** Biggest payoff for PM/business users but requires a live product. Feeds charter suggestions ("users keep asking X, no story covers it — add one?").
+
+### Connector contract (sketch)
+
+Each connector declares:
+- `export(dataset) -> framework_payload` — required
+- `ingest(framework_result) -> { row_updates, charter_suggestions }` — optional, unlocks two-way
+
+Framework-specific quirks (skill-creator wants `{prompt, should_trigger}`, Braintrust wants `{input, expected, metadata}`) live in the connector, not in North Star's core schema.
 
 ---
 

@@ -49,8 +49,10 @@ import {
   updateSessionName,
   updateSessionInput,
   saveScorers,
+  generateScorers,
   suggestRevisions,
   getActivity,
+  listSessions,
 } from "../api";
 import Button from "../components/ui/Button";
 import IconButton from "../components/ui/IconButton";
@@ -59,18 +61,23 @@ import UsersPanel from "../components/UsersPanel";
 import CharterPanel from "../components/CharterPanel";
 import ScorersPanel from "../components/ScorersPanel";
 import EvaluatePanel from "../components/EvaluatePanel";
+import ImprovePanel from "../components/ImprovePanel";
+import SkillPanel from "../components/SkillPanel";
+import RegenerateBanner from "../components/RegenerateBanner";
 import ConversationPanel from "../components/ConversationPanel";
 import ExampleReview from "../components/ExampleReview";
 import CoverageMap from "../components/CoverageMap";
 import SettingsPanel from "../components/SettingsPanel";
 
 type ActiveTab =
+  | "skill"
   | "goals"
   | "users"
   | "charter"
   | "dataset"
   | "scorers"
-  | "evaluate";
+  | "evaluate"
+  | "improve";
 
 const EMPTY_STATE: SessionState = {
   session_id: "",
@@ -254,8 +261,14 @@ export default function ProjectWorkspace() {
         const hasCharter = !!(
           s.charter.coverage.criteria.length || s.charter.alignment.length
         );
+        const hasSkillBody = !!s.charter.task.skill_body;
+        const isTriggered = s.eval_mode === "triggered";
 
-        // Try to load dataset
+        // Try to load dataset. For skill-mode sessions that haven't built a
+        // charter yet, land on the Skill tab so the user sees what they just
+        // pasted — not the empty goals screen. Brand-new triggered sessions
+        // (no skill body yet) also land on Skill so the paste form is the
+        // first thing the user sees.
         try {
           const ds = await getDataset(urlSessionId);
           setDataset(ds);
@@ -263,11 +276,15 @@ export default function ProjectWorkspace() {
             setActiveTab("dataset");
           } else if (hasCharter) {
             setActiveTab("charter");
+          } else if (hasSkillBody || isTriggered) {
+            setActiveTab("skill");
           }
         } catch {
           // No dataset yet
           if (hasCharter) {
             setActiveTab("charter");
+          } else if (hasSkillBody || isTriggered) {
+            setActiveTab("skill");
           } else if (s.input.story_groups && s.input.story_groups.length > 0) {
             setActiveTab("users");
           }
@@ -300,12 +317,44 @@ export default function ProjectWorkspace() {
     0,
   );
 
-  // Tab availability
-  const usersAvailable = nonEmptyGoals.length >= 2;
-  const charterAvailable = hasCharter || loading;
-  const datasetAvailable = hasCharter;
-  const scorersAvailable = hasCharter;
-  const evaluateAvailable = !!dataset;
+  // Tab availability. In triggered mode, no tab downstream of Skill opens
+  // until the user has pasted + seeded a SKILL.md. This makes the empty
+  // Skill tab the only interactive surface on a brand-new skill session —
+  // mirroring the old standalone "new skill eval" page while keeping the
+  // user in the project workspace throughout.
+  const isTriggered = state.eval_mode === "triggered";
+  const skillReady = !!state.charter.task.skill_body || !isTriggered;
+  const usersAvailable = skillReady && nonEmptyGoals.length >= 2;
+  const charterAvailable = skillReady && (hasCharter || loading);
+  const datasetAvailable = skillReady && hasCharter;
+  const scorersAvailable = skillReady && hasCharter;
+  const evaluateAvailable = skillReady && !!dataset;
+
+  // When the user clicks "Run evaluations" on the Improve tab, we switch to
+  // the Evaluations tab AND kick off a run immediately using the previous
+  // run's config. EvaluatePanel consumes this signal + calls the reset cb.
+  const [evalAutoRun, setEvalAutoRun] = useState(false);
+  // Inverse direction: "Improve skill" on Evaluations switches to Improve AND
+  // fires Analyze on the latest completed run.
+  const [improveAutoAnalyze, setImproveAutoAnalyze] = useState(false);
+  // Generation shortcuts on the Users tab. Independent spinners so the
+  // "both" button reflects its own parallel run, not a false positive from
+  // clicking the single-action ones while that's in flight.
+  const [generatingDataset, setGeneratingDataset] = useState(false);
+  const [generatingScorersShortcut, setGeneratingScorersShortcut] = useState(false);
+  const [generatingBoth, setGeneratingBoth] = useState(false);
+
+  // Skill-version lineage for "Regenerate" banners on downstream tabs.
+  const skillVersions = state.skill_versions || [];
+  const activeSkillVersionId = state.active_skill_version_id || null;
+  const activeSkillVersion = skillVersions.find(v => v.id === activeSkillVersionId) || skillVersions[skillVersions.length - 1] || null;
+  const lineageFor = (artifact: string): number | null => {
+    const sourceId = state.generated_at_skill_version?.[artifact];
+    if (!sourceId) return null;
+    const v = skillVersions.find(x => x.id === sourceId);
+    return v?.version ?? null;
+  };
+  const activeSkillVersionNum = activeSkillVersion?.version ?? null;
 
   // --- Project name ---
   const startEditingName = () => {
@@ -815,10 +864,11 @@ export default function ProjectWorkspace() {
     async (dimension: string, index: number, value: string) => {
       if (!sessionId) return;
       const charter = { ...state.charter };
-      const dim = dimension as "coverage" | "balance" | "rot";
-      const criteria = [...charter[dim].criteria];
+      const dim = dimension as "coverage" | "balance" | "rot" | "safety";
+      const existing = charter[dim] ?? { criteria: [], status: "pending" as const };
+      const criteria = [...existing.criteria];
       criteria[index] = value;
-      charter[dim] = { ...charter[dim], criteria };
+      charter[dim] = { ...existing, criteria };
 
       try {
         const res = await patchCharter(sessionId, {
@@ -835,10 +885,11 @@ export default function ProjectWorkspace() {
   const handleAddCriterion = useCallback(
     async (dimension: string, value: string) => {
       if (!sessionId) return;
-      const dim = dimension as "coverage" | "balance" | "rot";
+      const dim = dimension as "coverage" | "balance" | "rot" | "safety";
       const currentCharter = charterRef.current;
-      const newCriteria = [...currentCharter[dim].criteria, value];
-      const newDim = { ...currentCharter[dim], criteria: newCriteria };
+      const existing = currentCharter[dim] ?? { criteria: [], status: "pending" as const };
+      const newCriteria = [...existing.criteria, value];
+      const newDim = { ...existing, criteria: newCriteria };
       charterRef.current = { ...charterRef.current, [dim]: newDim };
       setState((prev) => ({
         ...prev,
@@ -870,12 +921,13 @@ export default function ProjectWorkspace() {
   const handleDeleteCriterion = useCallback(
     async (dimension: string, index: number) => {
       if (!sessionId) return;
-      const dim = dimension as "coverage" | "balance" | "rot";
+      const dim = dimension as "coverage" | "balance" | "rot" | "safety";
       const currentCharter = charterRef.current;
-      const newCriteria = currentCharter[dim].criteria.filter(
+      const existing = currentCharter[dim] ?? { criteria: [], status: "pending" as const };
+      const newCriteria = existing.criteria.filter(
         (_: string, i: number) => i !== index,
       );
-      const newDim = { ...currentCharter[dim], criteria: newCriteria };
+      const newDim = { ...existing, criteria: newCriteria };
       setState((prev) => ({
         ...prev,
         charter: { ...prev.charter, [dim]: newDim },
@@ -924,8 +976,9 @@ export default function ProjectWorkspace() {
   const handleReorderCriteria = useCallback(
     async (dimension: string, criteria: string[]) => {
       if (!sessionId) return;
-      const dim = dimension as "coverage" | "balance" | "rot";
-      const newDim = { ...charterRef.current[dim], criteria };
+      const dim = dimension as "coverage" | "balance" | "rot" | "safety";
+      const existing = charterRef.current[dim] ?? { criteria: [], status: "pending" as const };
+      const newDim = { ...existing, criteria };
       setState((prev) => ({
         ...prev,
         charter: { ...prev.charter, [dim]: newDim },
@@ -1006,8 +1059,26 @@ export default function ProjectWorkspace() {
     setCharterSuggestionsLoading(true);
     try {
       const res = await suggestForCharter(sessionId);
-      setSuggestions((prev) => [...prev, ...res.suggestions]);
-      setSuggestedStories((prev) => [...prev, ...res.suggested_stories]);
+      // Replace (not append) — reload should feel like "give me fresh
+      // suggestions", not pile more on top. Dedup within the same section
+      // by the first 40 chars of the text (case-insensitive) so the LLM
+      // trying to rephrase the same idea three times doesn't fill the panel.
+      const seen = new Set<string>();
+      const dedupedSuggestions = res.suggestions.filter((s) => {
+        const key = `${s.section}|${s.text.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 40)}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      const seenStories = new Set<string>();
+      const dedupedStories = res.suggested_stories.filter((s) => {
+        const key = `${(s.who || '').toLowerCase()}|${(s.what || '').toLowerCase().trim().slice(0, 40)}`;
+        if (seenStories.has(key)) return false;
+        seenStories.add(key);
+        return true;
+      });
+      setSuggestions(dedupedSuggestions);
+      setSuggestedStories(dedupedStories);
     } catch (err) {
       console.error("Failed to get suggestions:", err);
     } finally {
@@ -1106,6 +1177,84 @@ export default function ProjectWorkspace() {
       setLoading(false);
     }
   }, [sessionId]);
+
+  // "Skip ahead" shortcuts from the User Stories screen — run charter
+  // generation first if it doesn't exist yet, then fire whichever downstream
+  // action the user picked. Dataset and scorers are independent so the
+  // "both" variant runs them in parallel via Promise.all.
+  const ensureCharter = useCallback(async () => {
+    if (hasCharter) return;
+    await handleSubmitIntake();
+  }, [hasCharter, handleSubmitIntake]);
+
+  const runGenerateDataset = useCallback(async () => {
+    if (!sessionId) return;
+    await ensureCharter();
+    // Use the existing handleGenerateDataset below (defined later in file).
+    // We can't forward-reference a useCallback so inline the work:
+    try {
+      let ds = dataset;
+      if (!ds) {
+        await createDataset(sessionId);
+        ds = await getDataset(sessionId);
+        setDataset(ds);
+      }
+      await synthesizeExamples(ds.id);
+      const fresh = await getDataset(sessionId);
+      setDataset(fresh);
+    } catch (err) {
+      console.error("Shortcut: generate dataset failed", err);
+      throw err;
+    }
+  }, [sessionId, dataset, ensureCharter]);
+
+  const runGenerateScorers = useCallback(async () => {
+    if (!sessionId) return;
+    await ensureCharter();
+    try {
+      const res = await generateScorers(sessionId);
+      setScorers(res.scorers);
+      const s = await getSession(sessionId);
+      setState(s.state as SessionState);
+    } catch (err) {
+      console.error("Shortcut: generate scorers failed", err);
+      throw err;
+    }
+  }, [sessionId, ensureCharter]);
+
+  const handleShortcutDataset = useCallback(async () => {
+    setGeneratingDataset(true);
+    try {
+      await runGenerateDataset();
+      setActiveTab("dataset");
+    } finally {
+      setGeneratingDataset(false);
+    }
+  }, [runGenerateDataset]);
+
+  const handleShortcutScorers = useCallback(async () => {
+    setGeneratingScorersShortcut(true);
+    try {
+      await runGenerateScorers();
+      setActiveTab("scorers");
+    } finally {
+      setGeneratingScorersShortcut(false);
+    }
+  }, [runGenerateScorers]);
+
+  const handleShortcutBoth = useCallback(async () => {
+    setGeneratingBoth(true);
+    try {
+      // Ensure charter once, then fan out.
+      await ensureCharter();
+      await Promise.all([runGenerateDataset(), runGenerateScorers()]);
+      setActiveTab("evaluate");
+    } catch (err) {
+      console.error("Shortcut: generate both failed", err);
+    } finally {
+      setGeneratingBoth(false);
+    }
+  }, [ensureCharter, runGenerateDataset, runGenerateScorers]);
 
   const handleGenerateDataset = useCallback(async () => {
     if (!sessionId) return;
@@ -1561,12 +1710,24 @@ export default function ProjectWorkspace() {
           </div>
 
           {/* Nav groups */}
+          {(state.eval_mode === "triggered" || state.charter.task.skill_body) && (
+            <SidebarGroup label="SKILL">
+              <SidebarItem
+                label="Skill"
+                icon={<GoalsIcon width={24} height={24} />}
+                active={activeTab === "skill"}
+                onClick={() => setActiveTab("skill")}
+              />
+            </SidebarGroup>
+          )}
+
           <SidebarGroup label="INPUT">
             <SidebarItem
               label="Business Goals"
               icon={<GoalsIcon width={24} height={24} />}
               active={activeTab === "goals"}
               onClick={() => setActiveTab("goals")}
+              disabled={!skillReady}
               badge={
                 nonEmptyGoals.length > 0 ? `${nonEmptyGoals.length}` : undefined
               }
@@ -1613,13 +1774,111 @@ export default function ProjectWorkspace() {
               onClick={() => setActiveTab("evaluate")}
               disabled={!evaluateAvailable}
             />
+            <SidebarItem
+              label="Improve"
+              icon={<StarIcon width={24} height={24} />}
+              active={activeTab === "improve"}
+              onClick={() => setActiveTab("improve")}
+              disabled={!evaluateAvailable || !state.charter.task.skill_body}
+            />
           </SidebarGroup>
         </nav>
 
         {/* Main column */}
         <div className="flex-1 min-w-0 flex flex-col">
+          {(() => {
+            // Compute skill-version lineage for the regenerate banners below.
+            // Rendered as IIFE so we don't leak a const into the sibling JSX.
+            return null;
+          })()}
+          {activeTab === "skill" && urlSessionId && (
+            <SkillPanel
+              sessionId={urlSessionId}
+              skillBody={state.charter.task.skill_body || ""}
+              skillName={state.charter.task.skill_name ?? null}
+              skillDescription={state.charter.task.skill_description ?? null}
+              onSkillBodyChange={(body) => {
+                setState((prev) => ({
+                  ...prev,
+                  charter: {
+                    ...prev.charter,
+                    task: { ...prev.charter.task, skill_body: body },
+                  },
+                }));
+              }}
+              onSeeded={async () => {
+                // Re-hydrate session state so extracted goals/users/stories
+                // show up and downstream tabs unlock. Rename the project to
+                // the skill name if it's still the default. Then jump to
+                // Goals so the user's next action is reviewing extractions.
+                if (!urlSessionId) return;
+                try {
+                  const session = await getSession(urlSessionId);
+                  setState(session.state as SessionState);
+                  if (session.state.input?.goals) {
+                    setGoals([...session.state.input.goals, ""]);
+                  }
+                  if (session.state.input?.story_groups) {
+                    setStoryGroups(session.state.input.story_groups as StoryGroup[]);
+                  }
+
+                  // Rename: take skill name (if any), dedupe against other
+                  // projects with a " N" suffix, only touch generic defaults
+                  // so we don't clobber a name the user typed themselves.
+                  const desiredBase =
+                    session.state.charter?.task?.skill_name?.trim();
+                  const currentName = (session as { name?: string }).name?.trim();
+                  const isDefault =
+                    !currentName ||
+                    currentName === "Untitled skill eval" ||
+                    currentName === "Untitled project" ||
+                    currentName === "Skill eval";
+                  if (desiredBase && isDefault) {
+                    try {
+                      const list = await listSessions();
+                      const taken = new Set(
+                        list.sessions
+                          .filter((p) => p.id !== urlSessionId)
+                          .map((p) => p.name?.trim())
+                          .filter(Boolean) as string[],
+                      );
+                      let candidate = desiredBase;
+                      let n = 2;
+                      while (taken.has(candidate)) {
+                        candidate = `${desiredBase} ${n++}`;
+                      }
+                      if (candidate !== currentName) {
+                        await updateSessionName(urlSessionId, candidate);
+                        setProjectName(candidate);
+                      }
+                    } catch (err) {
+                      console.error("Failed to rename project:", err);
+                    }
+                  }
+
+                  setActiveTab("goals");
+                } catch (err) {
+                  console.error("Failed to refresh after seed:", err);
+                }
+              }}
+              onStartFromScratch={() => {
+                // SkillPanel has already flipped the session to standard mode.
+                // Reflect locally + jump to Goals so the old flow takes over.
+                setState((prev) => ({ ...prev, eval_mode: "standard" }));
+                setActiveTab("goals");
+              }}
+            />
+          )}
+
           {activeTab === "goals" && (
-            <GoalsPanel
+            <>
+              <RegenerateBanner
+                artifact="business goals"
+                activeVersion={activeSkillVersionNum}
+                sourceVersion={lineageFor("goals")}
+                onUpdateSuggestions={() => fetchGoalSuggestions(goals)}
+              />
+          <GoalsPanel
               goals={goals}
               onGoalsChange={handleGoalsChange}
               onGoalCommit={handleGoalCommit}
@@ -1640,9 +1899,17 @@ export default function ProjectWorkspace() {
               rightBottom={showAssistant ? undefined : aiAssistButton}
               rightBottomExpanded={showAssistant ? polarisPanel : undefined}
             />
+            </>
           )}
 
           {activeTab === "users" && (
+            <>
+              <RegenerateBanner
+                artifact="user stories"
+                activeVersion={activeSkillVersionNum}
+                sourceVersion={lineageFor("stories")}
+                onUpdateSuggestions={() => fetchStorySuggestions(goals, storyGroups)}
+              />
             <UsersPanel
               storyGroups={storyGroups}
               onStoryGroupsChange={(groups) => {
@@ -1666,11 +1933,26 @@ export default function ProjectWorkspace() {
               hasCharter={hasCharter}
               rightBottom={showAssistant ? undefined : aiAssistButton}
               rightBottomExpanded={showAssistant ? polarisPanel : undefined}
+              onGenerateDataset={handleShortcutDataset}
+              onGenerateScorers={handleShortcutScorers}
+              onGenerateBoth={handleShortcutBoth}
+              generatingDataset={generatingDataset}
+              generatingScorers={generatingScorersShortcut}
+              generatingBoth={generatingBoth}
             />
+            </>
           )}
 
           {activeTab === "charter" && (
-            <CharterPanel
+            <>
+              <RegenerateBanner
+                artifact="charter"
+                activeVersion={activeSkillVersionNum}
+                sourceVersion={lineageFor("charter")}
+                onUpdateSuggestions={handleSuggest}
+                onRegenerate={handleSubmitIntake}
+              />
+              <CharterPanel
               charter={state.charter}
               validation={state.validation}
               activeCriteria={activeCriteria}
@@ -1701,10 +1983,20 @@ export default function ProjectWorkspace() {
               rightBottom={showAssistant ? undefined : aiAssistButton}
               rightBottomExpanded={showAssistant ? polarisPanel : undefined}
             />
+            </>
           )}
 
           {activeTab === "dataset" && (
             <div className="flex-1 min-h-0 flex flex-col">
+              <RegenerateBanner
+                artifact="dataset"
+                activeVersion={activeSkillVersionNum}
+                sourceVersion={lineageFor("dataset")}
+                onUpdateSuggestions={() => { handleShowCoverageMap(); }}
+                updateSuggestionsLabel="Check gaps"
+                onRegenerate={() => { handleSynthesize(); }}
+                regenerateLabel="Generate more"
+              />
               {dataset && (dataset.examples?.length || 0) > 0 ? (
                 <ExampleReview
                   examples={dataset.examples || []}
@@ -1784,25 +2076,88 @@ export default function ProjectWorkspace() {
           )}
 
           {activeTab === "scorers" && (
-            <ScorersPanel
-              charter={state.charter}
-              hasDataset={!!dataset}
-              sessionId={sessionId || ""}
-              scorers={scorers}
-              onScorersChange={(newScorers) => {
-                setScorers(newScorers);
-                if (sessionId) {
-                  saveScorers(sessionId, newScorers).catch((err) =>
-                    console.error("Failed to save scorers:", err),
-                  );
-                }
+            <>
+              <RegenerateBanner
+                artifact="scorers"
+                activeVersion={activeSkillVersionNum}
+                sourceVersion={lineageFor("scorers")}
+                onRegenerate={async () => {
+                  if (!sessionId) return;
+                  try {
+                    const res = await generateScorers(sessionId);
+                    setScorers(res.scorers);
+                    // Refresh state so lineage stamp propagates to banner.
+                    const s = await getSession(sessionId);
+                    setState(s.state as SessionState);
+                  } catch (err) {
+                    console.error("Failed to regenerate scorers:", err);
+                  }
+                }}
+              />
+              <ScorersPanel
+                charter={state.charter}
+                hasDataset={!!dataset}
+                sessionId={sessionId || ""}
+                scorers={scorers}
+                onScorersChange={(newScorers) => {
+                  setScorers(newScorers);
+                  if (sessionId) {
+                    saveScorers(sessionId, newScorers).catch((err) =>
+                      console.error("Failed to save scorers:", err),
+                    );
+                  }
+                }}
+                onNavigateToEvaluate={() => setActiveTab("evaluate")}
+              />
+            </>
+          )}
+
+          {activeTab === "evaluate" && urlSessionId && (
+            <EvaluatePanel
+              sessionId={urlSessionId}
+              dataset={dataset}
+              scorerCount={scorers.length}
+              hasSkillBody={!!state.charter.task.skill_body}
+              onExport={handleExport}
+              onRequestImprove={() => {
+                setImproveAutoAnalyze(true);
+                setActiveTab("improve");
               }}
-              onNavigateToEvaluate={() => setActiveTab("evaluate")}
+              autoRun={evalAutoRun}
+              onAutoRunConsumed={() => setEvalAutoRun(false)}
+              onGoToSkill={() => setActiveTab("skill")}
+              onGoToDataset={() => setActiveTab("dataset")}
+              onGoToScorers={() => setActiveTab("scorers")}
+              onGenerateScorersInline={async () => {
+                if (!urlSessionId) return;
+                const res = await generateScorers(urlSessionId);
+                setScorers(res.scorers);
+                const s = await getSession(urlSessionId);
+                setState(s.state as SessionState);
+              }}
             />
           )}
 
-          {activeTab === "evaluate" && (
-            <EvaluatePanel dataset={dataset} onExport={handleExport} />
+          {activeTab === "improve" && urlSessionId && state.charter.task.skill_body && (
+            <ImprovePanel
+              sessionId={urlSessionId}
+              skillBody={state.charter.task.skill_body}
+              onSkillBodyChange={(body) =>
+                setState((prev) => ({
+                  ...prev,
+                  charter: {
+                    ...prev.charter,
+                    task: { ...prev.charter.task, skill_body: body },
+                  },
+                }))
+              }
+              onRequestEvaluate={() => {
+                setEvalAutoRun(true);
+                setActiveTab("evaluate");
+              }}
+              autoAnalyze={improveAutoAnalyze}
+              onAutoAnalyzeConsumed={() => setImproveAutoAnalyze(false)}
+            />
           )}
         </div>
 
