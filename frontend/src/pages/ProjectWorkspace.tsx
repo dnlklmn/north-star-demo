@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { useParams, useNavigate } from "react-router-dom";
-import { Upload, Loader2 } from "lucide-react";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
+import { ArrowRight as ArrowRightLucide, Loader2, Sparkles as SparklesIcon } from "lucide-react";
 import {
   GearIcon,
   ChatBubbleIcon,
@@ -25,14 +25,13 @@ import type {
   GapAnalysis,
   ScorerDef,
   AlignmentEntry,
+  TaskDefinition,
 } from "../types";
 import {
   createSession,
   getSession,
   sendMessage,
   patchCharter,
-  finalizeCharter,
-  validateCharter,
   suggestForCharter,
   suggestGoals,
   evaluateGoals,
@@ -55,6 +54,7 @@ import {
   listSessions,
 } from "../api";
 import Button from "../components/ui/Button";
+import { uniqueProjectName } from "../utils/skillFrontmatter";
 import IconButton from "../components/ui/IconButton";
 import GoalsPanel from "../components/GoalsPanel";
 import UsersPanel from "../components/UsersPanel";
@@ -63,7 +63,6 @@ import ScorersPanel from "../components/ScorersPanel";
 import EvaluatePanel from "../components/EvaluatePanel";
 import ImprovePanel from "../components/ImprovePanel";
 import SkillPanel from "../components/SkillPanel";
-import RegenerateBanner from "../components/RegenerateBanner";
 import ConversationPanel from "../components/ConversationPanel";
 import ExampleReview from "../components/ExampleReview";
 import CoverageMap from "../components/CoverageMap";
@@ -144,6 +143,7 @@ function formatStoryGroups(groups: StoryGroup[]): string {
 
 export default function ProjectWorkspace() {
   const { sessionId: urlSessionId } = useParams<{ sessionId: string }>();
+  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
 
   // --- Navigation ---
@@ -194,7 +194,13 @@ export default function ProjectWorkspace() {
   // --- Dirty tracking: has a section changed since the next section was last touched? ---
   const [goalsDirty, setGoalsDirty] = useState(false);
   const [storiesDirty, setStoriesDirty] = useState(false);
-  const [charterDirty, setCharterDirty] = useState(false);
+  // Charter-edit → downstream stale. Flip true when the charter changes after
+  // hydration; flip false after a successful (re)generation of that artifact.
+  // Client-side only — survives tab switches within the session but not a
+  // reload. Triggered-mode sessions also have skill-version lineage as a
+  // separate mechanism; these flags cover standard mode too.
+  const [datasetStale, setDatasetStale] = useState(false);
+  const [scorersStale, setScorersStale] = useState(false);
 
   // --- Dataset phase state ---
   const [dataset, setDataset] = useState<Dataset | null>(null);
@@ -257,38 +263,47 @@ export default function ProjectWorkspace() {
           setScorers(s.scorers);
         }
 
-        // Determine active tab
-        const hasCharter = !!(
-          s.charter.coverage.criteria.length || s.charter.alignment.length
-        );
-        const hasSkillBody = !!s.charter.task.skill_body;
-        const isTriggered = s.eval_mode === "triggered";
+         // Determine active tab
+         const hasCharter = !!(
+           s.charter.coverage.criteria.length || s.charter.alignment.length
+         );
+         const hasSkillBody = !!s.charter.task.skill_body;
+         const isTriggered = s.eval_mode === "triggered";
 
-        // Try to load dataset. For skill-mode sessions that haven't built a
-        // charter yet, land on the Skill tab so the user sees what they just
-        // pasted — not the empty goals screen. Brand-new triggered sessions
-        // (no skill body yet) also land on Skill so the paste form is the
-        // first thing the user sees.
-        try {
-          const ds = await getDataset(urlSessionId);
-          setDataset(ds);
-          if (ds.examples?.length > 0) {
-            setActiveTab("dataset");
-          } else if (hasCharter) {
-            setActiveTab("charter");
-          } else if (hasSkillBody || isTriggered) {
-            setActiveTab("skill");
-          }
-        } catch {
-          // No dataset yet
-          if (hasCharter) {
-            setActiveTab("charter");
-          } else if (hasSkillBody || isTriggered) {
-            setActiveTab("skill");
-          } else if (s.input.story_groups && s.input.story_groups.length > 0) {
-            setActiveTab("users");
-          }
-        }
+         // Check for ?tab= query param (e.g. ?tab=goals from Home modal)
+         const tabParam = searchParams.get("tab");
+         const validTabs: ActiveTab[] = ["skill", "goals", "users", "charter", "dataset", "scorers", "evaluate", "improve"];
+         const tabFromUrl = validTabs.includes(tabParam as ActiveTab) ? tabParam as ActiveTab : null;
+
+         // Try to load dataset. For skill-mode sessions that haven't built a
+         // charter yet, land on the Skill tab so the user sees what they just
+         // pasted — not the empty goals screen. Brand-new triggered sessions
+         // (no skill body yet) also land on Skill so the paste form is the
+         // first thing the user sees.
+         try {
+           const ds = await getDataset(urlSessionId);
+           setDataset(ds);
+           if (tabFromUrl) {
+             setActiveTab(tabFromUrl);
+           } else if (ds.examples?.length > 0) {
+             setActiveTab("dataset");
+           } else if (hasCharter) {
+             setActiveTab("charter");
+           } else if (hasSkillBody || isTriggered) {
+             setActiveTab("skill");
+           }
+         } catch {
+           // No dataset yet
+           if (tabFromUrl) {
+             setActiveTab(tabFromUrl);
+           } else if (hasCharter) {
+             setActiveTab("charter");
+           } else if (hasSkillBody || isTriggered) {
+             setActiveTab("skill");
+           } else if (s.input.story_groups && s.input.story_groups.length > 0) {
+             setActiveTab("users");
+           }
+         }
 
         if (s.input.business_goals || s.input.user_stories) {
           setSavedInput({
@@ -343,18 +358,6 @@ export default function ProjectWorkspace() {
   const [generatingDataset, setGeneratingDataset] = useState(false);
   const [generatingScorersShortcut, setGeneratingScorersShortcut] = useState(false);
   const [generatingBoth, setGeneratingBoth] = useState(false);
-
-  // Skill-version lineage for "Regenerate" banners on downstream tabs.
-  const skillVersions = state.skill_versions || [];
-  const activeSkillVersionId = state.active_skill_version_id || null;
-  const activeSkillVersion = skillVersions.find(v => v.id === activeSkillVersionId) || skillVersions[skillVersions.length - 1] || null;
-  const lineageFor = (artifact: string): number | null => {
-    const sourceId = state.generated_at_skill_version?.[artifact];
-    if (!sourceId) return null;
-    const v = skillVersions.find(x => x.id === sourceId);
-    return v?.version ?? null;
-  };
-  const activeSkillVersionNum = activeSkillVersion?.version ?? null;
 
   // --- Project name ---
   const startEditingName = () => {
@@ -1005,14 +1008,7 @@ export default function ProjectWorkspace() {
   );
 
   const handleEditTask = useCallback(
-    async (
-      field:
-        | "input_description"
-        | "output_description"
-        | "sample_input"
-        | "sample_output",
-      value: string,
-    ) => {
+    async (field: keyof TaskDefinition, value: string) => {
       if (!sessionId) return;
       const task = { ...state.charter.task, [field]: value };
 
@@ -1025,29 +1021,6 @@ export default function ProjectWorkspace() {
     },
     [sessionId, state.charter.task],
   );
-
-  const handleValidate = useCallback(async () => {
-    if (!sessionId) return;
-    setLoading(true);
-    try {
-      const res = await validateCharter(sessionId);
-      setState((prev) => ({ ...prev, validation: res.validation }));
-    } catch (err) {
-      console.error("Failed to validate:", err);
-    } finally {
-      setLoading(false);
-    }
-  }, [sessionId]);
-
-  // Mark charter dirty when it changes (after initial hydration)
-  const charterInitRef = useRef(true)
-  useEffect(() => {
-    if (charterInitRef.current) {
-      charterInitRef.current = false
-      return
-    }
-    if (hasCharter) setCharterDirty(true)
-  }, [state.charter]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // --- Charter suggestion state ---
   const [charterSuggestionsLoading, setCharterSuggestionsLoading] =
@@ -1109,6 +1082,19 @@ export default function ProjectWorkspace() {
     charterRef.current = state.charter;
   }, [state.charter]);
 
+  // Mark downstream artifacts stale whenever the charter changes after the
+  // initial hydration. Only stamp stale for artifacts that actually exist —
+  // there's no "regenerate" affordance for something that was never generated.
+  const charterChangeInitRef = useRef(true);
+  useEffect(() => {
+    if (charterChangeInitRef.current) {
+      charterChangeInitRef.current = false;
+      return;
+    }
+    if (dataset) setDatasetStale(true);
+    if (scorers.length > 0) setScorersStale(true);
+  }, [state.charter]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleAcceptSuggestion = useCallback(
     async (suggestion: Suggestion) => {
       if (!sessionId) return;
@@ -1163,25 +1149,12 @@ export default function ProjectWorkspace() {
     [scheduleCharterSuggestionRegen],
   );
 
-  // --- Phase transition: charter -> dataset ---
+  // --- Phase transition: charter -> dataset/scorers ---
 
-  const handleStartDataset = useCallback(async () => {
-    if (!sessionId) return;
-    setLoading(true);
-    try {
-      await finalizeCharter(sessionId);
-      setActiveTab("dataset");
-    } catch (err) {
-      console.error("Failed to finalize charter:", err);
-    } finally {
-      setLoading(false);
-    }
-  }, [sessionId]);
-
-  // "Skip ahead" shortcuts from the User Stories screen — run charter
-  // generation first if it doesn't exist yet, then fire whichever downstream
-  // action the user picked. Dataset and scorers are independent so the
-  // "both" variant runs them in parallel via Promise.all.
+  // Shortcuts triggered from the Charter page footer: run any prerequisites
+  // (charter generation) if missing, then kick off the downstream work —
+  // dataset, scorers, or both in parallel — and navigate to the relevant
+  // tab so the user sees the output.
   const ensureCharter = useCallback(async () => {
     if (hasCharter) return;
     await handleSubmitIntake();
@@ -1223,38 +1196,89 @@ export default function ProjectWorkspace() {
   }, [sessionId, ensureCharter]);
 
   const handleShortcutDataset = useCallback(async () => {
+    // "Go to" short-circuit: artifact exists and isn't marked stale, so just
+    // navigate — no point regenerating over a fresh dataset.
+    if (dataset && !datasetStale) {
+      setActiveTab("dataset");
+      return;
+    }
+    // Regenerating an existing dataset is destructive — confirm so the user
+    // doesn't lose their reviewed examples by an accidental click.
+    if (dataset && datasetStale) {
+      const ok = window.confirm(
+        "Regenerate the dataset?\n\nThis replaces the current examples — your review status, edits, and labels will be lost.",
+      );
+      if (!ok) return;
+    }
+    // Switch tabs first so the user immediately sees the spinner instead of
+    // staring at the charter page wondering whether anything happened.
+    setActiveTab("dataset");
     setGeneratingDataset(true);
     try {
       await runGenerateDataset();
-      setActiveTab("dataset");
+      setDatasetStale(false);
     } finally {
       setGeneratingDataset(false);
     }
-  }, [runGenerateDataset]);
+  }, [dataset, datasetStale, runGenerateDataset]);
 
   const handleShortcutScorers = useCallback(async () => {
+    if (scorers.length > 0 && !scorersStale) {
+      setActiveTab("scorers");
+      return;
+    }
+    if (scorers.length > 0 && scorersStale) {
+      const ok = window.confirm(
+        "Regenerate scorers?\n\nThis replaces the current scorer code — any manual edits will be lost.",
+      );
+      if (!ok) return;
+    }
+    setActiveTab("scorers");
     setGeneratingScorersShortcut(true);
     try {
       await runGenerateScorers();
-      setActiveTab("scorers");
+      setScorersStale(false);
     } finally {
       setGeneratingScorersShortcut(false);
     }
-  }, [runGenerateScorers]);
+  }, [scorers.length, scorersStale, runGenerateScorers]);
 
   const handleShortcutBoth = useCallback(async () => {
+    const datasetFresh = !!dataset && !datasetStale;
+    const scorersFresh = scorers.length > 0 && !scorersStale;
+    // Confirm only the side(s) that are being regenerated. If both fresh we
+    // wouldn't be here in the first place; if both missing, no confirm.
+    const datasetWillRegen = !!dataset && datasetStale;
+    const scorersWillRegen = scorers.length > 0 && scorersStale;
+    if (datasetWillRegen || scorersWillRegen) {
+      const parts: string[] = [];
+      if (datasetWillRegen) parts.push("dataset (review status + edits will be lost)");
+      if (scorersWillRegen) parts.push("scorers (manual code edits will be lost)");
+      const ok = window.confirm(
+        `Regenerate ${parts.join(" and ")}?`,
+      );
+      if (!ok) return;
+    }
+    // Land on the dataset tab right away so the spinner shows there while
+    // both jobs run in the background. Once both finish we move on to the
+    // evaluate tab, which is the natural next step after generation.
+    setActiveTab("dataset");
     setGeneratingBoth(true);
     try {
-      // Ensure charter once, then fan out.
+      // Ensure charter once, then fan out. Skip the ones that are already
+      // fresh so users don't regenerate downstream work unnecessarily.
       await ensureCharter();
-      await Promise.all([runGenerateDataset(), runGenerateScorers()]);
+      const jobs: Promise<void>[] = [];
+      if (!datasetFresh) jobs.push(runGenerateDataset().then(() => { setDatasetStale(false); }));
+      if (!scorersFresh) jobs.push(runGenerateScorers().then(() => { setScorersStale(false); }));
+      await Promise.all(jobs);
       setActiveTab("evaluate");
     } catch (err) {
       console.error("Shortcut: generate both failed", err);
     } finally {
       setGeneratingBoth(false);
     }
-  }, [ensureCharter, runGenerateDataset, runGenerateScorers]);
+  }, [ensureCharter, runGenerateDataset, runGenerateScorers, dataset, datasetStale, scorers.length, scorersStale]);
 
   const handleGenerateDataset = useCallback(async () => {
     if (!sessionId) return;
@@ -1267,72 +1291,12 @@ export default function ProjectWorkspace() {
       await synthesizeExamples(ds.id);
       const fullDs = await getDataset(sessionId);
       setDataset(fullDs);
+      setDatasetStale(false);
     } catch (err) {
       console.error("Failed to generate dataset:", err);
     } finally {
       setLoading(false);
     }
-  }, [sessionId, dataset]);
-
-  const handleImportDataset = useCallback(async () => {
-    if (!sessionId) return;
-    const input = document.createElement("input");
-    input.type = "file";
-    input.accept = ".json,.csv";
-    input.onchange = async (e) => {
-      const file = (e.target as HTMLInputElement).files?.[0];
-      if (!file) return;
-
-      setLoading(true);
-      try {
-        if (!dataset) {
-          await createDataset(sessionId);
-        }
-        const ds = await getDataset(sessionId);
-
-        const text = await file.text();
-        let examples: Array<{
-          input: string;
-          expected_output: string;
-          feature_area?: string;
-          label?: string;
-        }>;
-
-        if (file.name.endsWith(".csv")) {
-          const lines = text.split("\n").filter((l) => l.trim());
-          const headers = lines[0]
-            .split(",")
-            .map((h) => h.trim().toLowerCase());
-          examples = lines.slice(1).map((line) => {
-            const values = line.split(",");
-            const obj: Record<string, string> = {};
-            headers.forEach((h, i) => {
-              obj[h] = values[i]?.trim() || "";
-            });
-            return {
-              input: obj.input || obj.question || obj.scenario || "",
-              expected_output:
-                obj.expected_output || obj.output || obj.answer || "",
-              feature_area: obj.feature_area || "unassigned",
-              label: obj.label,
-            };
-          });
-        } else {
-          const parsed = JSON.parse(text);
-          examples = Array.isArray(parsed) ? parsed : parsed.examples || [];
-        }
-
-        const { importExamples } = await import("../api");
-        await importExamples(ds.id, examples);
-        const fullDs = await getDataset(sessionId);
-        setDataset(fullDs);
-      } catch (err) {
-        console.error("Failed to import:", err);
-      } finally {
-        setLoading(false);
-      }
-    };
-    input.click();
   }, [sessionId, dataset]);
 
   // --- Dataset phase handlers ---
@@ -1348,6 +1312,7 @@ export default function ProjectWorkspace() {
         );
         const fullDs = await getDataset(dataset.session_id);
         setDataset(fullDs);
+        setDatasetStale(false);
       } catch (err) {
         console.error("Failed to synthesize:", err);
       } finally {
@@ -1499,60 +1464,6 @@ export default function ProjectWorkspace() {
     }
   }, [dataset]);
 
-  const handleImport = useCallback(() => {
-    const input = document.createElement("input");
-    input.type = "file";
-    input.accept = ".json,.csv";
-    input.onchange = async (e) => {
-      const file = (e.target as HTMLInputElement).files?.[0];
-      if (!file || !dataset) return;
-
-      setLoading(true);
-      try {
-        const text = await file.text();
-        let examples: Array<{
-          input: string;
-          expected_output: string;
-          feature_area?: string;
-          label?: string;
-        }>;
-
-        if (file.name.endsWith(".csv")) {
-          const lines = text.split("\n").filter((l) => l.trim());
-          const headers = lines[0]
-            .split(",")
-            .map((h) => h.trim().toLowerCase());
-          examples = lines.slice(1).map((line) => {
-            const values = line.split(",");
-            const obj: Record<string, string> = {};
-            headers.forEach((h, i) => {
-              obj[h] = values[i]?.trim() || "";
-            });
-            return {
-              input: obj.input || obj.question || obj.scenario || "",
-              expected_output:
-                obj.expected_output || obj.output || obj.answer || "",
-              feature_area: obj.feature_area || "unassigned",
-              label: obj.label,
-            };
-          });
-        } else {
-          const parsed = JSON.parse(text);
-          examples = Array.isArray(parsed) ? parsed : parsed.examples || [];
-        }
-
-        const { importExamples } = await import("../api");
-        await importExamples(dataset.id, examples);
-        const fullDs = await getDataset(dataset.session_id);
-        setDataset(fullDs);
-      } catch (err) {
-        console.error("Failed to import:", err);
-      } finally {
-        setLoading(false);
-      }
-    };
-    input.click();
-  }, [dataset]);
 
   // --- Render ---
 
@@ -1607,50 +1518,46 @@ export default function ProjectWorkspace() {
 
   // --- Next-button state per panel ---
 
-  // Goals → User Stories
+  // Goals → User Stories. Same tri-state pattern as the other transitions:
+  //   * no stories yet         → "Generate user stories" (primary)
+  //   * stories exist, goals changed → "Regenerate user stories" (primary)
+  //   * stories exist, no changes    → "Go to user stories" (neutral)
+  // Stories can be agent-extracted from goals, user-authored, or both — but
+  // the CTA unifies on "Generate" for consistency with downstream steps.
   const hasAnyStories = storyGroups.some(
     (g) => g.role.trim() && g.stories.some((s) => s.what.trim()),
   );
   const goalsNextLabel = !hasAnyStories
-    ? "Define user stories"
+    ? "Generate user stories"
     : goalsDirty
-      ? "Update user stories"
-      : "User stories";
+      ? "Regenerate user stories"
+      : "Go to user stories";
   const goalsNextDisabled = nonEmptyGoals.length < 2;
-  const goalsNextVariant: "primary" | "neutral" = goalsNextDisabled
-    ? "neutral"
-    : goalsDirty || !hasAnyStories
-      ? "primary"
-      : "neutral";
+  // Only "Generate" (no stories yet) gets primary. Regenerate + Go to stay
+  // neutral — re-running is safe + reversible, so we don't visually push it.
+  const goalsNextVariant: "primary" | "neutral" =
+    !goalsNextDisabled && !hasAnyStories ? "primary" : "neutral";
 
-  // User Stories → Charter
+  // User Stories → Charter. Three CTA states:
+  //   * no charter yet           → "Generate charter" (primary)
+  //   * charter exists, dirty    → "Regenerate charter" (primary)
+  //   * charter exists, unchanged → "Go to charter" (neutral)
+  // "Dirty" here means goals OR stories have changed since the charter was
+  // last (re)generated, i.e. the previous steps are ahead of the charter.
+  const upstreamDirty = storiesDirty || goalsDirty;
   const storiesNextLabel = !hasCharter
     ? "Generate charter"
-    : storiesDirty
-      ? "Update charter"
-      : "Charter";
+    : upstreamDirty
+      ? "Regenerate charter"
+      : "Go to charter";
   const storiesHasContent = storyGroups.some(
     (g) => g.role.trim() && g.stories.some((s) => s.what.trim()),
   );
   const storiesNextDisabled = !storiesHasContent || loading;
-  const storiesNextVariant: "primary" | "neutral" = storiesNextDisabled
-    ? "neutral"
-    : storiesDirty || !hasCharter
-      ? "primary"
-      : "neutral";
-
-  // Charter → Dataset
-  const charterNextLabel = !dataset
-    ? "Generate dataset"
-    : charterDirty
-      ? "Update dataset"
-      : "Dataset";
-  const charterNextDisabled = !hasCharter || loading;
-  const charterNextVariant: "primary" | "neutral" = charterNextDisabled
-    ? "neutral"
-    : charterDirty || !dataset
-      ? "primary"
-      : "neutral";
+  // Same rule as Goals → Stories: primary only on first-time Generate;
+  // Regenerate + Go to are neutral.
+  const storiesNextVariant: "primary" | "neutral" =
+    !storiesNextDisabled && !hasCharter ? "primary" : "neutral";
 
   return (
     <div className="h-full flex flex-col bg-bg-default text-fg-contrast">
@@ -1842,12 +1749,8 @@ export default function ProjectWorkspace() {
                           .map((p) => p.name?.trim())
                           .filter(Boolean) as string[],
                       );
-                      let candidate = desiredBase;
-                      let n = 2;
-                      while (taken.has(candidate)) {
-                        candidate = `${desiredBase} ${n++}`;
-                      }
-                      if (candidate !== currentName) {
+                      const candidate = uniqueProjectName(desiredBase, taken);
+                      if (candidate && candidate !== currentName) {
                         await updateSessionName(urlSessionId, candidate);
                         setProjectName(candidate);
                       }
@@ -1867,17 +1770,12 @@ export default function ProjectWorkspace() {
                 setState((prev) => ({ ...prev, eval_mode: "standard" }));
                 setActiveTab("goals");
               }}
+              onNext={() => setActiveTab("goals")}
             />
           )}
 
           {activeTab === "goals" && (
             <>
-              <RegenerateBanner
-                artifact="business goals"
-                activeVersion={activeSkillVersionNum}
-                sourceVersion={lineageFor("goals")}
-                onUpdateSuggestions={() => fetchGoalSuggestions(goals)}
-              />
           <GoalsPanel
               goals={goals}
               onGoalsChange={handleGoalsChange}
@@ -1895,7 +1793,6 @@ export default function ProjectWorkspace() {
               nextLabel={goalsNextLabel}
               nextVariant={goalsNextVariant}
               nextDisabled={goalsNextDisabled}
-              hasCharter={hasCharter}
               rightBottom={showAssistant ? undefined : aiAssistButton}
               rightBottomExpanded={showAssistant ? polarisPanel : undefined}
             />
@@ -1904,12 +1801,6 @@ export default function ProjectWorkspace() {
 
           {activeTab === "users" && (
             <>
-              <RegenerateBanner
-                artifact="user stories"
-                activeVersion={activeSkillVersionNum}
-                sourceVersion={lineageFor("stories")}
-                onUpdateSuggestions={() => fetchStorySuggestions(goals, storyGroups)}
-              />
             <UsersPanel
               storyGroups={storyGroups}
               onStoryGroupsChange={(groups) => {
@@ -1921,37 +1812,37 @@ export default function ProjectWorkspace() {
               onAcceptStory={handleAcceptStory}
               onDismissStory={handleDismissStory}
               storySuggestionsLoading={storySuggestionsLoading}
-              onBackToGoals={() => setActiveTab("goals")}
               onNext={() => {
                 setStoriesDirty(false);
+                // "Go to charter" skips regeneration when nothing upstream
+                // changed. Otherwise generate/regenerate then navigate — the
+                // submit handler already switches tabs on success.
+                if (hasCharter && !upstreamDirty) {
+                  setActiveTab("charter");
+                  return;
+                }
+                if (hasCharter && upstreamDirty) {
+                  // Confirm before overwriting an existing charter — user
+                  // edits to criteria, alignment entries, etc. will be lost.
+                  const ok = window.confirm(
+                    "Regenerate the charter?\n\nThis replaces the current criteria, alignment entries, and rot signals with a fresh draft built from your goals and stories.",
+                  );
+                  if (!ok) return;
+                }
                 handleSubmitIntake();
               }}
               nextLabel={storiesNextLabel}
               nextVariant={storiesNextVariant}
               nextDisabled={storiesNextDisabled}
               loading={loading}
-              hasCharter={hasCharter}
               rightBottom={showAssistant ? undefined : aiAssistButton}
               rightBottomExpanded={showAssistant ? polarisPanel : undefined}
-              onGenerateDataset={handleShortcutDataset}
-              onGenerateScorers={handleShortcutScorers}
-              onGenerateBoth={handleShortcutBoth}
-              generatingDataset={generatingDataset}
-              generatingScorers={generatingScorersShortcut}
-              generatingBoth={generatingBoth}
             />
             </>
           )}
 
           {activeTab === "charter" && (
             <>
-              <RegenerateBanner
-                artifact="charter"
-                activeVersion={activeSkillVersionNum}
-                sourceVersion={lineageFor("charter")}
-                onUpdateSuggestions={handleSuggest}
-                onRegenerate={handleSubmitIntake}
-              />
               <CharterPanel
               charter={state.charter}
               validation={state.validation}
@@ -1972,53 +1863,94 @@ export default function ProjectWorkspace() {
               onCriteriaChanged={scheduleCharterSuggestionRegen}
               suggestionsLoading={charterSuggestionsLoading}
               loading={loading}
-              onBackToGoals={() => setActiveTab("goals")}
-              onNext={() => {
-                setCharterDirty(false);
-                handleStartDataset();
-              }}
-              nextLabel={charterNextLabel}
-              nextVariant={charterNextVariant}
-              nextDisabled={charterNextDisabled}
               rightBottom={showAssistant ? undefined : aiAssistButton}
               rightBottomExpanded={showAssistant ? polarisPanel : undefined}
+              onGenerateDataset={handleShortcutDataset}
+              onGenerateScorers={handleShortcutScorers}
+              onGenerateBoth={handleShortcutBoth}
+              generatingDataset={generatingDataset}
+              generatingScorers={generatingScorersShortcut}
+              generatingBoth={generatingBoth}
+              datasetState={
+                !dataset ? "missing" : datasetStale ? "stale" : "fresh"
+              }
+              scorersState={
+                scorers.length === 0 ? "missing" : scorersStale ? "stale" : "fresh"
+              }
             />
             </>
           )}
 
           {activeTab === "dataset" && (
-            <div className="flex-1 min-h-0 flex flex-col">
-              <RegenerateBanner
-                artifact="dataset"
-                activeVersion={activeSkillVersionNum}
-                sourceVersion={lineageFor("dataset")}
-                onUpdateSuggestions={() => { handleShowCoverageMap(); }}
-                updateSuggestionsLabel="Check gaps"
-                onRegenerate={() => { handleSynthesize(); }}
-                regenerateLabel="Generate more"
-              />
+            <div className="flex-1 min-h-0 flex flex-col relative">
               {dataset && (dataset.examples?.length || 0) > 0 ? (
-                <ExampleReview
-                  examples={dataset.examples || []}
-                  charter={state.charter}
-                  loading={loading}
-                  onUpdateExample={handleUpdateExample}
-                  onDeleteExample={handleDeleteExample}
-                  onImport={handleImport}
-                  onSynthesize={handleSynthesize}
-                  onAutoReview={handleAutoReview}
-                  onExport={handleExport}
-                  onShowCoverageMap={handleShowCoverageMap}
-                  onNavigateToScorers={() => setActiveTab("scorers")}
-                  onHeaderClick={() => {}}
-                  isFocused={true}
-                  onSuggestRevision={handleSuggestRevision}
-                  onSuggestRevisions={handleBulkSuggestRevisions}
-                  onAcceptRevision={handleAcceptRevision}
-                  onDismissRevision={handleDismissRevision}
-                  revisionsLoading={revisionsLoading}
-                />
+                <>
+                  <ExampleReview
+                    examples={dataset.examples || []}
+                    charter={state.charter}
+                    loading={loading}
+                    onUpdateExample={handleUpdateExample}
+                    onDeleteExample={handleDeleteExample}
+                    onSynthesize={handleSynthesize}
+                    onAutoReview={handleAutoReview}
+                    onExport={handleExport}
+                    onShowCoverageMap={handleShowCoverageMap}
+                    onNavigateToScorers={() => setActiveTab("scorers")}
+                    onHeaderClick={() => {}}
+                    isFocused={true}
+                    onSuggestRevision={handleSuggestRevision}
+                    onSuggestRevisions={handleBulkSuggestRevisions}
+                    onAcceptRevision={handleAcceptRevision}
+                    onDismissRevision={handleDismissRevision}
+                    revisionsLoading={revisionsLoading}
+                  />
+                  {/* Once every example has been reviewed, surface the tri-state
+                      scorers CTA — Generate / Regenerate / Go to — mirroring the
+                      footer pattern on Goals / Stories / Charter. Hidden while
+                      the user is still reviewing so it doesn't distract. */}
+                  {(() => {
+                    const allReviewed = (dataset?.examples || []).length > 0 &&
+                      !(dataset?.examples || []).some((e) => e.review_status === 'pending');
+                    if (!allReviewed) return null;
+                    const scorersStateLocal: "missing" | "stale" | "fresh" =
+                      scorers.length === 0 ? "missing" : scorersStale ? "stale" : "fresh";
+                    const label = scorersStateLocal === "missing"
+                      ? "Generate scorers"
+                      : scorersStateLocal === "stale"
+                        ? "Regenerate scorers"
+                        : "Go to scorers";
+                    const isGoTo = scorersStateLocal === "fresh";
+                    // Primary only when actually generating for the first
+                    // time. Regenerate + Go to stay neutral so the page
+                    // doesn't insistently push a re-run.
+                    const isPrimary = scorersStateLocal === "missing";
+                    return (
+                      <div className="absolute bottom-8 right-8 pointer-events-auto">
+                        <Button
+                          size="big"
+                          variant={isPrimary ? "primary" : "neutral"}
+                          onClick={() => void handleShortcutScorers()}
+                          disabled={!!(generatingScorersShortcut || loading)}
+                        >
+                          {generatingScorersShortcut ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                          ) : isGoTo ? (
+                            <ArrowRightLucide className="w-4 h-4" />
+                          ) : (
+                            <SparklesIcon className="w-4 h-4" />
+                          )}
+                          {label}
+                        </Button>
+                      </div>
+                    );
+                  })()}
+                </>
               ) : (
+                // Empty state for when the user lands on Dataset directly
+                // (no charter-page shortcut involved). Generation is the only
+                // path — no "import or generate?" decision — so the button
+                // just kicks off synthesis. Shortcuts from the charter page
+                // have already started generation by the time we land here.
                 <div className="flex-1 flex items-center justify-center">
                   <div className="flex flex-col items-center gap-6 max-w-md text-center">
                     <div>
@@ -2026,49 +1958,36 @@ export default function ProjectWorkspace() {
                         Build your dataset
                       </h2>
                       <p className="text-sm text-fg-dim">
-                        Create evaluation examples from your charter criteria,
-                        or import an existing dataset.
+                        Generate evaluation examples from your charter criteria.
                       </p>
                     </div>
-                    <div className="flex items-center gap-4">
-                      <button
-                        onClick={handleGenerateDataset}
-                        disabled={loading}
-                        className="flex flex-col items-center gap-2 px-6 py-5 border border-border-hint hover:border-border-primary hover:bg-fill-neutral/30 transition-colors group disabled:opacity-50"
-                      >
-                        <AIIcon
-                          width={24}
-                          height={24}
-                          className="text-fg-dim group-hover:text-fg-primary transition-colors"
-                        />
-                        <span className="text-sm font-medium text-fg-contrast">
-                          {loading ? "Generating..." : "Generate"}
-                        </span>
-                        <span className="text-xs text-fg-dim">
-                          Create examples from charter
-                        </span>
-                      </button>
-                      <span className="text-xs text-fg-dim">or</span>
-                      <button
-                        onClick={handleImportDataset}
-                        disabled={loading}
-                        className="flex flex-col items-center gap-2 px-6 py-5 border border-border-hint hover:border-border-primary hover:bg-fill-neutral/30 transition-colors group disabled:opacity-50"
-                      >
-                        <Upload className="w-6 h-6 text-fg-dim group-hover:text-fg-primary transition-colors" />
-                        <span className="text-sm font-medium text-fg-contrast">
-                          Import
-                        </span>
-                        <span className="text-xs text-fg-dim">
-                          Upload JSON or CSV file
-                        </span>
-                      </button>
-                    </div>
-                    <button
-                      onClick={() => setActiveTab("scorers")}
-                      className="text-xs text-fg-dim hover:text-fg-primary transition-colors"
-                    >
-                      Skip dataset, go straight to scorers →
-                    </button>
+                    {(() => {
+                      // Spinner during any path that's currently generating
+                      // dataset content — direct click, charter shortcut, or
+                      // the combined "both" action. Without this the user
+                      // lands here from a charter shortcut and sees a static
+                      // button while work is happening.
+                      const generating = loading || generatingDataset || generatingBoth;
+                      return (
+                        <button
+                          onClick={handleGenerateDataset}
+                          disabled={generating || !hasCharter}
+                          className="flex items-center gap-2 px-5 py-2.5 text-sm font-medium bg-accent text-accent-foreground hover:opacity-90 transition-opacity disabled:opacity-50"
+                        >
+                          {generating ? (
+                            <>
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                              Generating...
+                            </>
+                          ) : (
+                            <>
+                              <AIIcon width={16} height={16} />
+                              Generate dataset
+                            </>
+                          )}
+                        </button>
+                      );
+                    })()}
                   </div>
                 </div>
               )}
@@ -2077,23 +1996,6 @@ export default function ProjectWorkspace() {
 
           {activeTab === "scorers" && (
             <>
-              <RegenerateBanner
-                artifact="scorers"
-                activeVersion={activeSkillVersionNum}
-                sourceVersion={lineageFor("scorers")}
-                onRegenerate={async () => {
-                  if (!sessionId) return;
-                  try {
-                    const res = await generateScorers(sessionId);
-                    setScorers(res.scorers);
-                    // Refresh state so lineage stamp propagates to banner.
-                    const s = await getSession(sessionId);
-                    setState(s.state as SessionState);
-                  } catch (err) {
-                    console.error("Failed to regenerate scorers:", err);
-                  }
-                }}
-              />
               <ScorersPanel
                 charter={state.charter}
                 hasDataset={!!dataset}
@@ -2108,6 +2010,7 @@ export default function ProjectWorkspace() {
                   }
                 }}
                 onNavigateToEvaluate={() => setActiveTab("evaluate")}
+                externalGenerating={generatingScorersShortcut || generatingBoth}
               />
             </>
           )}
@@ -2132,9 +2035,11 @@ export default function ProjectWorkspace() {
                 if (!urlSessionId) return;
                 const res = await generateScorers(urlSessionId);
                 setScorers(res.scorers);
+                setScorersStale(false);
                 const s = await getSession(urlSessionId);
                 setState(s.state as SessionState);
               }}
+              onOpenSettings={() => setShowSettings(true)}
             />
           )}
 

@@ -28,7 +28,6 @@ interface Props {
   nextLabel: string;
   nextVariant: "primary" | "neutral";
   nextDisabled: boolean;
-  hasCharter: boolean;
   /** Rendered in the right sidebar bottom slot (e.g. AI Assist) */
   rightBottom?: ReactNode;
   /** When set, expands bottom section to fill and caps Suggestions height. */
@@ -48,7 +47,6 @@ export default function GoalsPanel({
   nextLabel,
   nextVariant,
   nextDisabled,
-  hasCharter,
   rightBottom,
   rightBottomExpanded,
 }: Props) {
@@ -105,7 +103,6 @@ export default function GoalsPanel({
   }, [goals.length]);
 
   const nonEmptyGoals = goals.filter((g) => g.trim());
-  const isReady = nonEmptyGoals.length >= 2;
 
   // Match feedback to goals by text
   const getFeedback = (goal: string): GoalFeedbackItem | undefined => {
@@ -117,6 +114,18 @@ export default function GoalsPanel({
   const dismissFeedback = (goal: string) => {
     setDismissedFeedback((prev) => new Set(prev).add(goal.trim()));
   };
+
+  // Cmd+Enter → next phase
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        if (!nextDisabled) onNext();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [nextDisabled, onNext]);
 
   const updateGoal = (index: number, value: string) => {
     const updated = [...goals];

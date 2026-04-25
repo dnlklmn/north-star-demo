@@ -43,6 +43,25 @@ export function hasBraintrustApiKey(): boolean {
   return !!getBraintrustApiKey()
 }
 
+// GitHub Personal Access Token — optional. Used by the skill-fetch-from-url
+// endpoint to bump rate limits and access private repos. Phase 1 (public-repo
+// fetch) works without it; kept here so Phase 3 (push PR) can reuse the same
+// storage.
+
+const GITHUB_TOKEN_STORAGE_KEY = 'northstar_github_token'
+
+export function getGithubToken(): string {
+  return localStorage.getItem(GITHUB_TOKEN_STORAGE_KEY) || ''
+}
+
+export function setGithubToken(key: string): void {
+  if (key.trim()) {
+    localStorage.setItem(GITHUB_TOKEN_STORAGE_KEY, key.trim())
+  } else {
+    localStorage.removeItem(GITHUB_TOKEN_STORAGE_KEY)
+  }
+}
+
 // --- Fetch wrapper that attaches API key header ---
 
 function apiHeaders(extra?: Record<string, string>): Record<string, string> {
@@ -54,6 +73,20 @@ function apiHeaders(extra?: Record<string, string>): Record<string, string> {
   return headers
 }
 
+/**
+ * Global event fired when the backend reports an LLM billing failure (out
+ * of credits, missing payment method). A top-level banner in App listens
+ * for this and shows itself with provider-specific copy. We use a plain
+ * CustomEvent to avoid threading state through every component that calls
+ * the API.
+ */
+export interface LLMBillingErrorDetail {
+  provider: string
+  message: string
+}
+
+export const LLM_BILLING_EVENT = 'northstar:llm-billing'
+
 async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
   const res = await fetch(url, {
     ...init,
@@ -64,6 +97,23 @@ async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
   })
   if (res.status === 401) {
     throw new Error('Invalid or missing API key. Please add your API key in Settings.')
+  }
+  if (res.status === 402) {
+    // Provider rejected the call for billing reasons. Read the body once,
+    // broadcast a global event so the banner can show, and re-throw with a
+    // friendly message so the caller's catch can still handle it.
+    let body: { detail?: string; provider?: string; error?: string } = {}
+    try { body = await res.clone().json() } catch { /* not JSON */ }
+    const provider = body.provider || 'anthropic'
+    const message = body.detail || 'The LLM provider rejected the call for billing reasons.'
+    try {
+      window.dispatchEvent(
+        new CustomEvent<LLMBillingErrorDetail>(LLM_BILLING_EVENT, { detail: { provider, message } }),
+      )
+    } catch {
+      // SSR or other env without window — non-fatal.
+    }
+    throw new Error(message)
   }
   return res
 }
@@ -219,6 +269,43 @@ export async function seedFromSkill(
     body: JSON.stringify(body),
   })
   if (!res.ok) throw new Error(`Failed to seed from skill: ${res.status}`)
+  return res.json()
+}
+
+export interface FetchSkillFromUrlResponse {
+  body: string
+  name: string | null
+  description: string | null
+  source: {
+    owner: string
+    repo: string
+    ref: string
+    path: string
+    blob_sha: string
+  }
+}
+
+/** Fetch + validate a SKILL.md from a public GitHub URL. Does not mutate the
+ *  session — caller hands the body back to `seedFromSkill` to run Analyze. */
+export async function fetchSkillFromUrl(url: string): Promise<FetchSkillFromUrlResponse> {
+  const token = getGithubToken()
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (token) headers['X-Github-Token'] = token
+  const res = await apiFetch(`${BASE}/fetch-skill-from-url`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ url }),
+  })
+  if (!res.ok) {
+    // Surface the backend's HTTPException.detail so the user sees the real
+    // error ("File not found", "rate-limited", etc.).
+    let detail = `Failed to fetch SKILL.md (${res.status})`
+    try {
+      const j = await res.json()
+      if (j?.detail) detail = j.detail
+    } catch { /* body wasn't JSON, keep default */ }
+    throw new Error(detail)
+  }
   return res.json()
 }
 

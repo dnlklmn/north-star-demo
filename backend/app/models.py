@@ -555,6 +555,32 @@ class ImportFromUrlResponse(BaseModel):
     detected_type: str  # "json_data" | "openapi" | "html_docs"
 
 
+class FetchSkillFromUrlRequest(BaseModel):
+    """Fetch + validate a SKILL.md from a public GitHub URL. Session-agnostic
+    — the frontend decides what to do with the returned body (typically
+    populating the Skill panel for the user to review before analyzing)."""
+    url: str
+
+
+class GithubSource(BaseModel):
+    """Minimum metadata needed to later open a PR back to the same file.
+    Stored alongside the seeded skill body so Phase 3 (push-back) can skip
+    a second round of user input."""
+    owner: str
+    repo: str
+    ref: str  # branch, tag, or commit SHA
+    path: str
+    blob_sha: str
+
+
+class FetchSkillFromUrlResponse(BaseModel):
+    """Parsed SKILL.md ready to hand to the existing skill-seed flow."""
+    body: str
+    name: str | None
+    description: str | None
+    source: GithubSource
+
+
 class InferSchemaRequest(BaseModel):
     """Request to infer schema from existing examples."""
     pass  # No parameters needed - uses dataset examples

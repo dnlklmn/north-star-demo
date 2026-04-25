@@ -24,6 +24,40 @@ import braintrust
 DEFAULT_MODEL = os.environ.get("EVAL_MODEL", "claude-opus-4-7")
 DEFAULT_JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "claude-sonnet-4-20250514")
 
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+def _build_judge_client(
+    judge_model: str,
+    anthropic_api_key: str | None,
+) -> anthropic.Anthropic:
+    """Pick the right client for the judge model.
+
+    Non-Anthropic judges (``openai/gpt-4o``, ``google/gemini-2.5-pro`` etc.)
+    route via OpenRouter, which is wire-compatible with the Anthropic SDK.
+    The rule: a model slug containing ``/`` is an OpenRouter model ID.
+
+    For OpenRouter we prefer, in order: a caller-supplied ``sk-or-`` key,
+    then the ``OPENROUTER_API_KEY`` env var. For Anthropic judges we use
+    the caller's key or the default client env lookup.
+    """
+    is_openrouter = "/" in judge_model
+    if is_openrouter:
+        key = anthropic_api_key if (anthropic_api_key and anthropic_api_key.startswith("sk-or-")) else os.environ.get("OPENROUTER_API_KEY")
+        if not key:
+            raise ValueError(
+                f"Judge model '{judge_model}' requires an OpenRouter key. "
+                "Set OPENROUTER_API_KEY or pass an sk-or-... key."
+            )
+        return anthropic.Anthropic(api_key=key, base_url=OPENROUTER_BASE_URL)
+    if anthropic_api_key:
+        # Anthropic or Anthropic-compatible key (including sk-or- if someone's
+        # routing a claude-* model through OpenRouter).
+        if anthropic_api_key.startswith("sk-or-"):
+            return anthropic.Anthropic(api_key=anthropic_api_key, base_url=OPENROUTER_BASE_URL)
+        return anthropic.Anthropic(api_key=anthropic_api_key)
+    return anthropic.Anthropic()
+
 
 @dataclass
 class EvalResult:
@@ -318,13 +352,17 @@ def run_eval_sync(
     # Log into Braintrust for this process. Safe to call multiple times.
     braintrust.login(api_key=braintrust_api_key)
 
-    base_client = anthropic.Anthropic(api_key=anthropic_api_key) if anthropic_api_key else anthropic.Anthropic()
-    # Task client is traced; judge client is not, to keep traces focused on the output.
+    # Task client is always Anthropic-native — the skill under test runs on
+    # Claude regardless of what judge model the user picked.
     task_client = braintrust.wrap_anthropic(
         anthropic.Anthropic(api_key=anthropic_api_key) if anthropic_api_key else anthropic.Anthropic()
     )
 
-    call_judge = make_judge(base_client, judge_model)
+    # Judge client may point at OpenRouter when the user picked a non-Claude
+    # judge — the Anthropic SDK is wire-compatible with OpenRouter so the
+    # scorer code doesn't need to change.
+    judge_client = _build_judge_client(judge_model, anthropic_api_key)
+    call_judge = make_judge(judge_client, judge_model)
     scorers = compile_scorers(scorer_defs, call_judge)
     if not scorers:
         raise ValueError("No scorers compiled successfully. Check the Scorers tab.")

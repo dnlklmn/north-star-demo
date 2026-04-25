@@ -153,15 +153,15 @@ export default function ItemList({
 
   return (
     <div>
-      {/* Header row */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          <h3 className="text-base font-medium text-fg-contrast">{title}</h3>
-          {helpTitle && helpText && (
-            <HelpPopover title={helpTitle} text={helpText} />
-          )}
-        </div>
-        <div className="flex items-center gap-3">
+      {/* Header row: title + help on the left, status + Add on the right,
+          all aligned on a single line so "60% ready" and the Add button sit
+          inline with the section title. */}
+      <div className="flex items-center gap-2 mb-4">
+        <h3 className="text-base font-medium text-fg-contrast">{title}</h3>
+        {helpTitle && helpText && (
+          <HelpPopover title={helpTitle} text={helpText} />
+        )}
+        <div className="ml-auto flex items-center gap-3">
           {statusText && (
             <span
               className="text-base"

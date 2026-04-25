@@ -718,7 +718,7 @@ Rules:
 def build_suggest_goals_prompt(goals: list[str]) -> str:
     goals_text = "\n".join(f"- {g}" for g in goals if g.strip())
 
-    return f"""You are helping a product person define business goals for an AI feature they are building.
+    return f"""You are helping a product person define business goals for an AI feature they are building. These goals will drive an eval that grades the feature's outputs one at a time — no access to adoption, usage, retention, analytics, or session data. Every goal must be judgeable from a single output on a single input.
 
 They have entered these goals so far:
 {goals_text}
@@ -727,7 +727,11 @@ Suggest 2-4 additional business goals they likely haven't thought of yet. These 
 - Specific and concrete (not vague platitudes)
 - Complementary to what they already have (fill gaps, not repeat)
 - Written in the same style/voice as their existing goals
-- Focused on observable business outcomes
+- Framed as properties of the output itself (structure, content, tone, accuracy) — NOT as downstream metrics like adoption %, template usage, retention, click-through, or ticket volume. The eval harness cannot see those signals.
+
+Examples:
+- GOOD: "Every response uses the standardized communication template (greeting, context, action, signoff) with no missing sections."
+- BAD: "Achieve 80% adoption of the standardized format within 6 months" — can't be measured from a single output.
 
 Return ONLY valid JSON:
 {{
@@ -782,7 +786,7 @@ Return ONLY valid JSON:
 def build_evaluate_goals_prompt(goals: list[str]) -> str:
     goals_text = "\n".join(f"{i+1}. {g}" for i, g in enumerate(goals) if g.strip())
 
-    return f"""You are helping a product person define business goals for an AI feature. Review each goal for quality.
+    return f"""You are helping a product person define business goals for an AI feature. These goals will drive an eval — synthetic inputs are run through the AI feature (a Claude skill) and each output is graded. That means every goal must be judgeable from a single output on a single input, with no access to product analytics, user behaviour, session data, retention, or adoption signals.
 
 Goals to evaluate:
 {goals_text}
@@ -791,7 +795,13 @@ For each goal, check:
 1. **Too broad** — Could this apply to any product? (e.g. "Improve user experience" is too broad; "Reduce candidate screening time from 2 hours to 15 minutes" is specific)
 2. **Too technical** — Is this an implementation detail, not a business outcome? (e.g. "Use RAG for retrieval" is technical; "Surface relevant documents without manual search" is a business goal)
 3. **Not independent** — Is this a subset or restatement of another goal in the list?
-4. **Not measurable** — Could you tell if this goal was achieved? It should describe an observable outcome.
+4. **Not judgeable from output** — Reading a single response the skill produced, could you tell whether it served this goal? Goals framed around adoption, usage, retention, click-through, session counts, or analytics metrics FAIL this check — the eval harness never sees those signals. Reframe them as properties of the output itself (structure, content, tone, accuracy).
+
+Examples of the output-judgeable rule:
+- BAD: "Achieve 80% adoption of standardized communication formats within 6 months, as measured by template usage analytics" — the eval can't see adoption or analytics.
+- GOOD: "Every response uses the standardized communication template (greeting, context, action, signoff) with no missing sections."
+- BAD: "Reduce support ticket volume by 30%."
+- GOOD: "Responses resolve the user's question in a single reply without asking them to contact support."
 
 Return ONLY valid JSON:
 {{
@@ -807,9 +817,9 @@ Return ONLY valid JSON:
 Rules:
 - Return one entry per goal, in the same order as the input
 - If a goal is good, set both issue and suggestion to null
-- Be concise — issues should be 5-10 words max (e.g., "Too broad — could apply to any product")
-- Suggestions should be concrete rewrites in the same voice as the original
-- Don't be overly harsh — only flag real problems. A goal that's reasonably specific and measurable is fine.
+- Be concise — issues should be 5-10 words max (e.g., "Too broad — could apply to any product", "Measures adoption, not output")
+- Suggestions must be concrete rewrites that describe properties of the skill's output, never downstream metrics
+- Don't be overly harsh — only flag real problems. A goal that reads like something you could grade from a single output is fine.
 - At least some goals should pass without issues — don't nitpick everything"""
 
 

@@ -120,6 +120,34 @@ async def _refresh_settings() -> None:
 
 # --- LLM call helpers ---
 
+class LLMBillingError(Exception):
+    """Raised when the LLM provider rejects a request because the account
+    can't be billed — out of credits, missing payment method, expired card.
+    Surfaces as HTTP 402 so the frontend can show a dedicated banner with a
+    link to the provider's billing page."""
+
+    def __init__(self, message: str, provider: str = "anthropic"):
+        super().__init__(message)
+        self.provider = provider
+
+
+def _is_billing_error(err: Exception) -> bool:
+    """Detect 'out of credits' / 'billing' style errors from Anthropic and
+    OpenRouter. Both providers return 400-class errors with a textual body
+    we have to pattern-match on — no dedicated error class for this case."""
+    msg = str(err).lower()
+    needles = (
+        "credit balance is too low",
+        "credit_balance",
+        "insufficient_credits",
+        "insufficient credits",
+        "billing",
+        "payment required",
+        "out of credit",
+    )
+    return any(n in msg for n in needles)
+
+
 def _call_llm(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
     """Call Claude and return (response_text, call_metadata)."""
     model = get_model()
@@ -138,6 +166,10 @@ def _call_llm(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
         )
     except Exception as e:
         logger.error(f"_call_llm FAILED: {type(e).__name__}: {e}")
+        # Translate billing-style failures into a typed exception so the API
+        # layer can return a friendly 402 instead of a generic 500.
+        if _is_billing_error(e):
+            raise LLMBillingError(str(e)) from e
         raise
     elapsed_ms = int((time.time() - start) * 1000)
     logger.info(f"_call_llm: OK in {elapsed_ms}ms, output_tokens={response.usage.output_tokens}")

@@ -33,8 +33,13 @@ export default function Button({
   children,
   ...rest
 }: Props) {
+  // `big` buttons get a 1px border in the app-bg colour. On panels the button
+  // floats over content cards (fill-neutral) so the bg-coloured border reads
+  // as a subtle halo that separates the button visually from what's behind.
   const sizeClasses =
-    size === "big" ? "h-14 px-4 gap-2 text-base" : "h-8 px-3 gap-1.5 text-sm";
+    size === "big"
+      ? "h-14 px-4 gap-2 text-base border border-bg-default"
+      : "h-10 px-3 gap-1.5 text-sm";
 
   const variantClasses =
     variant === "primary"

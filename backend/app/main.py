@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import uuid
 
 from contextlib import asynccontextmanager
@@ -55,6 +56,9 @@ from .models import (
     ImportFromUrlRequest,
     ImportFromUrlResponse,
     InferSchemaResponse,
+    FetchSkillFromUrlRequest,
+    FetchSkillFromUrlResponse,
+    GithubSource,
     PatchCharterRequest,
     ProceedResponse,
     ProjectSummary,
@@ -84,6 +88,7 @@ from .models import (
     ValidateResponse,
 )
 from .tools import (
+    LLMBillingError,
     call_suggest_goals,
     call_evaluate_goals,
     call_suggest_stories,
@@ -115,6 +120,23 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="North Star", version="0.1.0", lifespan=lifespan)
+
+
+@app.exception_handler(LLMBillingError)
+async def _billing_error_handler(_request: Request, exc: LLMBillingError):
+    """Translate provider out-of-credit / billing failures into HTTP 402 with
+    a stable shape the frontend can detect. Without this, the frontend just
+    saw a generic 500 and the user had to dig into network logs to know why
+    generation silently stopped working."""
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=402,
+        content={
+            "detail": str(exc),
+            "error": "llm_billing",
+            "provider": exc.provider,
+        },
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -1822,6 +1844,127 @@ async def import_from_url(session_id: str, req: ImportFromUrlRequest):
         task=task,
         source_url=req.url,
         detected_type=result.get("detected_type", detected_type),
+    )
+
+
+# --- Skill source fetch (Phase 1 of GitHub integration) -------------------
+
+_GITHUB_BLOB_RE = re.compile(
+    r"^https?://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/blob/(?P<ref>[^/]+)/(?P<path>.+)$"
+)
+_GITHUB_RAW_RE = re.compile(
+    r"^https?://raw\.githubusercontent\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/(?P<ref>[^/]+)/(?P<path>.+)$"
+)
+_SKILL_MAX_BYTES = 1_000_000  # 1 MB — more than any real SKILL.md will ever be.
+
+
+def _parse_github_url(url: str) -> tuple[str, str, str, str]:
+    """Extract (owner, repo, ref, path) from either a github.com/blob URL or a
+    raw.githubusercontent.com URL. Raises 400 on anything else."""
+    url = url.strip().split("?", 1)[0].rstrip("/")
+    m = _GITHUB_BLOB_RE.match(url) or _GITHUB_RAW_RE.match(url)
+    if not m:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "URL must be a GitHub file link like "
+                "https://github.com/<owner>/<repo>/blob/<ref>/path/to/SKILL.md"
+            ),
+        )
+    return m.group("owner"), m.group("repo"), m.group("ref"), m.group("path")
+
+
+def _parse_skill_frontmatter(raw: str) -> tuple[str | None, str | None, str]:
+    """YAML-ish frontmatter parser — same semantics as the frontend's
+    parseSkillFrontmatter. Returns (name, description, body)."""
+    m = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", raw, re.DOTALL)
+    if not m:
+        return None, None, raw
+    front, body = m.group(1), m.group(2)
+    def pick(key: str) -> str | None:
+        for line in front.splitlines():
+            if line.strip().lower().startswith(f"{key}:"):
+                value = line.split(":", 1)[1].strip()
+                return value.strip("'\"") or None
+        return None
+    return pick("name"), pick("description"), body
+
+
+@app.post("/fetch-skill-from-url", response_model=FetchSkillFromUrlResponse)
+async def fetch_skill_from_url(req: FetchSkillFromUrlRequest, request: Request):
+    """Fetch a SKILL.md from a public GitHub URL + validate it looks like a
+    skill (frontmatter with `name` and `description`). Returns the parsed
+    body and source metadata the frontend can hand back to `skill-seed`.
+
+    An optional `X-Github-Token` header authenticates the call — pushes the
+    IP-based rate limit (60/hr) up to the token's limit (5000/hr). Not
+    required for public repos.
+    """
+    import httpx
+
+    owner, repo, ref, path = _parse_github_url(req.url)
+
+    api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={ref}"
+    headers = {
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "northstar-skill-fetch",
+    }
+    token = request.headers.get("x-github-token") or os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(api_url, headers=headers, follow_redirects=True)
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"GitHub fetch failed: {e}")
+
+    if resp.status_code == 404:
+        raise HTTPException(status_code=404, detail="File not found on GitHub (check owner/repo/branch/path).")
+    if resp.status_code == 403:
+        raise HTTPException(
+            status_code=403,
+            detail="GitHub rate-limited or repo is private. Add a GitHub token in Settings.",
+        )
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"GitHub returned {resp.status_code}: {resp.text[:200]}")
+
+    data = resp.json()
+    if data.get("type") != "file":
+        raise HTTPException(status_code=400, detail="URL must point to a file, not a directory.")
+    if data.get("size", 0) > _SKILL_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="File too large to be a SKILL.md.")
+
+    encoding = data.get("encoding")
+    raw_content = data.get("content", "")
+    if encoding == "base64":
+        import base64
+        try:
+            body_bytes = base64.b64decode(raw_content)
+            raw_text = body_bytes.decode("utf-8")
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"Failed to decode file contents: {e}")
+    else:
+        raw_text = raw_content
+
+    name, description, body = _parse_skill_frontmatter(raw_text)
+    # Validation: a skill has frontmatter with at least `name` and `description`.
+    # We accept files without frontmatter too, but surface a soft warning via
+    # an empty name/description — the UI can prompt the user to fill those in.
+    if not body.strip():
+        raise HTTPException(status_code=400, detail="File is empty after frontmatter parsing.")
+
+    return FetchSkillFromUrlResponse(
+        body=body,
+        name=name,
+        description=description,
+        source=GithubSource(
+            owner=owner,
+            repo=repo,
+            ref=ref,
+            path=path,
+            blob_sha=data.get("sha", ""),
+        ),
     )
 
 

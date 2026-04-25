@@ -11,7 +11,6 @@ interface ExampleReviewProps {
   loading: boolean
   onUpdateExample: (exampleId: string, fields: Partial<Example>) => void
   onDeleteExample: (exampleId: string) => void
-  onImport: () => void
   onSynthesize: (count?: number) => void
   onAutoReview: () => void
   onExport: () => void
@@ -33,7 +32,6 @@ export default function ExampleReview({
   loading,
   onUpdateExample,
   onDeleteExample,
-  onImport,
   onSynthesize,
   onAutoReview,
   onExport,
@@ -50,7 +48,16 @@ export default function ExampleReview({
 }: ExampleReviewProps) {
   const [filterArea, setFilterArea] = useState<string>('')
   const [filterLabel, setFilterLabel] = useState<string>('')
+  // Default to "pending" so the user's attention lands on what still needs
+  // review. Once nothing is pending, flip to "all" so the full list stays
+  // visible rather than showing an empty state.
   const [filterStatus, setFilterStatus] = useState<string>('pending')
+  useEffect(() => {
+    const pending = examples.filter(e => e.review_status === 'pending').length
+    if (filterStatus === 'pending' && pending === 0 && examples.length > 0) {
+      setFilterStatus('')
+    }
+  }, [examples, filterStatus])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
@@ -240,9 +247,6 @@ export default function ExampleReview({
             Export
           </button>
           <span className="w-px h-4 bg-border mx-0.5" />
-          <button onClick={onImport} disabled={loading} className="px-2.5 py-1 text-xs bg-surface-raised border border-border hover:bg-muted transition-colors disabled:opacity-50">
-            Import
-          </button>
           <button onClick={() => setShowGenerateModal(true)} disabled={loading} className="px-2.5 py-1 text-xs bg-accent text-accent-foreground hover:opacity-90 transition-opacity disabled:opacity-50">
             {loading ? 'Generating...' : 'Generate'}
           </button>

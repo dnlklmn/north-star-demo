@@ -4,6 +4,7 @@ import Home from './pages/Home'
 import ProjectWorkspace from './pages/ProjectWorkspace'
 import { checkHealth, hasApiKey } from './api'
 import ApiKeyBanner from './components/ApiKeyBanner'
+import LLMBillingBanner from './components/LLMBillingBanner'
 
 export default function App() {
   const [needsKey, setNeedsKey] = useState(false)
@@ -25,6 +26,7 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen">
       {needsKey && <ApiKeyBanner onDismiss={() => setNeedsKey(false)} />}
+      <LLMBillingBanner />
       <div className="flex-1 min-h-0">
         <Routes>
           <Route path="/" element={<Home />} />

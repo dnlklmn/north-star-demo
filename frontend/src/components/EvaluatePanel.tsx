@@ -1,15 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Download, ExternalLink, Eye, EyeOff, FileText, Loader2, PlayCircle, Sparkles } from 'lucide-react'
+import { Download, ExternalLink, FileText, KeyRound, Loader2, PlayCircle, Settings as SettingsIcon, Sparkles } from 'lucide-react'
 import type { Charter, Dataset, EvalRunSummary } from '../types'
 import CharterDocument from './CharterDocument'
 import {
-  getBraintrustApiKey,
+  getApiKey,
   getEvalRun,
   hasBraintrustApiKey,
   listEvalRuns,
   runEval,
-  setBraintrustApiKey,
 } from '../api'
+import {
+  JUDGE_MODEL_OPTIONS,
+  getDefaultBraintrustProject,
+  getDefaultJudgeModel,
+  setDefaultJudgeModel,
+} from '../utils/evalDefaults'
 
 interface Props {
   sessionId: string
@@ -32,10 +37,14 @@ interface Props {
   /** Inline regeneration — same as navigating to Scorers + pressing Generate,
    *  but done in place so the user doesn't lose context. */
   onGenerateScorersInline?: () => Promise<void>
+  /** Opens the Settings modal so the user can add missing API keys
+   *  (Braintrust for running evals, OpenRouter for non-Claude judges). */
+  onOpenSettings?: () => void
 }
 
 const POLL_INTERVAL_MS = 2000
 const TERMINAL_STATUSES = new Set<EvalRunSummary['status']>(['done', 'error'])
+
 
 function scoreColor(score: number): string {
   if (score >= 0.8) return 'text-success'
@@ -62,6 +71,7 @@ export default function EvaluatePanel({
   onGoToDataset,
   onGoToScorers,
   onGenerateScorersInline,
+  onOpenSettings,
 }: Props) {
   const [inlineGenScorers, setInlineGenScorers] = useState(false)
   const exampleCount = dataset?.examples?.length || 0
@@ -69,21 +79,26 @@ export default function EvaluatePanel({
     (e) => e.review_status === 'approved',
   ).length
 
-  // --- Braintrust key ---
-  const [keyValue, setKeyValue] = useState(() => getBraintrustApiKey())
-  const [showKey, setShowKey] = useState(false)
-  const [keySaved, setKeySaved] = useState(() => hasBraintrustApiKey())
+  // --- Braintrust key (managed in Settings now; we only check presence) ---
+  const keySaved = hasBraintrustApiKey()
 
-  const saveKey = () => {
-    setBraintrustApiKey(keyValue)
-    setKeySaved(!!keyValue.trim())
-  }
+  // --- OpenRouter detection — gates the judge-model picker ---
+  // The stored API key doubles as the OpenRouter key when it's prefixed with
+  // sk-or-. Non-Claude judges require OpenRouter, so the picker is disabled
+  // until the user configures one in Settings.
+  const hasOpenRouterKey = getApiKey().startsWith('sk-or-')
 
-  // --- Run config ---
-  const [project, setProject] = useState('northstar-eval')
+  // --- Run config — seeded from per-user Settings defaults ---
+  const [project, setProject] = useState(() => getDefaultBraintrustProject())
   const [experiment, setExperiment] = useState('')
   const [limit, setLimit] = useState<string>('') // empty = no limit
   const [includeTriggering, setIncludeTriggering] = useState(false)
+  // Empty string in state means "use server default" (no judge_model override).
+  const [judgeModel, setJudgeModel] = useState<string>(() => getDefaultJudgeModel())
+  const updateJudgeModel = (value: string) => {
+    setJudgeModel(value)
+    setDefaultJudgeModel(value)
+  }
 
   // --- Active run + history ---
   const [activeRun, setActiveRun] = useState<EvalRunSummary | null>(null)
@@ -157,6 +172,10 @@ export default function EvaluatePanel({
           experiment_name: overrides?.experiment_name ?? (experiment.trim() || undefined),
           limit: overrides?.limit ?? (limit.trim() ? parseInt(limit, 10) : undefined),
           include_triggering: overrides?.include_triggering ?? includeTriggering,
+          // Only forward a judge_model override when OpenRouter is actually
+          // configured — a stale localStorage value from before the key was
+          // removed would otherwise error out on the backend.
+          judge_model: hasOpenRouterKey && judgeModel ? judgeModel : undefined,
         })
         setActiveRun(run)
         // Refresh immediately so the pending row shows up in history, and
@@ -170,7 +189,7 @@ export default function EvaluatePanel({
         setStarting(false)
       }
     },
-    [sessionId, project, experiment, limit, includeTriggering, refreshRuns],
+    [sessionId, project, experiment, limit, includeTriggering, judgeModel, refreshRuns],
   )
 
   const handleRun = async () => {
@@ -293,37 +312,27 @@ export default function EvaluatePanel({
               </ul>
             )}
 
-            {/* Key management */}
-            <div className="mb-3">
-              <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide block mb-1">
-                Braintrust API key {keySaved && <span className="text-success normal-case">· saved</span>}
-              </label>
-              <div className="flex gap-2">
-                <div className="relative flex-1">
-                  <input
-                    type={showKey ? 'text' : 'password'}
-                    value={keyValue}
-                    onChange={(e) => setKeyValue(e.target.value)}
-                    placeholder="sk-... (stored in localStorage, sent as X-Braintrust-Key)"
-                    className="w-full text-xs bg-background border border-border px-2 py-1.5 pr-7 font-mono focus:outline-none focus:ring-1 focus:ring-accent"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowKey(!showKey)}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                  >
-                    {showKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                  </button>
+            {/* Missing Braintrust key — full-width banner routes the user to
+                Settings rather than cluttering the run panel with a key input. */}
+            {!keySaved && (
+              <div className="mb-3 flex items-center justify-between gap-3 px-3 py-2 bg-warning/10 border border-warning/30 text-xs">
+                <div className="flex items-center gap-2 min-w-0">
+                  <KeyRound className="w-3.5 h-3.5 text-warning flex-shrink-0" />
+                  <span className="text-foreground truncate">
+                    A Braintrust API key is required to run evaluations.
+                  </span>
                 </div>
-                <button
-                  onClick={saveKey}
-                  disabled={!keyValue.trim()}
-                  className="px-3 py-1.5 text-xs font-medium bg-accent text-accent-foreground hover:opacity-90 disabled:opacity-40"
-                >
-                  Save
-                </button>
+                {onOpenSettings && (
+                  <button
+                    onClick={onOpenSettings}
+                    className="flex-shrink-0 inline-flex items-center gap-1 px-2 py-1 text-xs font-medium bg-warning/20 text-warning hover:bg-warning/30"
+                  >
+                    <SettingsIcon className="w-3 h-3" />
+                    Add in Settings
+                  </button>
+                )}
               </div>
-            </div>
+            )}
 
             {/* Run config */}
             <div className="grid grid-cols-2 gap-3 mb-3">
@@ -377,6 +386,45 @@ export default function EvaluatePanel({
                   />
                   Include off-target rows (should NOT trigger)
                 </label>
+              </div>
+              <div className="col-span-2">
+                <label
+                  className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide block mb-1"
+                  title="Model used to grade scorer outputs. Non-Claude judges route via OpenRouter — configure an sk-or-... key in Settings to enable. The skill under test always runs on Claude."
+                >
+                  Judge model
+                </label>
+                {hasOpenRouterKey ? (
+                  <select
+                    value={judgeModel}
+                    onChange={(e) => updateJudgeModel(e.target.value)}
+                    className="w-full text-xs bg-background border border-border px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-accent"
+                  >
+                    {JUDGE_MODEL_OPTIONS.map((opt) => (
+                      <option key={opt.label} value={opt.value ?? ''}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  // Non-Claude judges require an OpenRouter key. Rather than
+                  // silently failing on run, we disable the picker and route
+                  // the user to Settings to add one.
+                  <div className="flex items-center justify-between gap-3 px-3 py-2 bg-muted/30 border border-border text-xs">
+                    <span className="text-muted-foreground truncate">
+                      Claude Sonnet (default). Add an OpenRouter key to pick a non-Claude judge.
+                    </span>
+                    {onOpenSettings && (
+                      <button
+                        onClick={onOpenSettings}
+                        className="flex-shrink-0 inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-foreground hover:bg-muted"
+                      >
+                        <SettingsIcon className="w-3 h-3" />
+                        Settings
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 

@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 import type { ReactNode } from "react";
-import { ChevronDown, ChevronRight as ChevronRightIcon, FileText, Loader2 } from "lucide-react";
-import CharterDocument from "./CharterDocument";
+import { ArrowRight, ChevronDown, Loader2, Sparkles } from "lucide-react";
 import type {
   Charter,
   Validation,
@@ -18,11 +17,9 @@ import Button from "./ui/Button";
 import Input from "./ui/Input";
 import IconButton from "./ui/IconButton";
 import {
-  AIIcon,
   ReturnKeyIcon,
   CmdReturnIcon,
   CoverageIcon,
-  HelpIcon,
   DragHandleIcon,
   CloseIcon,
   PlusIcon,
@@ -52,15 +49,29 @@ interface Props {
   onCriteriaChanged?: () => void;
   suggestionsLoading?: boolean;
   loading?: boolean;
-  onBackToGoals?: () => void;
-  onNext?: () => void;
-  nextLabel?: string;
-  nextVariant?: "primary" | "neutral";
-  nextDisabled?: boolean;
   /** Rendered in the right sidebar bottom slot (e.g. AI Assist) */
   rightBottom?: ReactNode;
   /** When set, expands bottom section to fill and caps Suggestions height. */
   rightBottomExpanded?: ReactNode;
+
+  // Shortcuts — kick off downstream generation directly from the charter
+  // page. Each ensures the charter is finalised and then fans out to the
+  // dataset / scorers pages with generation already in flight. The parent
+  // handler short-circuits to navigation when the artifact is already fresh,
+  // so the same callback serves all three tri-state paths.
+  onGenerateDataset?: () => Promise<void>;
+  onGenerateScorers?: () => Promise<void>;
+  onGenerateBoth?: () => Promise<void>;
+  generatingDataset?: boolean;
+  generatingScorers?: boolean;
+  generatingBoth?: boolean;
+  /** Tri-state readiness for the Dataset CTA:
+   *  - "missing": never generated → "Generate dataset" (primary)
+   *  - "stale":   generated but charter changed → "Regenerate dataset" (primary)
+   *  - "fresh":   up to date → "Go to dataset" (neutral, navigation only)
+   *  Defaults to "missing" so older callers keep their existing behaviour. */
+  datasetState?: "missing" | "stale" | "fresh";
+  scorersState?: "missing" | "stale" | "fresh";
 }
 
 type CharterTab = "task" | "coverage" | "balance" | "alignment" | "rot" | "safety";
@@ -85,29 +96,37 @@ export default function CharterPanel({
   onCriteriaChanged,
   suggestionsLoading,
   loading,
-  onBackToGoals,
-  onNext,
-  nextLabel,
-  nextVariant = "neutral",
-  nextDisabled = false,
   rightBottom,
   rightBottomExpanded,
+  onGenerateDataset,
+  onGenerateScorers,
+  onGenerateBoth,
+  generatingDataset,
+  generatingScorers,
+  generatingBoth,
+  datasetState = "missing",
+  scorersState = "missing",
 }: Props) {
-  // All sections live on one scrollable page as collapsibles. Default-open
-  // for every section so the charter reads as a single document you can
-  // skim + edit inline. Users can fold sections to focus.
-  const [openSections, setOpenSections] = useState<Set<CharterTab>>(
-    () => new Set(["task", "coverage", "balance", "alignment", "rot", "safety"]),
-  );
-  const toggleSection = (id: CharterTab) => {
-    setOpenSections((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-  const [showDocument, setShowDocument] = useState(false);
+  // Charter is presented as a tabbed view — one section at a time, so users
+  // focus on one dimension without scrolling past the others. State persists
+  // within the panel mount so switching back to a dimension restores the
+  // last-viewed tab.
+  const [activeTab, setActiveTab] = useState<CharterTab>("task");
+
+  // Cmd+Enter → primary footer action (generate both / regenerate / go to).
+  useEffect(() => {
+    if (!onGenerateBoth) return;
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+        e.preventDefault();
+        if (!generatingBoth && !generatingDataset && !generatingScorers) {
+          void onGenerateBoth();
+        }
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onGenerateBoth, generatingBoth, generatingDataset, generatingScorers]);
 
   const isEmpty =
     !charter.coverage.criteria.length &&
@@ -134,7 +153,7 @@ export default function CharterPanel({
   const alignTotal = charter.alignment.length;
   const alignScore = alignTotal > 0
     ? validation.alignment.length > 0
-      ? validation.alignment.filter((v) => v.status === "pass" || v.status === "good").length / alignTotal
+      ? validation.alignment.filter((v) => v.status === "pass").length / alignTotal
       : Math.min(1, alignTotal / 4)
     : 0;
 
@@ -142,18 +161,6 @@ export default function CharterPanel({
   const taskFilled = [charter.task.input_description, charter.task.output_description].filter(Boolean).length;
   const taskScore = taskFilled / 2;
 
-  const tabs: { id: CharterTab; label: string; score: number }[] = [
-    { id: "task", label: "Task Definition", score: taskScore },
-    { id: "coverage", label: "Coverage", score: covScore },
-    { id: "balance", label: "Balance", score: balScore },
-    { id: "alignment", label: "Alignment", score: alignScore },
-    { id: "rot", label: "Rot", score: rotScore },
-    // Only surface Safety for triggered-mode sessions, where prompt-injection
-    // + exfiltration + destructive-command risks are meaningful.
-    ...(isTriggered || safetyCriteria.length > 0
-      ? [{ id: "safety" as CharterTab, label: "Safety", score: safetyScore }]
-      : []),
-  ];
 
   if (isEmpty && suggestions.length === 0) {
     return (
@@ -228,280 +235,221 @@ export default function CharterPanel({
       rightBottom={rightBottom}
       rightBottomExpanded={rightBottomExpanded}
       footer={
-        onNext ? (
-          <Button
-            size="big"
-            variant={nextVariant}
-            shortcut={<CmdReturnIcon />}
-            onClick={onNext}
-            disabled={nextDisabled}
-          >
-            {loading ? "Generating…" : nextLabel}
-          </Button>
+        onGenerateDataset || onGenerateScorers || onGenerateBoth ? (
+          <ChartersGenerateSplitButton
+            datasetState={datasetState}
+            scorersState={scorersState}
+            generatingDataset={!!generatingDataset}
+            generatingScorers={!!generatingScorers}
+            generatingBoth={!!generatingBoth}
+            onGenerateDataset={onGenerateDataset}
+            onGenerateScorers={onGenerateScorers}
+            onGenerateBoth={onGenerateBoth}
+          />
         ) : undefined
       }
     >
-      {/* Action bar — collapsible layout means no tab bar; just the doc button. */}
-      <div className="flex items-center justify-between border-b-2 border-border-hint mb-4 pb-3">
-        <div className="flex items-center gap-3 text-xs text-fg-dim">
-          <button
-            onClick={() => setOpenSections(new Set(tabs.map(t => t.id)))}
-            className="hover:text-fg-contrast"
-          >
-            Expand all
-          </button>
-          <span>·</span>
-          <button
-            onClick={() => setOpenSections(new Set())}
-            className="hover:text-fg-contrast"
-          >
-            Collapse all
-          </button>
-        </div>
-        <button
-          onClick={() => setShowDocument(true)}
-          className="flex-shrink-0 flex items-center gap-1 py-1.5 px-3 text-xs text-fg-dim hover:text-fg-contrast border border-border-hint"
-          title="View the full charter as one document"
-        >
-          <FileText className="w-4 h-4" />
-          View as document
-        </button>
-      </div>
+      {(() => {
+        // Tab definitions kept inline so labels, help copy, and readiness
+        // scores are declared side-by-side. Safety stays hidden until the
+        // session is triggered-mode (skill body present) or it already has
+        // safety criteria from a prior seed.
+        const tabs: Array<{
+          id: CharterTab;
+          label: string;
+          score: number;
+          helpTitle: string;
+          helpText: string;
+          show: boolean;
+        }> = [
+          {
+            id: "task",
+            label: "Schema",
+            score: taskScore,
+            helpTitle: "What your app receives and produces",
+            helpText: "Define the shape of your AI feature's input and output. This helps generate realistic test data that matches your actual use case.",
+            show: true,
+          },
+          {
+            id: "coverage",
+            label: "Coverage",
+            score: covScore,
+            helpTitle: "Use cases and scenarios to cover",
+            helpText: "List the distinct scenarios, edge cases, and user intents your AI feature needs to handle. Good coverage ensures your evals aren't blind to entire categories of input.",
+            show: true,
+          },
+          {
+            id: "balance",
+            label: "Balance",
+            score: balScore,
+            helpTitle: "How to distribute across scenarios",
+            helpText: "Specify which scenarios deserve more weight in your dataset. Without balance criteria, your evals may over-represent easy cases and miss the hard ones.",
+            show: true,
+          },
+          {
+            id: "alignment",
+            label: "Alignment",
+            score: alignScore,
+            helpTitle: "Good vs bad output per feature",
+            helpText: "Define what good and bad output looks like for specific feature areas. These examples guide the AI to produce on-brand, on-spec responses.",
+            show: true,
+          },
+          {
+            id: "rot",
+            label: "Rot",
+            score: rotScore,
+            helpTitle: "Signals the dataset needs refreshing",
+            helpText: "Define the conditions that would make your current dataset stale — new features, changed requirements, updated models. When these fire, it's time to regenerate.",
+            show: true,
+          },
+          {
+            id: "safety",
+            label: "Safety",
+            score: safetyScore,
+            helpTitle: "Rules the skill's output must obey",
+            helpText: "Output-level constraints: prompt-injection resistance, no credential echoing, URL allow-lists, destructive command guards. Each criterion generates a dedicated safety scorer.",
+            show: isTriggered || safetyCriteria.length > 0,
+          },
+        ];
+        const visible = tabs.filter((t) => t.show);
+        // Fall back to the first visible tab if the stored active one is
+        // hidden (e.g. switching out of triggered mode).
+        const current = visible.find((t) => t.id === activeTab) ?? visible[0];
 
-      {/* All sections rendered as a vertical stack of collapsibles. */}
-      <SectionHeader
-        label="Task Definition"
-        score={taskScore}
-        open={openSections.has("task")}
-        onToggle={() => toggleSection("task")}
-      />
-      {openSections.has("task") && (
-        <div className="mb-6">
-          <SchemaSection task={charter.task} onEdit={onEditTask} />
-        </div>
-      )}
-
-      <SectionHeader
-        label="Coverage"
-        score={covScore}
-        open={openSections.has("coverage")}
-        onToggle={() => toggleSection("coverage")}
-      />
-      {openSections.has("coverage") && (() => {
-        const covPct = Math.round(covScore * 100);
-        const negativeCriteria = charter.coverage.negative_criteria ?? [];
         return (
-          <div className="flex flex-col gap-6 mb-6">
-            <ItemList
-              title="Coverage"
-              helpTitle="Use cases and scenarios to cover"
-              helpText="List the distinct scenarios, edge cases, and user intents your AI feature needs to handle. Good coverage ensures your evals aren't blind to entire categories of input."
-              items={charter.coverage.criteria}
-              onAdd={
-                onAddCriterion ? (v) => onAddCriterion("coverage", v) : undefined
-              }
-              onEdit={
-                onEditCriterion
-                  ? (i, v) => onEditCriterion("coverage", i, v)
-                  : undefined
-              }
-              onDelete={
-                onDeleteCriterion
-                  ? (i) => onDeleteCriterion("coverage", i)
-                  : undefined
-              }
-              onReorder={
-                onReorderCriteria
-                  ? (criteria) => onReorderCriteria("coverage", criteria)
-                  : undefined
-              }
-              addPlaceholder="Add coverage criterion..."
-              statusText={covPct > 0 ? `${covPct}% ready` : undefined}
-              statusColor={covPct > 0 ? scoreToColor(covScore) : undefined}
-              onChanged={onCriteriaChanged}
-              emptyText="No criteria yet"
-            />
-            {negativeCriteria.length > 0 && (
-              <div className="border-t border-border-hint pt-4">
-                <div className="mb-2">
-                  <div className="text-sm font-semibold text-fg-contrast">Off-target (should NOT trigger)</div>
-                  <div className="text-xs text-fg-dim mt-0.5">
-                    Adjacent scenarios the skill/tool must stay out of. These define negative space.
-                  </div>
-                </div>
-                <ul className="space-y-1">
-                  {negativeCriteria.map((c, i) => (
-                    <li key={i} className="text-sm text-fg-contrast bg-fill-neutral/40 px-3 py-2">
-                      {c}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </div>
-        );
-      })()}
-
-      <SectionHeader
-        label="Balance"
-        score={balScore}
-        open={openSections.has("balance")}
-        onToggle={() => toggleSection("balance")}
-      />
-      {openSections.has("balance") && (() => {
-        const balPct = Math.round(balScore * 100);
-        return (
-          <ItemList
-            title="Balance"
-            helpTitle="How to distribute across scenarios"
-            helpText="Specify which scenarios deserve more weight in your dataset. Without balance criteria, your evals may over-represent easy cases and miss the hard ones."
-            items={charter.balance.criteria}
-            onAdd={
-              onAddCriterion ? (v) => onAddCriterion("balance", v) : undefined
-            }
-            onEdit={
-              onEditCriterion
-                ? (i, v) => onEditCriterion("balance", i, v)
-                : undefined
-            }
-            onDelete={
-              onDeleteCriterion
-                ? (i) => onDeleteCriterion("balance", i)
-                : undefined
-            }
-            onReorder={
-              onReorderCriteria
-                ? (criteria) => onReorderCriteria("balance", criteria)
-                : undefined
-            }
-            addPlaceholder="Add balance criterion..."
-            statusText={balPct > 0 ? `${balPct}% ready` : undefined}
-            statusColor={balPct > 0 ? scoreToColor(balScore) : undefined}
-            onChanged={onCriteriaChanged}
-            emptyText="No criteria yet"
-          />
-        );
-      })()}
-
-      <SectionHeader
-        label="Alignment"
-        score={alignScore}
-        open={openSections.has("alignment")}
-        onToggle={() => toggleSection("alignment")}
-      />
-      {openSections.has("alignment") && (
-        <AlignmentSection
-          entries={charter.alignment}
-          validations={validation.alignment}
-          activeCriteria={activeCriteria}
-          onEdit={onEditAlignment}
-          onAdd={onAddAlignment}
-          onDelete={onDeleteAlignment}
-          onReorder={onReorderAlignment}
-          onCriteriaChanged={onCriteriaChanged}
-        />
-      )}
-
-      <SectionHeader
-        label="Rot"
-        score={rotScore}
-        open={openSections.has("rot")}
-        onToggle={() => toggleSection("rot")}
-      />
-      {openSections.has("rot") && (() => {
-        const rotPct = Math.round(rotScore * 100);
-        return (
-          <ItemList
-            title="Rot"
-            helpTitle="Signals the dataset needs refreshing"
-            helpText="Define the conditions that would make your current dataset stale — new features, changed requirements, updated models. When these fire, it's time to regenerate."
-            items={charter.rot.criteria}
-            onAdd={
-              onAddCriterion ? (v) => onAddCriterion("rot", v) : undefined
-            }
-            onEdit={
-              onEditCriterion
-                ? (i, v) => onEditCriterion("rot", i, v)
-                : undefined
-            }
-            onDelete={
-              onDeleteCriterion
-                ? (i) => onDeleteCriterion("rot", i)
-                : undefined
-            }
-            onReorder={
-              onReorderCriteria
-                ? (criteria) => onReorderCriteria("rot", criteria)
-                : undefined
-            }
-            addPlaceholder="Add rot criterion..."
-            statusText={rotPct > 0 ? `${rotPct}% ready` : undefined}
-            statusColor={rotPct > 0 ? scoreToColor(rotScore) : undefined}
-            onChanged={onCriteriaChanged}
-            emptyText="No criteria yet"
-          />
-        );
-      })()}
-
-      {(isTriggered || safetyCriteria.length > 0) && (
-        <SectionHeader
-          label="Safety"
-          score={safetyScore}
-          open={openSections.has("safety")}
-          onToggle={() => toggleSection("safety")}
-        />
-      )}
-      {openSections.has("safety") && (isTriggered || safetyCriteria.length > 0) && (() => {
-        const safetyPct = Math.round(safetyScore * 100);
-        return (
-          <div className="flex flex-col gap-3">
-            <div className="text-xs text-muted-foreground bg-muted/30 px-3 py-2 border-l-2 border-warning">
-              <strong className="text-foreground">Output-level safety only.</strong>{" "}
-              These rules are scored against the skill's output text. Runtime
-              safety (did the skill actually call a bad domain, did it write
-              outside its sandbox) requires an agent-SDK harness and isn't
-              covered here.
+          <>
+            {/* Tab bar */}
+            <div className="flex items-stretch border-b-2 border-border-hint mb-6 overflow-x-auto">
+              {visible.map((t) => {
+                const isActive = current?.id === t.id;
+                return (
+                  <button
+                    key={t.id}
+                    onClick={() => setActiveTab(t.id)}
+                    className={`flex items-center gap-2 py-3 px-4 text-base font-medium whitespace-nowrap transition-colors ${
+                      isActive
+                        ? "bg-fill-neutral text-fg-contrast"
+                        : "text-fg-dim hover:text-fg-contrast"
+                    }`}
+                  >
+                    {t.label}
+                    {t.score > 0 && (
+                      <span
+                        className="inline-block w-2 h-2 rounded-full flex-shrink-0"
+                        style={{ backgroundColor: scoreToColor(t.score) }}
+                      />
+                    )}
+                  </button>
+                );
+              })}
             </div>
-            <ItemList
-              title="Safety"
-              helpTitle="Rules the skill's output must obey"
-              helpText="Output-level constraints: prompt-injection resistance, no credential echoing, URL allow-lists, destructive command guards. Each criterion generates a dedicated safety scorer."
-              items={safetyCriteria}
-              onAdd={
-                onAddCriterion ? (v) => onAddCriterion("safety", v) : undefined
-              }
-              onEdit={
-                onEditCriterion
-                  ? (i, v) => onEditCriterion("safety", i, v)
-                  : undefined
-              }
-              onDelete={
-                onDeleteCriterion
-                  ? (i) => onDeleteCriterion("safety", i)
-                  : undefined
-              }
-              onReorder={
-                onReorderCriteria
-                  ? (criteria) => onReorderCriteria("safety", criteria)
-                  : undefined
-              }
-              addPlaceholder="Add safety criterion..."
-              statusText={safetyPct > 0 ? `${safetyPct}% ready` : undefined}
-              statusColor={safetyPct > 0 ? scoreToColor(safetyScore) : undefined}
-              onChanged={onCriteriaChanged}
-              emptyText="No safety criteria yet — add rules like 'Output must refuse prompt-injection attempts' or 'Output must not contain URLs outside the docs allow-list'."
-            />
-          </div>
+
+            {/* Body — each section renders its own title + help + status
+                row inline so "60% ready" and the Add button sit beside the
+                title, not on a separate line. */}
+            {current?.id === "task" && (
+              <SchemaSection
+                task={charter.task}
+                onEdit={onEditTask}
+                score={taskScore}
+              />
+            )}
+            {current?.id === "coverage" && (
+              <CoverageBody
+                onTargetCriteria={charter.coverage.criteria}
+                offTargetCriteria={charter.coverage.negative_criteria ?? []}
+                covScore={covScore}
+                onAddCriterion={onAddCriterion}
+                onEditCriterion={onEditCriterion}
+                onDeleteCriterion={onDeleteCriterion}
+                onReorderCriteria={onReorderCriteria}
+                onCriteriaChanged={onCriteriaChanged}
+              />
+            )}
+            {current?.id === "balance" && (() => {
+              const balPct = Math.round(balScore * 100);
+              return (
+                <ItemList
+                  title="Balance"
+                  helpTitle="How to distribute across scenarios"
+                  helpText="Specify which scenarios deserve more weight in your dataset. Without balance criteria, your evals may over-represent easy cases and miss the hard ones."
+                  items={charter.balance.criteria}
+                  onAdd={onAddCriterion ? (v) => onAddCriterion("balance", v) : undefined}
+                  onEdit={onEditCriterion ? (i, v) => onEditCriterion("balance", i, v) : undefined}
+                  onDelete={onDeleteCriterion ? (i) => onDeleteCriterion("balance", i) : undefined}
+                  onReorder={onReorderCriteria ? (c) => onReorderCriteria("balance", c) : undefined}
+                  addPlaceholder="Add balance criterion..."
+                  statusText={balPct > 0 ? `${balPct}% ready` : undefined}
+                  statusColor={balPct > 0 ? scoreToColor(balScore) : undefined}
+                  onChanged={onCriteriaChanged}
+                  emptyText="No criteria yet"
+                />
+              );
+            })()}
+            {current?.id === "alignment" && (
+              <AlignmentSection
+                entries={charter.alignment}
+                validations={validation.alignment}
+                activeCriteria={activeCriteria}
+                onEdit={onEditAlignment}
+                onAdd={onAddAlignment}
+                onDelete={onDeleteAlignment}
+                onReorder={onReorderAlignment}
+                onCriteriaChanged={onCriteriaChanged}
+              />
+            )}
+            {current?.id === "rot" && (() => {
+              const rotPct = Math.round(rotScore * 100);
+              return (
+                <ItemList
+                  title="Rot"
+                  helpTitle="Signals the dataset needs refreshing"
+                  helpText="Define the conditions that would make your current dataset stale — new features, changed requirements, updated models. When these fire, it's time to regenerate."
+                  items={charter.rot.criteria}
+                  onAdd={onAddCriterion ? (v) => onAddCriterion("rot", v) : undefined}
+                  onEdit={onEditCriterion ? (i, v) => onEditCriterion("rot", i, v) : undefined}
+                  onDelete={onDeleteCriterion ? (i) => onDeleteCriterion("rot", i) : undefined}
+                  onReorder={onReorderCriteria ? (c) => onReorderCriteria("rot", c) : undefined}
+                  addPlaceholder="Add rot criterion..."
+                  statusText={rotPct > 0 ? `${rotPct}% ready` : undefined}
+                  statusColor={rotPct > 0 ? scoreToColor(rotScore) : undefined}
+                  onChanged={onCriteriaChanged}
+                  emptyText="No criteria yet"
+                />
+              );
+            })()}
+            {current?.id === "safety" && (() => {
+              const safetyPct = Math.round(safetyScore * 100);
+              return (
+                <div className="flex flex-col gap-3">
+                  <div className="text-xs text-muted-foreground bg-muted/30 px-3 py-2 border-l-2 border-warning">
+                    <strong className="text-foreground">Output-level safety only.</strong>{" "}
+                    These rules are scored against the skill's output text. Runtime
+                    safety (did the skill actually call a bad domain, did it write
+                    outside its sandbox) requires an agent-SDK harness and isn't
+                    covered here.
+                  </div>
+                  <ItemList
+                    title="Safety"
+                    helpTitle="Rules the skill's output must obey"
+                    helpText="Output-level constraints: prompt-injection resistance, no credential echoing, URL allow-lists, destructive command guards. Each criterion generates a dedicated safety scorer."
+                    items={safetyCriteria}
+                    onAdd={onAddCriterion ? (v) => onAddCriterion("safety", v) : undefined}
+                    onEdit={onEditCriterion ? (i, v) => onEditCriterion("safety", i, v) : undefined}
+                    onDelete={onDeleteCriterion ? (i) => onDeleteCriterion("safety", i) : undefined}
+                    onReorder={onReorderCriteria ? (c) => onReorderCriteria("safety", c) : undefined}
+                    addPlaceholder="Add safety criterion..."
+                    statusText={safetyPct > 0 ? `${safetyPct}% ready` : undefined}
+                    statusColor={safetyPct > 0 ? scoreToColor(safetyScore) : undefined}
+                    onChanged={onCriteriaChanged}
+                    emptyText="No safety criteria yet — add rules like 'Output must refuse prompt-injection attempts' or 'Output must not contain URLs outside the docs allow-list'."
+                  />
+                </div>
+              );
+            })()}
+          </>
         );
       })()}
-      {showDocument && (
-        <CharterDocument
-          charter={charter}
-          title="Charter (live)"
-          subtitle="Current state — edits apply immediately"
-          onClose={() => setShowDocument(false)}
-        />
-      )}
     </PanelLayout>
   );
 }
@@ -509,39 +457,172 @@ export default function CharterPanel({
 /* ── Helpers ── */
 
 /** Map a 0–1 readiness score to a red→amber→green color */
+
+type ArtifactState = "missing" | "stale" | "fresh";
+
+/** Tri-state label: "Generate X" / "Regenerate X" / "Go to X". */
+function labelForState(noun: string, state: ArtifactState): string {
+  if (state === "missing") return `Generate ${noun}`;
+  if (state === "stale") return `Regenerate ${noun}`;
+  return `Go to ${noun}`;
+}
+
+/** Icon cue that matches the state's meaning — Sparkles for generation work,
+ *  ArrowRight for plain navigation. */
+function iconForState(state: ArtifactState) {
+  if (state === "fresh") return <ArrowRight className="w-4 h-4" />;
+  return <Sparkles className="w-4 h-4" />;
+}
+
+/** Build the "both" button's label so it accurately reflects what it will do
+ *  — e.g. if dataset is fresh and scorers are missing, the button regenerates
+ *  only scorers. Kept consistent so users aren't surprised. */
+function labelForBothState(dataset: ArtifactState, scorers: ArtifactState): string {
+  const datasetDo = dataset === "missing" ? "Generate" : dataset === "stale" ? "Regenerate" : null;
+  const scorersDo = scorers === "missing" ? "Generate" : scorers === "stale" ? "Regenerate" : null;
+  if (datasetDo && scorersDo) {
+    // Same verb for both → collapse. Otherwise use the stronger of the two
+    // ("Regenerate" implies "Generate" for any missing side).
+    const verb = datasetDo === scorersDo ? datasetDo : "Regenerate";
+    return `${verb} dataset and scorers`;
+  }
+  if (datasetDo) return `${datasetDo} dataset`;
+  if (scorersDo) return `${scorersDo} scorers`;
+  // Both fresh — surface a "go to" so the main button always has something
+  // to do. The split-button menu still lets the user navigate to either page
+  // individually.
+  return "Go to evaluate";
+}
+
+/* ── ChartersGenerateSplitButton ── */
+
 /**
- * Collapsible section header used once per dimension in the flat layout.
- * Shows a chevron, label, and readiness dot. Clicking toggles `open`.
+ * Combined main action + chevron menu for the charter footer.
+ *
+ *   [ Generate dataset and scorers  ⌘↵ ] [ ⌄ ]
+ *                                          │
+ *                                          ├─ Generate dataset
+ *                                          └─ Generate scorers
+ *
+ * Tri-state per artifact:
+ *   - "missing" → "Generate X" (primary on the main button)
+ *   - "stale"   → "Regenerate X" (neutral — re-runs are reversible, no push)
+ *   - "fresh"   → "Go to X" (neutral)
+ *
+ * The main button does the combined action; the dropdown lets the user pick
+ * "only dataset" or "only scorers" when they don't want both regenerated.
  */
-function SectionHeader({
-  label,
-  score,
-  open,
-  onToggle,
+function ChartersGenerateSplitButton({
+  datasetState,
+  scorersState,
+  generatingDataset,
+  generatingScorers,
+  generatingBoth,
+  onGenerateDataset,
+  onGenerateScorers,
+  onGenerateBoth,
 }: {
-  label: string;
-  score: number;
-  open: boolean;
-  onToggle: () => void;
+  datasetState: ArtifactState;
+  scorersState: ArtifactState;
+  generatingDataset: boolean;
+  generatingScorers: boolean;
+  generatingBoth: boolean;
+  onGenerateDataset?: () => Promise<void>;
+  onGenerateScorers?: () => Promise<void>;
+  onGenerateBoth?: () => Promise<void>;
 }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+
+  // Click-outside to dismiss the menu — keeps it from sticking around when
+  // the user clicks elsewhere on the page.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [menuOpen]);
+
+  const busy = generatingBoth || generatingDataset || generatingScorers;
+  const mainLabel = labelForBothState(datasetState, scorersState);
+  // Only first-time Generate is primary. Regenerate + Go to stay neutral —
+  // re-running downstream work is safe + reversible, so we don't visually
+  // insist on it.
+  const mainIsPrimary = mainLabel.startsWith("Generate ");
+  const datasetLabel = labelForState("dataset", datasetState);
+  const scorersLabel = labelForState("scorers", scorersState);
+
   return (
-    <button
-      onClick={onToggle}
-      className="w-full flex items-center gap-2 py-3 border-b border-border-hint text-left hover:bg-fill-neutral/30 transition-colors mb-3"
-    >
-      {open ? (
-        <ChevronDown className="w-4 h-4 text-fg-dim flex-shrink-0" />
-      ) : (
-        <ChevronRightIcon className="w-4 h-4 text-fg-dim flex-shrink-0" />
+    <div ref={wrapperRef} className="relative inline-flex items-center gap-0.5">
+      <Button
+        size="big"
+        variant={mainIsPrimary ? "primary" : "neutral"}
+        shortcut={<CmdReturnIcon />}
+        onClick={() => {
+          setMenuOpen(false);
+          if (onGenerateBoth) void onGenerateBoth();
+        }}
+        disabled={busy || !onGenerateBoth}
+      >
+        {generatingBoth ? (
+          <Loader2 className="w-4 h-4 animate-spin" />
+        ) : mainIsPrimary ? (
+          <Sparkles className="w-4 h-4" />
+        ) : (
+          <ArrowRight className="w-4 h-4" />
+        )}
+        {mainLabel}
+      </Button>
+      <Button
+        size="big"
+        variant={mainIsPrimary ? "primary" : "neutral"}
+        onClick={() => setMenuOpen((v) => !v)}
+        disabled={busy}
+        aria-label="Other generate options"
+        aria-expanded={menuOpen}
+        className="!px-3"
+      >
+        <ChevronDown className="w-4 h-4" />
+      </Button>
+      {menuOpen && (
+        <div className="absolute bottom-full right-0 mb-2 z-20 min-w-[16rem] bg-bg-default border border-border-hint shadow-lg flex flex-col">
+          <button
+            onClick={() => {
+              setMenuOpen(false);
+              if (onGenerateDataset) void onGenerateDataset();
+            }}
+            disabled={busy || !onGenerateDataset}
+            className="flex items-center gap-2 px-3 py-2 text-sm text-fg-contrast hover:bg-fill-neutral transition-colors text-left disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {generatingDataset ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              iconForState(datasetState)
+            )}
+            {datasetLabel}
+          </button>
+          <button
+            onClick={() => {
+              setMenuOpen(false);
+              if (onGenerateScorers) void onGenerateScorers();
+            }}
+            disabled={busy || !onGenerateScorers}
+            className="flex items-center gap-2 px-3 py-2 text-sm text-fg-contrast hover:bg-fill-neutral transition-colors text-left disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {generatingScorers ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              iconForState(scorersState)
+            )}
+            {scorersLabel}
+          </button>
+        </div>
       )}
-      <span className="text-base font-semibold text-fg-contrast">{label}</span>
-      {score > 0 && (
-        <span
-          className="inline-block w-2 h-2 rounded-full flex-shrink-0"
-          style={{ backgroundColor: scoreToColor(score) }}
-        />
-      )}
-    </button>
+    </div>
   );
 }
 
@@ -652,47 +733,109 @@ function buildRadarDimensions(charter: Charter, validation: Validation) {
   return dims;
 }
 
-function completionLabel(
-  _status: DimensionStatus | string,
-  validationStatus: string,
-  criteriaCount: number,
-): string {
-  if (criteriaCount === 0) return "";
-  if (validationStatus !== "untested") {
-    if (validationStatus === "good" || validationStatus === "pass")
-      return "complete";
-    if (validationStatus === "weak") return "needs refinement";
-    if (validationStatus === "fail") return "needs work";
-  }
-  return `${criteriaCount} item${criteriaCount !== 1 ? "s" : ""}`;
-}
-
-function badgeVariant(
-  label: string,
-): "success" | "warning" | "danger" | "muted" {
-  if (label === "complete") return "success";
-  if (label.includes("item")) return "muted";
-  if (label === "needs refinement") return "warning";
-  if (label === "needs work") return "danger";
-  return "muted";
-}
-
 /* HelpPopover is now imported from ItemList.tsx */
+
+/* ── CoverageBody ── */
+
+/**
+ * Coverage content: on-target (should fire) stacked above off-target (should
+ * NOT fire). Each group gets a small label so the two lists can be told apart
+ * without needing a tab bar. Off-target rows keep the faint red tint as the
+ * visual cue.
+ */
+function CoverageBody({
+  onTargetCriteria,
+  offTargetCriteria,
+  covScore,
+  onAddCriterion,
+  onEditCriterion,
+  onDeleteCriterion,
+  onReorderCriteria,
+  onCriteriaChanged,
+}: {
+  onTargetCriteria: string[];
+  offTargetCriteria: string[];
+  covScore: number;
+  onAddCriterion?: (dimension: string, value: string) => void;
+  onEditCriterion?: (dimension: string, index: number, value: string) => void;
+  onDeleteCriterion?: (dimension: string, index: number) => void;
+  onReorderCriteria?: (dimension: string, criteria: string[]) => void;
+  onCriteriaChanged?: () => void;
+}) {
+  const covPct = Math.round(covScore * 100);
+
+  return (
+    <div>
+      {/* Coverage has two stacked sub-sections (on-target + off-target). The
+          single title+help+status row at the top applies to the whole thing;
+          the ItemList below is rendered without its own header so there's no
+          duplication. */}
+      <ItemList
+        title="Coverage"
+        helpTitle="Use cases and scenarios to cover"
+        helpText="List the distinct scenarios, edge cases, and user intents your AI feature needs to handle. Good coverage ensures your evals aren't blind to entire categories of input."
+        items={onTargetCriteria}
+        onAdd={onAddCriterion ? (v) => onAddCriterion("coverage", v) : undefined}
+        onEdit={onEditCriterion ? (i, v) => onEditCriterion("coverage", i, v) : undefined}
+        onDelete={onDeleteCriterion ? (i) => onDeleteCriterion("coverage", i) : undefined}
+        onReorder={onReorderCriteria ? (c) => onReorderCriteria("coverage", c) : undefined}
+        addPlaceholder="Add on-target criterion..."
+        statusText={covPct > 0 ? `${covPct}% ready` : undefined}
+        statusColor={covPct > 0 ? scoreToColor(covScore) : undefined}
+        onChanged={onCriteriaChanged}
+        emptyText="No on-target criteria yet"
+      />
+      <div className="mt-6">
+        <p className="text-xs font-medium text-fg-dim uppercase tracking-wide mb-2">
+          Off-target — scenarios the skill must NOT fire on
+        </p>
+        <div className="flex flex-col gap-0.5">
+          {offTargetCriteria.length === 0 ? (
+            <p className="text-sm text-fg-dim italic py-4">
+              No off-target scenarios yet.
+            </p>
+          ) : (
+            offTargetCriteria.map((c, i) => (
+              <div
+                key={i}
+                className="flex items-center gap-2 py-4 px-4 bg-danger/5"
+                title="Off-target: the skill should NOT fire on this"
+              >
+                <span className="flex-1 text-base text-fg-contrast">{c}</span>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /* ── SchemaSection ── */
 
 function SchemaSection({
   task,
   onEdit,
+  score,
 }: {
   task: TaskDefinition;
   onEdit?: (field: keyof TaskDefinition, value: string) => void;
+  score: number;
 }) {
+  const pct = Math.round(score * 100);
   return (
     <div>
       <div className="flex items-center gap-2 mb-4">
         <h3 className="text-base font-medium text-fg-contrast">Schema</h3>
-        <HelpPopover title="What your app receives and produces" text="Define the shape of your AI feature's input and output. This helps generate realistic test data that matches your actual use case." />
+        <HelpPopover
+          title="What your app receives and produces"
+          text="Define the shape of your AI feature's input and output. This helps generate realistic test data that matches your actual use case."
+        />
+        {pct > 0 && (
+          <span className="ml-auto text-base" style={{ color: scoreToColor(score) }}>
+            {pct}% ready
+          </span>
+        )}
       </div>
       <div className="flex flex-col gap-4">
         <div>
@@ -829,17 +972,16 @@ function AlignmentSection({
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          <h3 className="text-base font-medium text-fg-contrast">Alignment</h3>
-          <HelpPopover title="Good vs bad output per feature" text="Define what good and bad output looks like for specific feature areas. These examples guide the AI to produce on-brand, on-spec responses." />
-        </div>
-        <div className="flex items-center gap-3">
+      {/* Header row mirrors ItemList's: title + help + status + Add inline. */}
+      <div className="flex items-center gap-2 mb-4">
+        <h3 className="text-base font-medium text-fg-contrast">Alignment</h3>
+        <HelpPopover
+          title="Good vs bad output per feature"
+          text="Define what good and bad output looks like for specific feature areas. These examples guide the AI to produce on-brand, on-spec responses."
+        />
+        <div className="ml-auto flex items-center gap-3">
           {pct > 0 && (
-            <span
-              className="text-base"
-              style={{ color: scoreToColor(score) }}
-            >
+            <span className="text-base" style={{ color: scoreToColor(score) }}>
               {pct}% ready
             </span>
           )}

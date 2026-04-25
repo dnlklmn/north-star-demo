@@ -1,6 +1,6 @@
 import { useRef, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { ChevronLeft, ChevronRight, Loader2, Sparkles } from "lucide-react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import { ReturnKeyIcon, CmdReturnIcon } from "./ui/Icons";
 import type { StoryGroup, SuggestedStory } from "../types";
 import PanelLayout from "./PanelLayout";
@@ -18,27 +18,15 @@ interface Props {
   onAcceptStory: (story: SuggestedStory) => void;
   onDismissStory: (story: SuggestedStory) => void;
   storySuggestionsLoading: boolean;
-  onBackToGoals: () => void;
   onNext: () => void;
   nextLabel: string;
   nextVariant: "primary" | "neutral";
   nextDisabled: boolean;
   loading: boolean;
-  hasCharter: boolean;
   /** Rendered in the right sidebar bottom slot (e.g. AI Assist) */
   rightBottom?: ReactNode;
   /** When set, expands bottom section to fill and caps Suggestions height. */
   rightBottomExpanded?: ReactNode;
-
-  // Shortcuts — skip directly to dataset / scorers / both. Each ensures
-  // the charter exists first (regenerates if needed). Async so the panel
-  // can show a spinner while the downstream work runs in the background.
-  onGenerateDataset?: () => Promise<void>;
-  onGenerateScorers?: () => Promise<void>;
-  onGenerateBoth?: () => Promise<void>;
-  generatingDataset?: boolean;
-  generatingScorers?: boolean;
-  generatingBoth?: boolean;
 }
 
 export default function UsersPanel({
@@ -49,21 +37,13 @@ export default function UsersPanel({
   onAcceptStory,
   onDismissStory,
   storySuggestionsLoading,
-  onBackToGoals,
   onNext,
   nextLabel,
   nextVariant,
   nextDisabled,
   loading,
-  hasCharter,
   rightBottom,
   rightBottomExpanded,
-  onGenerateDataset,
-  onGenerateScorers,
-  onGenerateBoth,
-  generatingDataset,
-  generatingScorers,
-  generatingBoth,
 }: Props) {
   // Track which roles have been committed (Enter pressed)
   const [committedRoles, setCommittedRoles] = useState<Set<number>>(new Set());
@@ -284,6 +264,18 @@ export default function UsersPanel({
     }
   }, [committedRoles, activeRoleIndex]);
 
+  // Cmd+Enter → next phase
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        if (!nextDisabled) onNext();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [nextDisabled, onNext]);
+
   const hasStories = storyGroups.some(
     (g) => g.role.trim() && g.stories.some((s) => s.what.trim()),
   );
@@ -459,68 +451,15 @@ export default function UsersPanel({
         </SuggestionBox>
       }
       footer={
-        (onGenerateDataset || onGenerateScorers || onGenerateBoth) && storyGroups.some(g => g.stories.some(s => s.what.trim())) ? (
-          // Replaces the old single "Review charter" button. Three actions
-          // covering the common paths out of the User Stories screen.
-          <div className="flex flex-wrap gap-2 justify-end">
-            {onGenerateDataset && (
-              <Button
-                size="big"
-                variant="neutral"
-                onClick={() => void onGenerateDataset()}
-                disabled={!!(generatingDataset || generatingBoth || generatingScorers)}
-              >
-                {generatingDataset ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Sparkles className="w-4 h-4" />
-                )}
-                Generate dataset
-              </Button>
-            )}
-            {onGenerateScorers && (
-              <Button
-                size="big"
-                variant="neutral"
-                onClick={() => void onGenerateScorers()}
-                disabled={!!(generatingScorers || generatingBoth || generatingDataset)}
-              >
-                {generatingScorers ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Sparkles className="w-4 h-4" />
-                )}
-                Generate scorers
-              </Button>
-            )}
-            {onGenerateBoth && (
-              <Button
-                size="big"
-                variant="primary"
-                onClick={() => void onGenerateBoth()}
-                disabled={!!(generatingBoth || generatingDataset || generatingScorers)}
-              >
-                {generatingBoth ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <Sparkles className="w-4 h-4" />
-                )}
-                Generate dataset and scorers
-              </Button>
-            )}
-          </div>
-        ) : (
-          // Fallback when shortcut handlers aren't wired in (scratch mode, etc).
-          <Button
-            size="big"
-            variant={nextVariant}
-            shortcut={<CmdReturnIcon />}
-            onClick={onNext}
-            disabled={nextDisabled}
-          >
-            {loading ? "Generating..." : nextLabel}
-          </Button>
-        )
+        <Button
+          size="big"
+          variant={nextVariant}
+          shortcut={<CmdReturnIcon />}
+          onClick={onNext}
+          disabled={nextDisabled}
+        >
+          {loading ? "Generating..." : nextLabel}
+        </Button>
       }
     >
       {/* Initial role input — only when no roles committed yet */}

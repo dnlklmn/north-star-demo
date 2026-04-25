@@ -7,9 +7,17 @@ import {
   deleteSession,
   listSessions,
   setSessionMode,
+  seedFromSkill,
+  fetchSkillFromUrl,
+  updateSessionName,
 } from "../api";
+import {
+  parseSkillFrontmatter,
+  uniqueProjectName,
+} from "../utils/skillFrontmatter";
 import Button from "../components/ui/Button";
 import IconButton from "../components/ui/IconButton";
+import NewSkillEvalModal from "../components/NewSkillEvalModal";
 import { GearIcon, StarIcon } from "../components/ui/Icons";
 
 function relativeTime(dateStr: string): string {
@@ -38,6 +46,7 @@ export default function Home() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [isNewSkillModalOpen, setIsNewSkillModalOpen] = useState(false);
 
   const fetchProjects = useCallback(async () => {
     try {
@@ -54,21 +63,82 @@ export default function Home() {
     fetchProjects();
   }, [fetchProjects]);
 
-  // "New skill eval" creates an empty triggered-mode session immediately and
-  // jumps to the workspace. The Skill tab renders its empty-state paste form
-  // so the first screen after clicking is the same screen as where users
-  // land after a seed. The Skill tab's "Start from scratch" link flips the
-  // session to standard mode for the legacy goals-first flow.
-  const handleNewProject = async () => {
+  // Open modal to collect skill input before creating session
+  const openNewSkillModal = () => {
+    setIsNewSkillModalOpen(true);
+  };
+
+  // Handle "Analyze" click from modal
+  const handleAnalyze = async (input: string) => {
     setCreating(true);
     try {
-      const res = await createSession({ name: "Untitled skill eval" });
-      // Stamp the session as triggered so the sidebar correctly gates other
-      // tabs behind a skill_body. User can still escape via the Skill tab.
-      await setSessionMode(res.session_id, "triggered");
-      navigate(`/project/${res.session_id}`);
+      let skillBody = input.trim();
+      // Skill metadata pulled either from GitHub fetch response or, when the
+      // user pastes raw markdown, from local frontmatter parsing. Without
+      // this, seedFromSkill received `{ skill_body }` only and the name +
+      // description fields stayed empty after Analyze.
+      let skillName: string | undefined;
+      let skillDescription: string | undefined;
+
+      // Check if input is a GitHub URL for SKILL.md
+      const isGithubUrl = skillBody.startsWith('http') &&
+        (skillBody.includes('github.com') || skillBody.includes('raw.githubusercontent.com')) &&
+        skillBody.toLowerCase().includes('skill.md');
+
+      if (isGithubUrl) {
+        const fetchRes = await fetchSkillFromUrl(skillBody);
+        skillBody = fetchRes.body;
+        skillName = fetchRes.name ?? undefined;
+        skillDescription = fetchRes.description ?? undefined;
+      } else {
+        // Pasted markdown — parse frontmatter and strip it from the body so
+        // the SkillPanel later sees the same shape as the manual flow.
+        const parsed = parseSkillFrontmatter(skillBody);
+        skillBody = parsed.body;
+        skillName = parsed.name;
+        skillDescription = parsed.description;
+      }
+
+      // Create triggered-mode session
+      const sessionRes = await createSession({ name: "Untitled skill eval" });
+      await setSessionMode(sessionRes.session_id, "triggered");
+
+      // Seed with skill content + metadata so charter.task.skill_name and
+      // skill_description get populated server-side.
+      if (skillBody) {
+        await seedFromSkill(sessionRes.session_id, {
+          skill_body: skillBody,
+          skill_name: skillName,
+          skill_description: skillDescription,
+        });
+
+        // Auto-rename the project to the skill name, with a numeric suffix
+        // (" 2", " 3", ...) when another project already owns the bare name.
+        if (skillName) {
+          try {
+            const list = await listSessions();
+            const taken = new Set(
+              list.sessions
+                .filter((p) => p.id !== sessionRes.session_id)
+                .map((p) => p.name?.trim())
+                .filter(Boolean) as string[],
+            );
+            const desired = uniqueProjectName(skillName, taken);
+            if (desired) {
+              await updateSessionName(sessionRes.session_id, desired);
+            }
+          } catch (err) {
+            console.error("Failed to auto-rename project:", err);
+          }
+        }
+      }
+
+      setIsNewSkillModalOpen(false);
+      navigate(`/project/${sessionRes.session_id}?tab=goals`);
     } catch (err) {
-      console.error("Failed to create project:", err);
+      console.error("Failed to analyze skill:", err);
+      alert(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
       setCreating(false);
     }
   };
@@ -98,7 +168,7 @@ export default function Home() {
           <Button
             size="small"
             variant="primary"
-            onClick={handleNewProject}
+            onClick={openNewSkillModal}
             disabled={creating}
           >
             {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
@@ -125,7 +195,7 @@ export default function Home() {
               <Button
                 size="big"
                 variant="primary"
-                onClick={handleNewProject}
+                onClick={openNewSkillModal}
                 disabled={creating}
               >
                 {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
@@ -179,6 +249,13 @@ export default function Home() {
           )}
         </div>
       </main>
+      {/* New Skill Eval Modal */}
+      <NewSkillEvalModal
+        isOpen={isNewSkillModalOpen}
+        isLoading={creating}
+        onClose={() => setIsNewSkillModalOpen(false)}
+        onAnalyze={handleAnalyze}
+      />
     </div>
   );
 }

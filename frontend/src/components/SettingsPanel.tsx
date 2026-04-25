@@ -1,7 +1,23 @@
 import { useState, useEffect } from 'react'
 import { Eye, EyeOff } from 'lucide-react'
 import type { Settings } from '../types'
-import { getSettings, updateSettings, getApiKey, setApiKey } from '../api'
+import {
+  getSettings,
+  updateSettings,
+  getApiKey,
+  setApiKey,
+  getBraintrustApiKey,
+  setBraintrustApiKey,
+  getGithubToken,
+  setGithubToken,
+} from '../api'
+import {
+  JUDGE_MODEL_OPTIONS,
+  getDefaultBraintrustProject,
+  getDefaultJudgeModel,
+  setDefaultBraintrustProject,
+  setDefaultJudgeModel,
+} from '../utils/evalDefaults'
 
 interface SettingsPanelProps {
   onClose: () => void
@@ -36,6 +52,20 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   const [apiKeyValue, setApiKeyValue] = useState(() => getApiKey())
   const [showKey, setShowKey] = useState(false)
   const [keySaved, setKeySaved] = useState(false)
+  // Braintrust key — required for running Braintrust evals. Stored separately
+  // from the Anthropic/OpenRouter key, same localStorage pattern.
+  const [braintrustKeyValue, setBraintrustKeyValue] = useState(() => getBraintrustApiKey())
+  const [showBraintrustKey, setShowBraintrustKey] = useState(false)
+  const [braintrustKeySaved, setBraintrustKeySaved] = useState(false)
+  // GitHub PAT — optional, unlocks higher rate limits for the public-repo
+  // fetch in Phase 1 and private repos / PR creation in later phases.
+  const [githubTokenValue, setGithubTokenValue] = useState(() => getGithubToken())
+  const [showGithubToken, setShowGithubToken] = useState(false)
+  const [githubTokenSaved, setGithubTokenSaved] = useState(false)
+  // Eval-run defaults — auto-saved on change so EvaluatePanel picks them up
+  // next time it mounts. No "Save" button: these are pure preferences.
+  const [defaultJudgeModel, setDefaultJudgeModelLocal] = useState(() => getDefaultJudgeModel())
+  const [defaultBraintrustProject, setDefaultBraintrustProjectLocal] = useState(() => getDefaultBraintrustProject())
 
   useEffect(() => {
     getSettings().then(setSettings).catch(() => setError('Failed to load settings'))
@@ -116,29 +146,6 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                     </select>
                     <p className="text-[10px] text-muted-foreground mt-1">
                       The Claude model used for all agent operations.
-                    </p>
-                  </div>
-
-                  {/* Max question rounds */}
-                  <div>
-                    <label className="text-xs font-medium text-foreground block mb-1.5">
-                      Max question rounds
-                    </label>
-                    <div className="flex items-center gap-3">
-                      <input
-                        type="range"
-                        min={1}
-                        max={10}
-                        value={settings.max_rounds}
-                        onChange={e => handleChange({ max_rounds: parseInt(e.target.value) })}
-                        className="flex-1 accent-accent"
-                      />
-                      <span className="text-sm font-mono text-foreground w-6 text-right">
-                        {settings.max_rounds}
-                      </span>
-                    </div>
-                    <p className="text-[10px] text-muted-foreground mt-1">
-                      How many rounds of questions the agent asks before offering to proceed.
                     </p>
                   </div>
 
@@ -226,6 +233,121 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                     No API key set. The server's default key will be used if available.
                   </p>
                 )}
+              </div>
+
+              {/* Braintrust API key — required to run evals */}
+              <div>
+                <label className="text-xs font-medium text-foreground block mb-1.5">Braintrust API key</label>
+                <div className="flex gap-1.5">
+                  <div className="flex-1 relative">
+                    <input
+                      type={showBraintrustKey ? 'text' : 'password'}
+                      value={braintrustKeyValue}
+                      onChange={e => { setBraintrustKeyValue(e.target.value); setBraintrustKeySaved(false) }}
+                      placeholder="sk-..."
+                      className="w-full text-sm bg-surface border border-border px-3 py-2 pr-9 text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-accent"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowBraintrustKey(!showBraintrustKey)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    >
+                      {showBraintrustKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setBraintrustApiKey(braintrustKeyValue)
+                      setBraintrustKeySaved(true)
+                      setTimeout(() => setBraintrustKeySaved(false), 2000)
+                    }}
+                    className="px-3 py-2 text-xs font-medium bg-accent text-accent-foreground hover:opacity-90 transition-opacity"
+                  >
+                    {braintrustKeySaved ? 'Saved!' : 'Save'}
+                  </button>
+                </div>
+                <p className="text-[10px] text-muted-foreground mt-1.5">
+                  Required for running evals on the Evaluations tab. Stored locally and sent as X-Braintrust-Key with run requests.
+                </p>
+              </div>
+
+              {/* GitHub PAT — optional */}
+              <div>
+                <label className="text-xs font-medium text-foreground block mb-1.5">GitHub token (optional)</label>
+                <div className="flex gap-1.5">
+                  <div className="flex-1 relative">
+                    <input
+                      type={showGithubToken ? 'text' : 'password'}
+                      value={githubTokenValue}
+                      onChange={e => { setGithubTokenValue(e.target.value); setGithubTokenSaved(false) }}
+                      placeholder="ghp_... or github_pat_..."
+                      className="w-full text-sm bg-surface border border-border px-3 py-2 pr-9 text-foreground font-mono focus:outline-none focus:ring-1 focus:ring-accent"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowGithubToken(!showGithubToken)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    >
+                      {showGithubToken ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setGithubToken(githubTokenValue)
+                      setGithubTokenSaved(true)
+                      setTimeout(() => setGithubTokenSaved(false), 2000)
+                    }}
+                    className="px-3 py-2 text-xs font-medium bg-accent text-accent-foreground hover:opacity-90 transition-opacity"
+                  >
+                    {githubTokenSaved ? 'Saved!' : 'Save'}
+                  </button>
+                </div>
+                <p className="text-[10px] text-muted-foreground mt-1.5">
+                  Not needed for public SKILL.md fetches — GitHub allows 60/hr unauthenticated.
+                  Add a token to lift that limit or to reach private repos. Create one at
+                  github.com → Settings → Developer settings → Personal access tokens. For
+                  Phase 1 (read) a fine-grained token with <code>contents: read</code> on the
+                  target repo is enough; later PR creation will need <code>contents: write</code>
+                  and <code>pull-requests: write</code>.
+                </p>
+              </div>
+
+              {/* Default judge model — pre-selected on the Evaluations page. */}
+              <div>
+                <label className="text-xs font-medium text-foreground block mb-1.5">Default judge model</label>
+                <select
+                  value={defaultJudgeModel}
+                  onChange={e => {
+                    setDefaultJudgeModelLocal(e.target.value)
+                    setDefaultJudgeModel(e.target.value)
+                  }}
+                  className="w-full text-sm bg-surface border border-border px-3 py-2 text-foreground focus:outline-none focus:ring-1 focus:ring-accent"
+                >
+                  {JUDGE_MODEL_OPTIONS.map(opt => (
+                    <option key={opt.label} value={opt.value ?? ''}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[10px] text-muted-foreground mt-1.5">
+                  Used to grade scorer outputs. Non-Claude judges require an OpenRouter key (above). Per-run override is still available on the Evaluations page.
+                </p>
+              </div>
+
+              {/* Default Braintrust project — pre-fills the eval run config. */}
+              <div>
+                <label className="text-xs font-medium text-foreground block mb-1.5">Default Braintrust project</label>
+                <input
+                  type="text"
+                  value={defaultBraintrustProject}
+                  onChange={e => setDefaultBraintrustProjectLocal(e.target.value)}
+                  onBlur={() => setDefaultBraintrustProject(defaultBraintrustProject)}
+                  placeholder="northstar-eval"
+                  className="w-full text-sm bg-surface border border-border px-3 py-2 text-foreground focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+                <p className="text-[10px] text-muted-foreground mt-1.5">
+                  Pre-fills the Project field on every eval run. Saved on blur.
+                </p>
               </div>
 
               {/* Theme */}
