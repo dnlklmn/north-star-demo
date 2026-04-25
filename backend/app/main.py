@@ -1896,56 +1896,88 @@ async def fetch_skill_from_url(req: FetchSkillFromUrlRequest, request: Request):
     skill (frontmatter with `name` and `description`). Returns the parsed
     body and source metadata the frontend can hand back to `skill-seed`.
 
-    An optional `X-Github-Token` header authenticates the call — pushes the
-    IP-based rate limit (60/hr) up to the token's limit (5000/hr). Not
-    required for public repos.
+    Strategy:
+      * No token → fetch the raw file via raw.githubusercontent.com. CDN-
+        served, no per-IP rate limit, works fine for public repos. blob_sha
+        is left empty; Phase-3 PR work will re-resolve via the API once the
+        user adds a token.
+      * Token present → use the GitHub REST API so we can read private repos
+        and capture the blob `sha` (needed for conditional updates later).
     """
     import httpx
 
     owner, repo, ref, path = _parse_github_url(req.url)
-
-    api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={ref}"
-    headers = {
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "northstar-skill-fetch",
-    }
     token = request.headers.get("x-github-token") or os.environ.get("GITHUB_TOKEN")
+
     if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(api_url, headers=headers, follow_redirects=True)
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"GitHub fetch failed: {e}")
-
-    if resp.status_code == 404:
-        raise HTTPException(status_code=404, detail="File not found on GitHub (check owner/repo/branch/path).")
-    if resp.status_code == 403:
-        raise HTTPException(
-            status_code=403,
-            detail="GitHub rate-limited or repo is private. Add a GitHub token in Settings.",
-        )
-    if resp.status_code >= 400:
-        raise HTTPException(status_code=502, detail=f"GitHub returned {resp.status_code}: {resp.text[:200]}")
-
-    data = resp.json()
-    if data.get("type") != "file":
-        raise HTTPException(status_code=400, detail="URL must point to a file, not a directory.")
-    if data.get("size", 0) > _SKILL_MAX_BYTES:
-        raise HTTPException(status_code=400, detail="File too large to be a SKILL.md.")
-
-    encoding = data.get("encoding")
-    raw_content = data.get("content", "")
-    if encoding == "base64":
-        import base64
+        # Authenticated path — REST API gives us the blob sha + works for
+        # private repos.
+        api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={ref}"
+        headers = {
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "northstar-skill-fetch",
+            "Authorization": f"Bearer {token}",
+        }
         try:
-            body_bytes = base64.b64decode(raw_content)
-            raw_text = body_bytes.decode("utf-8")
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=400, detail=f"Failed to decode file contents: {e}")
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(api_url, headers=headers, follow_redirects=True)
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=502, detail=f"GitHub fetch failed: {e}")
+
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="File not found on GitHub (check owner/repo/branch/path).")
+        if resp.status_code in (401, 403):
+            raise HTTPException(
+                status_code=resp.status_code,
+                detail="GitHub rejected the token. Check that it has `contents: read` on this repo.",
+            )
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=502, detail=f"GitHub returned {resp.status_code}: {resp.text[:200]}")
+
+        data = resp.json()
+        if data.get("type") != "file":
+            raise HTTPException(status_code=400, detail="URL must point to a file, not a directory.")
+        if data.get("size", 0) > _SKILL_MAX_BYTES:
+            raise HTTPException(status_code=400, detail="File too large to be a SKILL.md.")
+
+        encoding = data.get("encoding")
+        raw_content = data.get("content", "")
+        if encoding == "base64":
+            import base64
+            try:
+                raw_text = base64.b64decode(raw_content).decode("utf-8")
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(status_code=400, detail=f"Failed to decode file contents: {e}")
+        else:
+            raw_text = raw_content
+        blob_sha = data.get("sha", "")
     else:
-        raw_text = raw_content
+        # Public path — raw.githubusercontent.com isn't subject to the 60/hr
+        # API rate limit that the deployed backend was hitting from a shared
+        # IP. blob_sha stays empty; we'll resolve it later if a PR flow ever
+        # needs it.
+        raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}"
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(
+                    raw_url,
+                    headers={"User-Agent": "northstar-skill-fetch"},
+                    follow_redirects=True,
+                )
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=502, detail=f"GitHub fetch failed: {e}")
+
+        if resp.status_code == 404:
+            raise HTTPException(
+                status_code=404,
+                detail="File not found on GitHub (check owner/repo/branch/path), or the repo is private — add a GitHub token in Settings.",
+            )
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=502, detail=f"GitHub returned {resp.status_code}: {resp.text[:200]}")
+        if len(resp.content) > _SKILL_MAX_BYTES:
+            raise HTTPException(status_code=400, detail="File too large to be a SKILL.md.")
+        raw_text = resp.text
+        blob_sha = ""
 
     name, description, body = _parse_skill_frontmatter(raw_text)
     # Validation: a skill has frontmatter with at least `name` and `description`.
@@ -1963,7 +1995,7 @@ async def fetch_skill_from_url(req: FetchSkillFromUrlRequest, request: Request):
             repo=repo,
             ref=ref,
             path=path,
-            blob_sha=data.get("sha", ""),
+            blob_sha=blob_sha,
         ),
     )
 
