@@ -88,13 +88,27 @@ export interface LLMBillingErrorDetail {
 export const LLM_BILLING_EVENT = 'northstar:llm-billing'
 
 async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
-  const res = await fetch(url, {
-    ...init,
-    headers: {
-      ...apiHeaders(),
-      ...(init?.headers as Record<string, string> || {}),
-    },
-  })
+  let res: Response
+  try {
+    res = await fetch(url, {
+      ...init,
+      headers: {
+        ...apiHeaders(),
+        ...(init?.headers as Record<string, string> || {}),
+      },
+    })
+  } catch (err) {
+    // Browsers throw a generic `TypeError: Failed to fetch` for any
+    // network-level failure (DNS, CORS, blocked, server cold-starting on
+    // free-tier hosting, offline). Translate into something actionable so
+    // the user knows whether to retry or check their connection.
+    if (err instanceof TypeError) {
+      throw new Error(
+        "Couldn't reach the server. The backend may be cold-starting (give it ~30s) or your connection dropped — try again.",
+      )
+    }
+    throw err
+  }
   if (res.status === 401) {
     throw new Error('Invalid or missing API key. Please add your API key in Settings.')
   }

@@ -18,6 +18,7 @@ import {
 import Button from "../components/ui/Button";
 import IconButton from "../components/ui/IconButton";
 import NewSkillEvalModal from "../components/NewSkillEvalModal";
+import SettingsPanel from "../components/SettingsPanel";
 import { GearIcon, StarIcon } from "../components/ui/Icons";
 
 function relativeTime(dateStr: string): string {
@@ -47,6 +48,7 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [isNewSkillModalOpen, setIsNewSkillModalOpen] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
 
   const fetchProjects = useCallback(async () => {
     try {
@@ -161,7 +163,11 @@ export default function Home() {
           <StarIcon />
         </IconButton>
         <div className="flex items-center gap-3">
-          <Button size="small" variant="neutral">
+          <Button
+            size="small"
+            variant="neutral"
+            onClick={() => setShowSettings(true)}
+          >
             <GearIcon />
             Settings
           </Button>
@@ -256,6 +262,7 @@ export default function Home() {
         onClose={() => setIsNewSkillModalOpen(false)}
         onAnalyze={handleAnalyze}
       />
+      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
     </div>
   );
 }
