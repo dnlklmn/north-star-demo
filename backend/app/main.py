@@ -140,10 +140,21 @@ async def _billing_error_handler(_request: Request, exc: LLMBillingError):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow any origin for deployed prototype
-    allow_credentials=True,
+    # Wildcard origin + credentials is forbidden by the CORS spec: every
+    # browser rejects preflights when `Access-Control-Allow-Credentials: true`
+    # is paired with `Access-Control-Allow-Origin: *`. We don't use cookies —
+    # auth flows over custom `X-*-Key` headers — so credentials can stay
+    # off and the wildcard works for the deployed prototype.
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Anthropic-Key"],
+    allow_headers=[
+        "Content-Type",
+        "Authorization",
+        "X-Anthropic-Key",
+        "X-Braintrust-Key",
+        "X-Github-Token",
+    ],
 )
 
 
