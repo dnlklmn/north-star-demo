@@ -65,7 +65,8 @@ import ImprovePanel from "../components/ImprovePanel";
 import SkillPanel from "../components/SkillPanel";
 import ConversationPanel from "../components/ConversationPanel";
 import ExampleReview from "../components/ExampleReview";
-import CoverageMap from "../components/CoverageMap";
+import CoverageMap, { computeCoverageScore } from "../components/CoverageMap";
+import GenerateModal from "../components/examples/GenerateModal";
 import SettingsPanel from "../components/SettingsPanel";
 
 type ActiveTab =
@@ -215,6 +216,24 @@ export default function ProjectWorkspace() {
   const [gapAnalysis, setGapAnalysis] = useState<GapAnalysis | null>(null);
   const [showCoverageMap, setShowCoverageMap] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+
+  // Coverage map status comes from the gap analysis. Compute once per
+  // gapAnalysis change so the dataset toolbar dot stays in sync.
+  const coverageScore = computeCoverageScore(gapAnalysis);
+
+  // Coverage-driven generate modal. The dataset toolbar still has its own
+  // local Generate flow inside ExampleReview; this one is reserved for
+  // requests originating from the CoverageMap (single cell + bulk fix).
+  type CoverageGenerateRequest =
+    | {
+        kind: "cell";
+        criterion: string;
+        featureArea: string;
+        currentCount: number;
+      }
+    | { kind: "fill"; emptyCells: Array<{ criterion: string; featureArea: string }> };
+  const [coverageGenerateRequest, setCoverageGenerateRequest] =
+    useState<CoverageGenerateRequest | null>(null);
 
   // --- Polaris activity feed (polled while drawer open) ---
   const activityCursorRef = useRef<string | null>(null);
@@ -1095,6 +1114,30 @@ export default function ProjectWorkspace() {
     if (scorers.length > 0) setScorersStale(true);
   }, [state.charter]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Auto-fetch gap analysis whenever the dataset's example count changes.
+  // The map is the user's "is my data hitting every cell" view, so it has
+  // to stay in sync with the dataset — without making them open the modal
+  // first. Skip while the dataset is empty.
+  const datasetExampleCount = dataset?.examples?.length ?? 0;
+  useEffect(() => {
+    if (!dataset || datasetExampleCount === 0) {
+      setGapAnalysis(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const gaps = await getGapAnalysis(dataset.id);
+        if (!cancelled) setGapAnalysis(gaps);
+      } catch (err) {
+        console.error("Failed to fetch gap analysis:", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [dataset?.id, datasetExampleCount]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleAcceptSuggestion = useCallback(
     async (suggestion: Suggestion) => {
       if (!sessionId) return;
@@ -1434,17 +1477,87 @@ export default function ProjectWorkspace() {
 
   const handleShowCoverageMap = useCallback(async () => {
     if (!dataset) return;
-    setLoading(true);
+    // Refresh in case it's stale, but open the modal immediately — the
+    // useEffect above keeps it warm so most opens are zero-latency.
+    setShowCoverageMap(true);
     try {
       const gaps = await getGapAnalysis(dataset.id);
       setGapAnalysis(gaps);
-      setShowCoverageMap(true);
     } catch (err) {
       console.error("Failed to get gaps:", err);
-    } finally {
-      setLoading(false);
     }
   }, [dataset]);
+
+  // CoverageMap "+" on a single cell — stage a generate request so the
+  // GenerateModal can show with the right context. Actual synth happens
+  // when the user confirms a count in the modal.
+  const handleRequestCellGenerate = useCallback(
+    (criterion: string, featureArea: string) => {
+      const matrix = gapAnalysis?.coverage_matrix || {};
+      const currentCount = matrix[criterion]?.[featureArea] ?? 0;
+      setCoverageGenerateRequest({
+        kind: "cell",
+        criterion,
+        featureArea,
+        currentCount,
+      });
+    },
+    [gapAnalysis],
+  );
+
+  // CoverageMap "Fix coverage" — same pattern as cell, but with all empty
+  // cells gathered up. Lets the modal explain the bulk action before the
+  // user commits.
+  const handleRequestFillGaps = useCallback(() => {
+    if (!gapAnalysis) return;
+    const matrix = gapAnalysis.coverage_matrix || {};
+    const criteria = Object.keys(matrix);
+    const featureAreas = criteria.length > 0 ? Object.keys(matrix[criteria[0]] || {}) : [];
+    const emptyCells: Array<{ criterion: string; featureArea: string }> = [];
+    for (const c of criteria) {
+      for (const fa of featureAreas) {
+        if ((matrix[c]?.[fa] ?? 0) === 0) emptyCells.push({ criterion: c, featureArea: fa });
+      }
+    }
+    if (emptyCells.length === 0) return;
+    setCoverageGenerateRequest({ kind: "fill", emptyCells });
+  }, [gapAnalysis]);
+
+  // Modal confirm — branches by request kind. Per-cell scopes to exactly
+  // one intersection; fill scopes to the union of missing criteria + areas
+  // (best-effort: may over-generate if gaps are scattered).
+  const handleConfirmCoverageGenerate = useCallback(
+    async (count: number) => {
+      if (!dataset || !coverageGenerateRequest) return;
+      const req = coverageGenerateRequest;
+      setCoverageGenerateRequest(null);
+      setLoading(true);
+      try {
+        if (req.kind === "cell") {
+          await synthesizeExamples(dataset.id, {
+            feature_areas: [req.featureArea],
+            coverage_criteria: [req.criterion],
+            count_per_scenario: count,
+          });
+        } else {
+          const missingCriteria = Array.from(new Set(req.emptyCells.map(c => c.criterion)));
+          const missingAreas = Array.from(new Set(req.emptyCells.map(c => c.featureArea)));
+          await synthesizeExamples(dataset.id, {
+            feature_areas: missingAreas,
+            coverage_criteria: missingCriteria,
+            count_per_scenario: count,
+          });
+        }
+        const fullDs = await getDataset(dataset.session_id);
+        setDataset(fullDs);
+      } catch (err) {
+        console.error("Failed to generate from coverage map:", err);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [dataset, coverageGenerateRequest],
+  );
 
   const handleExport = useCallback(async () => {
     if (!dataset) return;
@@ -1898,6 +2011,7 @@ export default function ProjectWorkspace() {
                     onNavigateToScorers={() => setActiveTab("scorers")}
                     onHeaderClick={() => {}}
                     isFocused={true}
+                    coverageScore={coverageScore}
                     onSuggestRevision={handleSuggestRevision}
                     onSuggestRevisions={handleBulkSuggestRevisions}
                     onAcceptRevision={handleAcceptRevision}
@@ -2073,6 +2187,18 @@ export default function ProjectWorkspace() {
         <CoverageMap
           gaps={gapAnalysis}
           onClose={() => setShowCoverageMap(false)}
+          onRequestCellGenerate={handleRequestCellGenerate}
+          onRequestFillGaps={handleRequestFillGaps}
+        />
+      )}
+
+      {/* Coverage-driven generate modal — staged by the CoverageMap, runs
+          synth scoped to the requested cell or set of empty cells. */}
+      {coverageGenerateRequest && (
+        <GenerateModal
+          onConfirm={count => void handleConfirmCoverageGenerate(count)}
+          onCancel={() => setCoverageGenerateRequest(null)}
+          {...buildCoverageGenerateModalProps(coverageGenerateRequest)}
         />
       )}
 
@@ -2080,6 +2206,51 @@ export default function ProjectWorkspace() {
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
     </div>
   );
+}
+
+// Mirror of CoverageGenerateRequest in the component scope above. Kept
+// here so the module-level helper can stay pure / testable without
+// pulling component state.
+type CoverageGenerateRequestExt =
+  | {
+      kind: "cell";
+      criterion: string;
+      featureArea: string;
+      currentCount: number;
+    }
+  | { kind: "fill"; emptyCells: Array<{ criterion: string; featureArea: string }> };
+
+function buildCoverageGenerateModalProps(req: CoverageGenerateRequestExt): {
+  suggestedCount: number;
+  suggestionReason: string;
+  totalScenarios: number;
+} {
+  if (req.kind === "cell") {
+    // Per-cell: 2 examples per scenario, one scenario (this intersection).
+    const suggestedCount = 2;
+    const isEmpty = req.currentCount === 0;
+    const reason = isEmpty
+      ? `${suggestedCount} more example${suggestedCount === 1 ? "" : "s"} will cover "${req.criterion}" × "${req.featureArea}".`
+      : `Add ${suggestedCount} more example${suggestedCount === 1 ? "" : "s"} for variety in "${req.criterion}" × "${req.featureArea}". Currently has ${req.currentCount}.`;
+    return {
+      suggestedCount,
+      suggestionReason: reason,
+      totalScenarios: 1,
+    };
+  }
+  // fill: scope is the union of missing criteria × missing areas, so the
+  // synth backend ranges across that grid. The user's count input maps to
+  // examples-per-scenario in that grid.
+  const missingCriteria = new Set(req.emptyCells.map(c => c.criterion));
+  const missingAreas = new Set(req.emptyCells.map(c => c.featureArea));
+  const scenarios = missingCriteria.size * missingAreas.size;
+  const suggestedCount = 2;
+  const reason = `${req.emptyCells.length} intersection${req.emptyCells.length === 1 ? "" : "s"} are empty. Generating ${suggestedCount} per scenario across the ${missingCriteria.size} missing criteria × ${missingAreas.size} feature area${missingAreas.size === 1 ? "" : "s"} will fill the gaps (some intersections that already have examples may also receive new ones).`;
+  return {
+    suggestedCount,
+    suggestionReason: reason,
+    totalScenarios: scenarios,
+  };
 }
 
 function SidebarGroup({

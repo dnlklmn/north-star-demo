@@ -6,6 +6,7 @@ Prompts come from prompt.py. Parsing logic lives here.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -33,9 +34,12 @@ from .prompt import (
     build_conversational_turn_prompt,
     build_generate_suggestions_prompt,
     build_synthesize_examples_prompt,
+    build_synthesize_examples_cell_prefix,
+    build_synthesize_examples_cell_suffix,
     build_review_examples_prompt,
     build_dataset_chat_prompt,
     build_gap_analysis_prompt,
+    _build_coverage_matrix,
     build_detect_schema_prompt,
     build_infer_schema_prompt,
     build_import_url_prompt,
@@ -180,6 +184,82 @@ def _call_llm(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
         "raw_response": text,
         "input_tokens": response.usage.input_tokens,
         "output_tokens": response.usage.output_tokens,
+        "latency_ms": elapsed_ms,
+        "temperature": temperature,
+    }
+    return text, metadata
+
+
+def _call_llm_cached(prefix: str, suffix: str, max_tokens: int = 4096) -> tuple[str, dict]:
+    """Call Claude with a cacheable prefix block + per-call suffix.
+
+    Sends the prompt as two text content blocks. The first carries
+    `cache_control: ephemeral` so Anthropic caches it (~5 minute TTL) and
+    subsequent calls within the window pay near-zero for that prefix. Use
+    this when fanning out many calls that share a long context — e.g. the
+    per-cell synth fan-out.
+
+    On providers that don't honor cache_control (some OpenRouter models),
+    the field is ignored and the call still works at full price; this
+    function never errors out due to caching support.
+    """
+    model = get_model()
+    creativity = get_creativity()
+    temperature = creativity
+
+    logger.info(
+        f"_call_llm_cached: model={model}, max_tokens={max_tokens}, "
+        f"prefix_len={len(prefix)}, suffix_len={len(suffix)}"
+    )
+    start = time.time()
+    try:
+        response = get_client().messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prefix,
+                            "cache_control": {"type": "ephemeral"},
+                        },
+                        {"type": "text", "text": suffix},
+                    ],
+                }
+            ],
+        )
+    except Exception as e:
+        logger.error(f"_call_llm_cached FAILED: {type(e).__name__}: {e}")
+        if _is_billing_error(e):
+            raise LLMBillingError(str(e)) from e
+        raise
+    elapsed_ms = int((time.time() - start) * 1000)
+    usage = response.usage
+    # Cache-related fields only present on responses for cached calls; treat
+    # as 0 when missing so logging works on providers that ignore them.
+    cache_creation = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    logger.info(
+        f"_call_llm_cached: OK in {elapsed_ms}ms, "
+        f"input={usage.input_tokens}, output={usage.output_tokens}, "
+        f"cache_create={cache_creation}, cache_read={cache_read}"
+    )
+    text = response.content[0].text if response.content else ""
+    metadata = {
+        "model": model,
+        # Store the assembled prompt for replay parity with _call_llm. Keep
+        # both halves so debugging tools can see the split.
+        "prompt": prefix + suffix,
+        "prompt_prefix": prefix,
+        "prompt_suffix": suffix,
+        "raw_response": text,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cache_creation_input_tokens": cache_creation,
+        "cache_read_input_tokens": cache_read,
         "latency_ms": elapsed_ms,
         "temperature": temperature,
     }
@@ -355,18 +435,127 @@ async def call_suggest_stories(goals: list[str], stories: list[dict]) -> tuple[l
 
 # --- Dataset phase tools ---
 
+# Concurrency cap for per-cell synth fan-out. The backend talks to a single
+# upstream LLM provider; ~5 in-flight requests is a safe ceiling that keeps
+# latency low without rate-limiting risk.
+_SYNTH_CELL_CONCURRENCY = 5
+
+
+def _has_off_target_or_safety(charter: dict) -> bool:
+    """Whether the charter requires off-target or safety rows in synthesis.
+
+    Per-cell fan-out scopes generation to a single (criterion × feature_area)
+    intersection, which doesn't accommodate the cross-cutting off-target and
+    safety populations. When either is present we fall back to a single-call
+    synth so those rows still get produced as the prompt expects.
+    """
+    coverage = charter.get("coverage") or {}
+    if coverage.get("negative_criteria"):
+        return True
+    safety = charter.get("safety") or {}
+    if safety.get("criteria"):
+        return True
+    task = charter.get("task") or {}
+    # Triggered mode without explicit negatives is still single-call territory
+    # because the prompt's TRIGGERED RULES generate two populations regardless.
+    if task.get("skill_description"):
+        return True
+    return False
+
+
+async def _synth_one_cell(
+    prefix: str,
+    feature_area: str,
+    coverage_criterion: str,
+    count: int,
+    semaphore: asyncio.Semaphore,
+) -> tuple[list[dict], dict]:
+    """Generate examples for a single (criterion × area) cell.
+
+    Takes a pre-built cacheable `prefix` so the first cell call seeds the
+    Anthropic prompt cache and the rest hit it. The suffix is small and
+    varies per cell.
+    """
+    suffix = build_synthesize_examples_cell_suffix(coverage_criterion, feature_area, count)
+    async with semaphore:
+        # _call_llm_cached is sync (blocking SDK). Run it in a worker thread
+        # so asyncio.gather can actually parallelize across cells.
+        text, meta = await asyncio.to_thread(_call_llm_cached, prefix, suffix, 4096)
+    data = _extract_json(text)
+    return data.get("examples", []), meta
+
+
 async def call_synthesize_examples(
     charter: dict,
     feature_areas: list[str] | None = None,
     coverage_criteria: list[str] | None = None,
     count: int = 2,
 ) -> tuple[list[dict], list[dict]]:
-    """Generate synthetic examples from charter. Returns (examples, call metadata list)."""
+    """Generate synthetic examples from charter. Returns (examples, call metadata list).
+
+    Strategy:
+    - Default path: fan out one LLM call per (criterion × area) cell so the
+      grid is filled evenly. The previous single-call approach asked the LLM
+      to fill the whole grid in one response, which clipped at the token cap
+      and led to ratty coverage (some cells with many examples, others with 0).
+    - Fallback path: when the charter has off-target or safety rows, do one
+      single call. Those populations cut across the grid and don't slot into
+      a per-cell scope cleanly.
+    """
     await _refresh_settings()
-    prompt = build_synthesize_examples_prompt(charter, feature_areas, coverage_criteria, count)
-    text, meta = _call_llm(prompt, max_tokens=8192)
-    data = _extract_json(text)
-    return data.get("examples", []), [meta]
+
+    target_areas = feature_areas or [a.get("feature_area", "") for a in charter.get("alignment", [])]
+    target_areas = [a for a in target_areas if a]
+    target_coverage = coverage_criteria or (charter.get("coverage") or {}).get("criteria") or []
+    target_coverage = [c for c in target_coverage if c]
+
+    cell_count = len(target_areas) * len(target_coverage)
+    falls_back = _has_off_target_or_safety(charter) or cell_count <= 1
+
+    if falls_back:
+        prompt = build_synthesize_examples_prompt(charter, feature_areas, coverage_criteria, count)
+        text, meta = _call_llm(prompt, max_tokens=8192)
+        data = _extract_json(text)
+        return data.get("examples", []), [meta]
+
+    # Per-cell fan-out. Build the cacheable prefix once and reuse — Anthropic
+    # caches it on the first call, and every subsequent call reads from the
+    # cache for ~10x cheaper input tokens.
+    prefix = build_synthesize_examples_cell_prefix(charter)
+    semaphore = asyncio.Semaphore(_SYNTH_CELL_CONCURRENCY)
+    tasks = [
+        _synth_one_cell(prefix, fa, crit, count, semaphore)
+        for fa in target_areas
+        for crit in target_coverage
+    ]
+    logger.info(
+        f"call_synthesize_examples: fanning out {len(tasks)} cell(s) "
+        f"({len(target_coverage)} criteria × {len(target_areas)} areas, "
+        f"concurrency={_SYNTH_CELL_CONCURRENCY})"
+    )
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    examples: list[dict] = []
+    metas: list[dict] = []
+    failures = 0
+    for r in results:
+        if isinstance(r, BaseException):
+            failures += 1
+            logger.warning(f"call_synthesize_examples: cell failed: {type(r).__name__}: {r}")
+            # Re-raise billing errors so the API surfaces them — non-billing
+            # failures are tolerated so a partial grid still saves.
+            if isinstance(r, LLMBillingError):
+                raise r
+            continue
+        cell_examples, cell_meta = r
+        examples.extend(cell_examples)
+        metas.append(cell_meta)
+    if failures:
+        logger.warning(
+            f"call_synthesize_examples: {failures}/{len(tasks)} cell(s) failed; "
+            f"returning {len(examples)} example(s)"
+        )
+    return examples, metas
 
 
 async def call_review_examples(charter: dict, examples: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -392,11 +581,19 @@ async def call_dataset_chat(
 
 
 async def call_gap_analysis(charter: dict, dataset_stats: dict, examples: list[dict]) -> tuple[dict, list[dict]]:
-    """Analyze dataset gaps against charter. Returns (gap analysis, call metadata list)."""
+    """Analyze dataset gaps against charter. Returns (gap analysis, call metadata list).
+
+    The coverage matrix is computed in code (deterministic), not delegated to
+    the LLM. The LLM's role is the textual analysis — gaps, balance issues,
+    summary. Otherwise an LLM that paraphrases criterion strings or drops
+    rows would silently zero out cells that actually have examples.
+    """
     await _refresh_settings()
     prompt = build_gap_analysis_prompt(charter, dataset_stats, examples)
     text, meta = _call_llm(prompt, max_tokens=2048)
     data = _extract_json(text)
+    # Override whatever matrix the LLM produced with the deterministic count.
+    data["coverage_matrix"] = _build_coverage_matrix(charter, examples)
     return data, [meta]
 
 

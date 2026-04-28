@@ -1042,6 +1042,125 @@ CRITICAL RULES:
 - Each example must be independently evaluable — all context needed is in the input{triggered_rules}{safety_rules}"""
 
 
+def build_synthesize_examples_cell_prefix(charter: dict) -> str:
+    """Cacheable prefix shared across every per-cell synth call.
+
+    Contains the entire charter context, schema, and rules — everything that
+    stays byte-identical regardless of which (criterion × feature_area) cell
+    is being generated. Pair with `build_synthesize_examples_cell_suffix` for
+    a complete prompt.
+
+    Important: this is the cache key. Do not interpolate any cell-specific
+    fields (target_coverage, target_areas, count) here, or the cache hit
+    rate drops to zero.
+    """
+    task = charter.get("task", {})
+    coverage_data = charter.get("coverage", {})
+    coverage = coverage_data.get("criteria", [])
+    balance = charter.get("balance", {}).get("criteria", [])
+    alignment = charter.get("alignment", [])
+
+    # Per-cell fan-out is gated to charters without negatives/safety, so the
+    # triggered/safety sections collapse to empty here. Keep the structure
+    # parallel to build_synthesize_examples_prompt so future per-cell support
+    # for those modes is a small diff.
+    alignment_context = ""
+    for a in alignment:
+        alignment_context += f"\n### {a.get('feature_area', '')}\nGood: {a.get('good', '')}\nBad: {a.get('bad', '')}\n"
+
+    task_section = ""
+    if task.get("input_description") or task.get("output_description"):
+        task_section = f"""## Task Definition (what the app does)
+
+**Input format**: {task.get('input_description') or 'Not specified'}
+**Output format**: {task.get('output_description') or 'Not specified'}
+"""
+        if task.get("sample_input"):
+            task_section += f"""
+**Sample input** (MATCH THIS FORMAT EXACTLY):
+```
+{task.get('sample_input')}
+```
+IMPORTANT: Generated inputs must match this sample's structure, length, and level of detail.
+Do NOT add extra context, metrics, dates, or details not present in the sample.
+"""
+        if task.get("sample_output"):
+            task_section += f"""
+**Sample output** (MATCH THIS FORMAT EXACTLY):
+```
+{task.get('sample_output')}
+```
+IMPORTANT: Generated outputs must match this sample's structure and format.
+"""
+
+    return f"""Generate labeled examples for a dataset based on this charter.
+
+{task_section}
+## Charter context
+
+### Coverage criteria (full list — the cell-specific scope is appended below):
+{json.dumps(coverage, indent=2)}
+
+### Balance criteria (weighting guidance):
+{json.dumps(balance, indent=2)}
+
+### Alignment definitions (what good/bad looks like, full list):
+{alignment_context}
+
+## Output schema
+
+Return ONLY valid JSON:
+{{
+  "examples": [
+    {{
+      "feature_area": "...",
+      "input": "...",
+      "expected_output": "...",
+      "coverage_tags": ["..."],
+      "label": "good",
+      "label_reason": "..."
+    }}
+  ]
+}}
+
+## Rules
+
+- Inputs must match the INPUT FORMAT specified in the task definition
+- Expected outputs must match the OUTPUT FORMAT specified in the task definition
+- Inputs must be SPECIFIC scenarios with concrete details (names, numbers, dates, situations)
+- Expected outputs must be realistic — what the AI would actually produce, not a summary of what it should do
+- Good outputs must match the alignment "good" definition exactly
+- Bad outputs must match the alignment "bad" definition exactly — they should be realistically bad, not cartoonishly wrong
+- Coverage tags must reference actual coverage criteria from the charter
+- Each example must be independently evaluable — all context needed is in the input"""
+
+
+def build_synthesize_examples_cell_suffix(coverage_criterion: str, feature_area: str, count: int) -> str:
+    """Per-cell scope text appended to the cached prefix. Tiny by design —
+    only the scope and count vary per call.
+
+    The exact-string instructions matter: the gap analysis builds the
+    coverage matrix by exact-matching `feature_area` and `coverage_tags`
+    against the charter, so any paraphrase by the LLM lands in a 0-count
+    cell.
+    """
+    return f"""
+
+## Generate
+
+Generate exactly {count} example{'s' if count != 1 else ''} for this single intersection of the grid:
+
+- **coverage criterion**: {coverage_criterion!r}
+- **feature_area**: {feature_area!r}
+
+Required output rules — these strings must appear verbatim, not paraphrased:
+- Every example must set `"feature_area": {feature_area!r}` (exact string, copy-paste).
+- Every example's `coverage_tags` array must include {coverage_criterion!r} as the first entry (exact string).
+
+Half should be label="good" and half label="bad" — for odd counts, prefer one extra "good".
+Do NOT generate examples for other criteria or feature areas; the rest of the grid is handled by separate calls."""
+
+
 def build_review_examples_prompt(charter: dict, examples: list[dict]) -> str:
     task = charter.get("task", {})
     alignment = charter.get("alignment", [])
@@ -1242,26 +1361,76 @@ Suggest actions when:
 - Proactively suggest helpful next actions based on the dataset state"""
 
 
+def _build_coverage_matrix(charter: dict, examples: list[dict]) -> dict[str, dict[str, int]]:
+    """Count examples per (criterion × feature_area) cell.
+
+    Behavior:
+    - Counts any example whose review_status is not "rejected" (pending and
+      approved both count, so the map reflects what was generated, not just
+      what was reviewed).
+    - Fuzzy-matches feature_area and coverage_tags against the charter using
+      bidirectional prefix matching on alphanumeric-lowercase normalization.
+      LLMs paraphrase, truncate, or re-punctuate criterion strings even when
+      told not to — exact-key lookup silently zeros cells that did get
+      filled. Two strings match if their normalized forms share a common
+      prefix of at least 12 characters (or one is a complete prefix of the
+      other when both are shorter than that).
+    """
+    coverage = charter.get("coverage", {}).get("criteria", [])
+    alignment = charter.get("alignment", [])
+    feature_areas = [a.get("feature_area", "") for a in alignment]
+
+    matrix: dict[str, dict[str, int]] = {c: {fa: 0 for fa in feature_areas} for c in coverage}
+
+    def _normalize(s: str) -> str:
+        return "".join(c for c in (s or "").lower() if c.isalnum())
+
+    def _resolve(value: str, candidates: list[str]) -> str | None:
+        v = _normalize(value)
+        if not v:
+            return None
+        # Pick the candidate with the longest matching prefix. Falls back to
+        # None if nothing matches at least 12 chars (or both strings entirely
+        # below 12).
+        best: tuple[int, str] | None = None
+        for cand in candidates:
+            c = _normalize(cand)
+            if not c:
+                continue
+            common = 0
+            for x, y in zip(v, c):
+                if x != y:
+                    break
+                common += 1
+            if common == 0:
+                continue
+            min_required = min(12, len(v), len(c))
+            if common < min_required:
+                continue
+            if best is None or common > best[0]:
+                best = (common, cand)
+        return best[1] if best else None
+
+    for ex in examples:
+        if ex.get("review_status") == "rejected":
+            continue
+        ex_fa = _resolve(ex.get("feature_area", ""), feature_areas)
+        if ex_fa is None:
+            continue
+        for tag in ex.get("coverage_tags", []):
+            crit = _resolve(tag, coverage)
+            if crit is not None:
+                matrix[crit][ex_fa] += 1
+    return matrix
+
+
 def build_gap_analysis_prompt(charter: dict, dataset_stats: dict, examples: list[dict]) -> str:
     coverage = charter.get("coverage", {}).get("criteria", [])
     balance = charter.get("balance", {}).get("criteria", [])
     alignment = charter.get("alignment", [])
-
     feature_areas = [a.get("feature_area", "") for a in alignment]
 
-    # Build coverage matrix
-    coverage_matrix: dict[str, dict[str, int]] = {}
-    for crit in coverage:
-        coverage_matrix[crit] = {fa: 0 for fa in feature_areas}
-
-    for ex in examples:
-        if ex.get("review_status") != "approved":
-            continue
-        for tag in ex.get("coverage_tags", []):
-            if tag in coverage_matrix:
-                fa = ex.get("feature_area", "")
-                if fa in coverage_matrix[tag]:
-                    coverage_matrix[tag][fa] += 1
+    coverage_matrix = _build_coverage_matrix(charter, examples)
 
     return f"""Analyze this dataset for gaps against the charter.
 

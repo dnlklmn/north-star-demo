@@ -1,9 +1,24 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-import { ArrowRight } from 'lucide-react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { ChevronDown, Check, X, RefreshCw, Pencil, Trash2 } from 'lucide-react'
 import type { Example, Charter } from '../types'
-import Badge, { SOURCE_COLORS, LABEL_COLORS, REVIEW_COLORS } from './examples/Badge'
 import DeleteModal from './examples/DeleteModal'
 import GenerateModal from './examples/GenerateModal'
+
+type CellId = 'scenario' | 'input' | 'output' | 'labels' | 'status'
+type ActionId = 'approve' | 'reject' | 'relabel' | 'edit' | 'delete'
+
+const CELL_ORDER: CellId[] = ['scenario', 'input', 'output', 'labels', 'status']
+
+// What action set is contextually relevant when each cell is focused.
+// Status owns approve/reject, labels owns relabel, input/output own edit,
+// scenario owns delete (the row-level destructive action).
+const ACTIONS_BY_CELL: Record<CellId, ActionId[]> = {
+  scenario: ['delete'],
+  input: ['edit'],
+  output: ['edit'],
+  labels: ['relabel'],
+  status: ['approve', 'reject'],
+}
 
 interface ExampleReviewProps {
   examples: Example[]
@@ -19,6 +34,9 @@ interface ExampleReviewProps {
   onHeaderClick?: () => void
   isFocused?: boolean
   coverageGaps?: { uncoveredCount: number; totalScenarios: number } | null
+  /** 0–1 dataset coverage score, used for the dot on the "Coverage map"
+   *  button. Null when no matrix has been computed yet. */
+  coverageScore?: number | null
   onSuggestRevision?: (exampleId: string) => void
   onSuggestRevisions?: () => void
   onAcceptRevision?: (exampleId: string) => void
@@ -36,10 +54,11 @@ export default function ExampleReview({
   onAutoReview,
   onExport,
   onShowCoverageMap,
-  onNavigateToScorers,
-  onHeaderClick,
+  onNavigateToScorers: _onNavigateToScorers,
+  onHeaderClick: _onHeaderClick,
   isFocused,
   coverageGaps,
+  coverageScore,
   onSuggestRevision,
   onSuggestRevisions,
   onAcceptRevision,
@@ -59,14 +78,24 @@ export default function ExampleReview({
     }
   }, [examples, filterStatus])
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [editingId, setEditingId] = useState<string | null>(null)
+  const [focusedCell, setFocusedCell] = useState<CellId>('status')
+  // Edit state carries both row id and which cell is being edited so only
+  // that one cell becomes a textarea. The other cells stay read-only.
+  const [editing, setEditing] = useState<{ id: string; cell: 'input' | 'output' } | null>(null)
+  const editingId = editing?.id ?? null
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
   const [showGenerateModal, setShowGenerateModal] = useState(false)
-  const containerRef = useRef<HTMLDivElement>(null)
+
+  // Edit defaults to whichever of input/output is focused. If the focused
+  // cell isn't one of those, fall back to input — the action button is in
+  // 'outline' state for non-edit cells, but still works.
+  const beginEdit = (exampleId: string) => {
+    const cell = focusedCell === 'output' ? 'output' : 'input'
+    setEditing({ id: exampleId, cell })
+  }
 
   const featureAreas = charter.alignment.map(a => a.feature_area)
 
-  // Calculate suggested example count and reason
   const getSuggestedGeneration = () => {
     const coverageCriteria = charter.coverage?.criteria?.length || 0
     const alignmentAreas = charter.alignment?.length || 0
@@ -76,14 +105,14 @@ export default function ExampleReview({
       const countPerGap = 2
       return {
         count: countPerGap,
-        reason: `Based on coverage analysis: ${coverageGaps.uncoveredCount} of ${coverageGaps.totalScenarios} scenarios lack examples. Generating ${countPerGap} examples per scenario will help fill these gaps.`
+        reason: `Based on coverage analysis: ${coverageGaps.uncoveredCount} of ${coverageGaps.totalScenarios} scenarios lack examples. Generating ${countPerGap} examples per scenario will help fill these gaps.`,
       }
     }
 
     if (examples.length === 0) {
       return {
         count: 2,
-        reason: `Starting fresh: generating 2 examples per scenario (${totalScenarios} scenarios = ~${totalScenarios * 2} examples) provides good initial coverage for your ${alignmentAreas} feature areas × ${coverageCriteria} coverage criteria.`
+        reason: `Starting fresh: generating 2 examples per scenario (${totalScenarios} scenarios = ~${totalScenarios * 2} examples) provides good initial coverage for your ${alignmentAreas} feature areas × ${coverageCriteria} coverage criteria.`,
       }
     }
 
@@ -91,81 +120,159 @@ export default function ExampleReview({
     if (approvedCount < totalScenarios) {
       return {
         count: 2,
-        reason: `You have ${approvedCount} approved examples but ${totalScenarios} scenario combinations. Generating more will improve coverage across all feature areas and criteria.`
+        reason: `You have ${approvedCount} approved examples but ${totalScenarios} scenario combinations. Generating more will improve coverage across all feature areas and criteria.`,
       }
     }
 
     return {
       count: 1,
-      reason: `You have good coverage (${approvedCount} approved). Generate additional examples to increase diversity or cover edge cases.`
+      reason: `You have good coverage (${approvedCount} approved). Generate additional examples to increase diversity or cover edge cases.`,
     }
   }
 
   const { count: suggestedCount, reason: suggestionReason } = getSuggestedGeneration()
-  const totalScenarios = Math.max((charter.coverage?.criteria?.length || 0) * (charter.alignment?.length || 0), 1)
+  const totalScenarios = Math.max(
+    (charter.coverage?.criteria?.length || 0) * (charter.alignment?.length || 0),
+    1,
+  )
 
-  const filtered = examples.filter(ex => {
-    if (filterArea && ex.feature_area !== filterArea) return false
-    if (filterLabel && ex.label !== filterLabel) return false
-    if (filterStatus && ex.review_status !== filterStatus) return false
-    return true
-  })
+  const filtered = useMemo(
+    () =>
+      examples.filter(ex => {
+        if (filterArea && ex.feature_area !== filterArea) return false
+        if (filterLabel && ex.label !== filterLabel) return false
+        if (filterStatus && ex.review_status !== filterStatus) return false
+        return true
+      }),
+    [examples, filterArea, filterLabel, filterStatus],
+  )
+
+  // Group by feature_area, preserving original insertion order.
+  const groups = useMemo(() => {
+    const map = new Map<string, Example[]>()
+    for (const ex of filtered) {
+      const key = ex.feature_area || 'uncategorized'
+      const list = map.get(key)
+      if (list) list.push(ex)
+      else map.set(key, [ex])
+    }
+    return Array.from(map.entries())
+  }, [filtered])
+
+  // Flat list in the order rows actually render. Arrow-key nav must walk
+  // this list so ↓ always moves to the next visible row, even across groups.
+  const orderedExamples = useMemo(
+    () => groups.flatMap(([, items]) => items),
+    [groups],
+  )
 
   // Auto-select first example if none selected
   useEffect(() => {
-    if (filtered.length > 0 && (!selectedId || !filtered.find(e => e.id === selectedId))) {
-      setSelectedId(filtered[0].id)
+    if (
+      orderedExamples.length > 0 &&
+      (!selectedId || !orderedExamples.find(e => e.id === selectedId))
+    ) {
+      setSelectedId(orderedExamples[0].id)
     }
-  }, [filtered, selectedId])
+  }, [orderedExamples, selectedId])
 
-  const selectedIndex = filtered.findIndex(e => e.id === selectedId)
-  const selectedExample = filtered.find(e => e.id === selectedId)
+  const selectedIndex = orderedExamples.findIndex(e => e.id === selectedId)
+  const selectedExample = orderedExamples.find(e => e.id === selectedId)
 
   const examplesWithIssues = examples.filter(
-    ex => ex.judge_verdict?.issues && ex.judge_verdict.issues.length > 0 && !ex.revision_suggestion
+    ex => ex.judge_verdict?.issues && ex.judge_verdict.issues.length > 0 && !ex.revision_suggestion,
   ).length
 
-  // Keyboard navigation and shortcuts
-  const handleKeyDown = useCallback((e: KeyboardEvent) => {
-    if (editingId || deleteConfirmId) {
-      if (e.key === 'Escape') setEditingId(null)
-      return
-    }
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return
+  const handleKeyDown = useCallback(
+    (e: KeyboardEvent) => {
+      if (editingId || deleteConfirmId) {
+        if (e.key === 'Escape') setEditing(null)
+        return
+      }
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement ||
+        e.target instanceof HTMLSelectElement
+      )
+        return
 
-    switch (e.key) {
-      case 'ArrowUp':
-      case 'k':
-        e.preventDefault()
-        if (selectedIndex > 0) setSelectedId(filtered[selectedIndex - 1].id)
-        break
-      case 'ArrowDown':
-      case 'j':
-        e.preventDefault()
-        if (selectedIndex < filtered.length - 1) setSelectedId(filtered[selectedIndex + 1].id)
-        break
-      case 'a': case 'A':
-        if (selectedExample) { e.preventDefault(); onUpdateExample(selectedExample.id, { review_status: 'approved' }) }
-        break
-      case 'e': case 'E':
-        if (selectedExample) { e.preventDefault(); setEditingId(selectedExample.id) }
-        break
-      case 'r': case 'R':
-        if (selectedExample) { e.preventDefault(); onUpdateExample(selectedExample.id, { review_status: 'rejected' }) }
-        break
-      case 'l': case 'L':
-        if (selectedExample) { e.preventDefault(); onUpdateExample(selectedExample.id, { label: selectedExample.label === 'good' ? 'bad' : 'good' }) }
-        break
-      case 'd': case 'D':
-        if (selectedExample) { e.preventDefault(); setDeleteConfirmId(selectedExample.id) }
-        break
-      case 's': case 'S':
-        if (selectedExample && onSuggestRevision && selectedExample.judge_verdict?.issues?.length && !selectedExample.revision_suggestion) {
-          e.preventDefault(); onSuggestRevision(selectedExample.id)
+      switch (e.key) {
+        case 'ArrowUp':
+        case 'k':
+          e.preventDefault()
+          if (selectedIndex > 0) setSelectedId(orderedExamples[selectedIndex - 1].id)
+          break
+        case 'ArrowDown':
+        case 'j':
+          e.preventDefault()
+          if (selectedIndex < orderedExamples.length - 1)
+            setSelectedId(orderedExamples[selectedIndex + 1].id)
+          break
+        case 'ArrowLeft': {
+          e.preventDefault()
+          const ci = CELL_ORDER.indexOf(focusedCell)
+          if (ci > 0) setFocusedCell(CELL_ORDER[ci - 1])
+          break
         }
-        break
-    }
-  }, [editingId, deleteConfirmId, selectedIndex, filtered, selectedExample, onUpdateExample, onSuggestRevision])
+        case 'ArrowRight': {
+          e.preventDefault()
+          const ci = CELL_ORDER.indexOf(focusedCell)
+          if (ci < CELL_ORDER.length - 1) setFocusedCell(CELL_ORDER[ci + 1])
+          break
+        }
+        case 'a':
+        case 'A':
+          if (selectedExample) {
+            e.preventDefault()
+            onUpdateExample(selectedExample.id, { review_status: 'approved' })
+          }
+          break
+        case 'e':
+        case 'E':
+          if (selectedExample) {
+            e.preventDefault()
+            beginEdit(selectedExample.id)
+          }
+          break
+        case 'r':
+        case 'R':
+          if (selectedExample) {
+            e.preventDefault()
+            onUpdateExample(selectedExample.id, { review_status: 'rejected' })
+          }
+          break
+        case 'l':
+        case 'L':
+          if (selectedExample) {
+            e.preventDefault()
+            onUpdateExample(selectedExample.id, {
+              label: selectedExample.label === 'good' ? 'bad' : 'good',
+            })
+          }
+          break
+        case 'd':
+        case 'D':
+          if (selectedExample) {
+            e.preventDefault()
+            setDeleteConfirmId(selectedExample.id)
+          }
+          break
+        case 's':
+        case 'S':
+          if (
+            selectedExample &&
+            onSuggestRevision &&
+            selectedExample.judge_verdict?.issues?.length &&
+            !selectedExample.revision_suggestion
+          ) {
+            e.preventDefault()
+            onSuggestRevision(selectedExample.id)
+          }
+          break
+      }
+    },
+    [editingId, deleteConfirmId, selectedIndex, orderedExamples, selectedExample, focusedCell, onUpdateExample, onSuggestRevision],
+  )
 
   useEffect(() => {
     if (isFocused) {
@@ -178,8 +285,9 @@ export default function ExampleReview({
     if (deleteConfirmId) {
       onDeleteExample(deleteConfirmId)
       setDeleteConfirmId(null)
-      if (selectedIndex < filtered.length - 1) setSelectedId(filtered[selectedIndex + 1].id)
-      else if (selectedIndex > 0) setSelectedId(filtered[selectedIndex - 1].id)
+      if (selectedIndex < orderedExamples.length - 1)
+        setSelectedId(orderedExamples[selectedIndex + 1].id)
+      else if (selectedIndex > 0) setSelectedId(orderedExamples[selectedIndex - 1].id)
       else setSelectedId(null)
     }
   }
@@ -191,156 +299,228 @@ export default function ExampleReview({
     rejected: examples.filter(e => e.review_status === 'rejected').length,
   }
 
+  const actOnSelected = (fn: (ex: Example) => void) => {
+    if (selectedExample) fn(selectedExample)
+  }
+
   return (
-    <div className="h-full flex flex-col" ref={containerRef}>
-      {/* Header */}
-      <div
-        onClick={onHeaderClick}
-        className={`h-12 flex items-center justify-between px-4 border-b border-border flex-shrink-0 ${
-          isFocused ? '' : 'hover:bg-muted/50 cursor-pointer'
-        }`}
-      >
-        <div className="flex items-center gap-3">
-          <h2 className="text-sm font-semibold">Golden Dataset</h2>
-          <span className="text-xs text-muted-foreground">
+    <div className="h-full flex flex-col overflow-hidden">
+      {/* Page body — title + filters + grouped table */}
+      <div className="flex-1 min-h-0 flex flex-col gap-6 p-6 overflow-hidden">
+        {/* Title */}
+        <h1 className="text-xl font-semibold text-fg-contrast leading-none">Dataset</h1>
+
+        {/* Stats + dataset-level utilities (Coverage map / Export / Auto-review /
+            Suggest revisions / Generate). Sits directly under the title — these
+            are about the dataset as a whole. Filters and per-row actions live
+            in a second toolbar below. */}
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="text-xs text-fg-dim">
             {stats.total} total · {stats.pending} pending · {stats.approved} approved
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          {onNavigateToScorers && (
+          </div>
+          <div className="flex items-center gap-2">
             <button
-              onClick={(e) => { e.stopPropagation(); onNavigateToScorers(); }}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-accent text-accent-foreground hover:opacity-90 transition-all"
+              onClick={onShowCoverageMap}
+              className="flex items-center gap-1.5 px-2 py-1 text-xs text-fg-dim hover:text-fg-contrast border border-border-hint transition-colors"
             >
-              Set up scorers
-              <ArrowRight className="w-3.5 h-3.5" />
+              {coverageScore != null && <CoverageDot score={coverageScore} />}
+              Coverage map
             </button>
-          )}
-        </div>
-      </div>
-
-      {/* Subheader: filters + actions */}
-      <div className="px-4 py-2 border-b border-border flex items-center gap-2 flex-shrink-0 flex-wrap">
-        <select value={filterArea} onChange={e => setFilterArea(e.target.value)} className="text-xs px-2 py-1 bg-background border border-border">
-          <option value="">All areas</option>
-          {featureAreas.map(a => <option key={a} value={a}>{a}</option>)}
-        </select>
-        <select value={filterLabel} onChange={e => setFilterLabel(e.target.value)} className="text-xs px-2 py-1 bg-background border border-border">
-          <option value="">All labels</option>
-          <option value="good">Good</option>
-          <option value="bad">Bad</option>
-          <option value="unlabeled">Unlabeled</option>
-        </select>
-        <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="text-xs px-2 py-1 bg-background border border-border">
-          <option value="">All statuses</option>
-          <option value="pending">Pending</option>
-          <option value="approved">Approved</option>
-          <option value="rejected">Rejected</option>
-          <option value="needs_edit">Needs edit</option>
-        </select>
-
-        <div className="ml-auto flex gap-1.5 items-center">
-          <button onClick={(e) => { e.stopPropagation(); onShowCoverageMap(); }} className="px-2 py-1 text-xs text-muted-foreground hover:text-foreground border border-border transition-colors">
-            Coverage map
-          </button>
-          <button onClick={(e) => { e.stopPropagation(); onExport(); }} disabled={stats.approved === 0} className="px-2 py-1 text-xs text-muted-foreground hover:text-foreground border border-border transition-colors disabled:opacity-40">
-            Export
-          </button>
-          <span className="w-px h-4 bg-border mx-0.5" />
-          <button onClick={() => setShowGenerateModal(true)} disabled={loading} className="px-2.5 py-1 text-xs bg-accent text-accent-foreground hover:opacity-90 transition-opacity disabled:opacity-50">
-            {loading ? 'Generating...' : 'Generate'}
-          </button>
-          <button onClick={onAutoReview} disabled={loading || stats.pending === 0} className="px-2.5 py-1 text-xs bg-surface-raised border border-border hover:bg-muted transition-colors disabled:opacity-50">
-            Auto-review
-          </button>
-          {onSuggestRevisions && (
             <button
-              onClick={onSuggestRevisions}
-              disabled={loading || revisionsLoading || examplesWithIssues === 0}
-              className="px-2.5 py-1 text-xs bg-surface-raised border border-border hover:bg-muted transition-colors disabled:opacity-50"
+              onClick={onExport}
+              disabled={stats.approved === 0}
+              className="px-2 py-1 text-xs text-fg-dim hover:text-fg-contrast border border-border-hint transition-colors disabled:opacity-40"
             >
-              {revisionsLoading ? 'Suggesting...' : `Suggest revisions${examplesWithIssues > 0 ? ` (${examplesWithIssues})` : ''}`}
+              Export
             </button>
-          )}
+            <button
+              onClick={onAutoReview}
+              disabled={loading || stats.pending === 0}
+              className="px-2 py-1 text-xs border border-border-hint hover:bg-fill-neutral transition-colors disabled:opacity-50"
+            >
+              Auto-review
+            </button>
+            {onSuggestRevisions && (
+              <button
+                onClick={onSuggestRevisions}
+                disabled={loading || revisionsLoading || examplesWithIssues === 0}
+                className="px-2 py-1 text-xs border border-border-hint hover:bg-fill-neutral transition-colors disabled:opacity-50"
+                title="Suggest fixes for examples auto-review flagged with issues. Doesn't change the good/bad label — just refines the input or expected_output to better match the scenario."
+              >
+                {revisionsLoading
+                  ? 'Suggesting...'
+                  : `Fix flagged${examplesWithIssues > 0 ? ` (${examplesWithIssues})` : ''}`}
+              </button>
+            )}
+            <button
+              onClick={() => setShowGenerateModal(true)}
+              disabled={loading}
+              className="px-2.5 py-1 text-xs bg-fill-primary text-bg-default hover:bg-fill-primary-hover transition-colors disabled:opacity-50"
+            >
+              {loading ? 'Generating...' : 'Generate'}
+            </button>
+          </div>
         </div>
-      </div>
 
-      {/* Keyboard hints */}
-      {isFocused && filtered.length > 0 && (
-        <div className="px-4 py-1.5 bg-muted/50 border-b border-border text-[10px] text-muted-foreground flex-shrink-0">
-          <span className="mr-3">↑↓ Navigate</span>
-          <span className="mr-3"><span className="underline">A</span>pprove</span>
-          <span className="mr-3"><span className="underline">E</span>dit</span>
-          <span className="mr-3"><span className="underline">R</span>eject</span>
-          <span className="mr-3">Re<span className="underline">l</span>abel</span>
-          <span className="mr-3"><span className="underline">D</span>elete</span>
-          <span><span className="underline">S</span>uggest fix</span>
+        {/* Filters + per-row actions — sits closer to the table since it
+            scopes to which rows are shown and what to do with the selected
+            row's focused cell. */}
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center gap-2">
+            <FilterSelect
+              value={filterArea}
+              onChange={setFilterArea}
+              placeholder="All areas"
+              options={featureAreas.map(a => ({ value: a, label: a }))}
+            />
+            <FilterSelect
+              value={filterLabel}
+              onChange={setFilterLabel}
+              placeholder="All labels"
+              options={[
+                { value: 'good', label: 'Good' },
+                { value: 'bad', label: 'Bad' },
+                { value: 'unlabeled', label: 'Unlabeled' },
+              ]}
+            />
+            <FilterSelect
+              value={filterStatus}
+              onChange={setFilterStatus}
+              placeholder="All status"
+              options={[
+                { value: 'pending', label: 'Pending' },
+                { value: 'approved', label: 'Approved' },
+                { value: 'rejected', label: 'Rejected' },
+                { value: 'needs_edit', label: 'Needs edit' },
+              ]}
+            />
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            <ActionButton
+              icon={<Check className="w-4 h-4" />}
+              shortcut="A"
+              label="pprove"
+              variant={ACTIONS_BY_CELL[focusedCell].includes('approve') ? 'neutral' : 'outline'}
+              onClick={() => actOnSelected(ex => onUpdateExample(ex.id, { review_status: 'approved' }))}
+              disabled={!selectedExample}
+            />
+            <ActionButton
+              icon={<X className="w-4 h-4" />}
+              shortcut="R"
+              label="eject"
+              variant={ACTIONS_BY_CELL[focusedCell].includes('reject') ? 'neutral' : 'outline'}
+              onClick={() => actOnSelected(ex => onUpdateExample(ex.id, { review_status: 'rejected' }))}
+              disabled={!selectedExample}
+            />
+            <ActionButton
+              icon={<RefreshCw className="w-4 h-4" />}
+              prefix="Re"
+              shortcut="l"
+              label="abel"
+              variant={ACTIONS_BY_CELL[focusedCell].includes('relabel') ? 'neutral' : 'outline'}
+              onClick={() =>
+                actOnSelected(ex =>
+                  onUpdateExample(ex.id, { label: ex.label === 'good' ? 'bad' : 'good' }),
+                )
+              }
+              disabled={!selectedExample}
+            />
+            <ActionButton
+              icon={<Pencil className="w-4 h-4" />}
+              shortcut="E"
+              label="dit"
+              variant={ACTIONS_BY_CELL[focusedCell].includes('edit') ? 'neutral' : 'outline'}
+              onClick={() => actOnSelected(ex => beginEdit(ex.id))}
+              disabled={!selectedExample}
+            />
+            <ActionButton
+              icon={<Trash2 className="w-4 h-4" />}
+              shortcut="D"
+              label="elete"
+              variant={ACTIONS_BY_CELL[focusedCell].includes('delete') ? 'neutral' : 'outline'}
+              onClick={() => actOnSelected(ex => setDeleteConfirmId(ex.id))}
+              disabled={!selectedExample}
+            />
+          </div>
         </div>
-      )}
 
-      {/* Table-style example list */}
-      <div className="flex-1 overflow-y-auto">
-        {filtered.length === 0 && filterStatus === 'pending' && stats.total > 0 ? (
-          <div className="flex flex-col items-center justify-center h-full">
-            <div className="text-center max-w-sm">
-              <div className="w-12 h-12 bg-success/10 flex items-center justify-center mx-auto mb-4">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-success">
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-              </div>
-              <h3 className="text-base font-semibold text-foreground mb-2">All examples reviewed!</h3>
-              <p className="text-xs text-muted-foreground mb-6">
-                You've reviewed all {stats.total} examples. {stats.approved} approved, {stats.rejected} rejected.
-              </p>
-              <div className="flex flex-col gap-3">
-                <button onClick={onShowCoverageMap} className="w-full py-2.5 px-4 bg-surface-raised border border-border text-sm font-medium hover:bg-muted transition-colors">
-                  Check coverage gaps
-                </button>
-                <button onClick={() => setShowGenerateModal(true)} disabled={loading} className="w-full py-2.5 px-4 bg-surface-raised border border-border text-sm font-medium hover:bg-muted transition-colors disabled:opacity-50">
-                  Generate more examples
-                </button>
-                <button onClick={onExport} disabled={stats.approved === 0} className="w-full py-2.5 px-4 bg-accent text-accent-foreground text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50">
-                  Export dataset ({stats.approved} examples)
-                </button>
+        {/* Grouped list */}
+        <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-0">
+          {filtered.length === 0 && filterStatus === 'pending' && stats.total > 0 ? (
+            <div className="flex-1 flex flex-col items-center justify-center">
+              <div className="text-center max-w-sm">
+                <div className="w-12 h-12 bg-success/10 flex items-center justify-center mx-auto mb-4">
+                  <Check className="w-6 h-6 text-success" />
+                </div>
+                <h3 className="text-base font-semibold text-fg-contrast mb-2">All examples reviewed!</h3>
+                <p className="text-xs text-fg-dim mb-6">
+                  You've reviewed all {stats.total} examples. {stats.approved} approved, {stats.rejected} rejected.
+                </p>
+                <div className="flex flex-col gap-3">
+                  <button
+                    onClick={onShowCoverageMap}
+                    className="w-full py-2.5 px-4 bg-fill-neutral border border-border-hint text-sm font-medium hover:bg-fill-neutral-hover transition-colors"
+                  >
+                    Check coverage gaps
+                  </button>
+                  <button
+                    onClick={() => setShowGenerateModal(true)}
+                    disabled={loading}
+                    className="w-full py-2.5 px-4 bg-fill-neutral border border-border-hint text-sm font-medium hover:bg-fill-neutral-hover transition-colors disabled:opacity-50"
+                  >
+                    Generate more examples
+                  </button>
+                  <button
+                    onClick={onExport}
+                    disabled={stats.approved === 0}
+                    className="w-full py-2.5 px-4 bg-fill-primary text-bg-default text-sm font-medium hover:bg-fill-primary-hover transition-colors disabled:opacity-50"
+                  >
+                    Export dataset ({stats.approved} examples)
+                  </button>
+                </div>
               </div>
             </div>
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
-            <p className="text-sm mb-2">No examples match filters</p>
-            <p className="text-xs">Try adjusting the filters above.</p>
-          </div>
-        ) : (
-          <table className="w-full text-xs">
-            <thead className="sticky top-0 bg-surface-raised border-b border-border z-10">
-              <tr className="text-left text-muted-foreground">
-                <th className="px-3 py-2 font-medium w-36">Scenario</th>
-                <th className="px-3 py-2 font-medium w-40">Title & Labels</th>
-                <th className="px-3 py-2 font-medium">Input</th>
-                <th className="px-3 py-2 font-medium">Expected Output</th>
-                <th className="px-3 py-2 font-medium w-32 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map(example => (
-                <ExampleRow
-                  key={example.id}
-                  example={example}
-                  isSelected={selectedId === example.id}
-                  isEditing={editingId === example.id}
-                  onSelect={() => setSelectedId(example.id)}
-                  onUpdate={fields => onUpdateExample(example.id, fields)}
-                  onDelete={() => setDeleteConfirmId(example.id)}
-                  onStartEdit={() => setEditingId(example.id)}
-                  onCancelEdit={() => setEditingId(null)}
-                  onSuggestRevision={onSuggestRevision}
-                  onAcceptRevision={onAcceptRevision}
-                  onDismissRevision={onDismissRevision}
-                />
-              ))}
-            </tbody>
-          </table>
-        )}
+          ) : filtered.length === 0 ? (
+            <div className="flex-1 flex flex-col items-center justify-center text-fg-dim">
+              <p className="text-sm mb-2">No examples match filters</p>
+              <p className="text-xs">Try adjusting the filters above.</p>
+            </div>
+          ) : (
+            <>
+              {/* Sticky column header row */}
+              <ColumnHeaderRow />
+              <div className="flex flex-col gap-0">
+                {groups.map(([groupName, items], gi) => (
+                  <div key={groupName} className="flex flex-col">
+                    {gi > 0 && <div className="h-4" />}
+                    <GroupHeader name={groupName} />
+                    {items.map(ex => (
+                      <ExampleRow
+                        key={ex.id}
+                        example={ex}
+                        isSelected={selectedId === ex.id}
+                        editingCell={editing?.id === ex.id ? editing.cell : null}
+                        focusedCell={focusedCell}
+                        onSelect={() => setSelectedId(ex.id)}
+                        onCellSelect={cell => {
+                          setSelectedId(ex.id)
+                          setFocusedCell(cell)
+                        }}
+                        onUpdate={fields => onUpdateExample(ex.id, fields)}
+                        onCancelEdit={() => setEditing(null)}
+                        onAcceptRevision={onAcceptRevision}
+                        onDismissRevision={onDismissRevision}
+                        onSuggestRevision={onSuggestRevision}
+                        onStartEdit={() => beginEdit(ex.id)}
+                      />
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
       </div>
 
       {deleteConfirmId && (
@@ -348,7 +528,10 @@ export default function ExampleReview({
       )}
       {showGenerateModal && (
         <GenerateModal
-          onConfirm={(count) => { onSynthesize(count); setShowGenerateModal(false) }}
+          onConfirm={count => {
+            onSynthesize(count)
+            setShowGenerateModal(false)
+          }}
           onCancel={() => setShowGenerateModal(false)}
           suggestedCount={suggestedCount}
           suggestionReason={suggestionReason}
@@ -359,37 +542,141 @@ export default function ExampleReview({
   )
 }
 
-/* ── Table row for each example ── */
+/* ── Toolbar widgets ────────────────────────────────────────────── */
+
+function FilterSelect({
+  value,
+  onChange,
+  placeholder,
+  options,
+}: {
+  value: string
+  onChange: (v: string) => void
+  placeholder: string
+  options: { value: string; label: string }[]
+}) {
+  // Native <select> styled to look like the Figma ButtonMed:
+  // dark surface, hint border, mono label, chevron on the right.
+  return (
+    <div className="relative">
+      <select
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        className="appearance-none h-10 pl-3 pr-9 text-sm font-mono font-semibold text-fg-contrast bg-transparent border border-border-hint hover:bg-fill-neutral transition-colors cursor-pointer focus:outline-none focus:border-border-primary"
+      >
+        <option value="">{placeholder}</option>
+        {options.map(o => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+      <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-fg-contrast pointer-events-none" />
+    </div>
+  )
+}
+
+function ActionButton({
+  icon,
+  prefix,
+  shortcut,
+  label,
+  onClick,
+  disabled,
+  variant = 'neutral',
+}: {
+  icon?: React.ReactNode
+  prefix?: string
+  shortcut: string
+  label: string
+  onClick: () => void
+  disabled?: boolean
+  variant?: 'neutral' | 'outline'
+}) {
+  // 'neutral' = filled — used for actions relevant to the focused cell.
+  // 'outline' = transparent w/ border — actions still available but
+  // not the contextual default for the current cell.
+  const variantCls =
+    variant === 'neutral'
+      ? 'bg-fill-neutral text-fg-contrast hover:bg-fill-neutral-hover'
+      : 'bg-transparent text-fg-contrast border border-border-hint hover:bg-fill-neutral'
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className={`h-10 px-2 flex items-center gap-2 text-sm font-mono font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${variantCls}`}
+    >
+      {icon}
+      <span className="leading-none">
+        {prefix}
+        <span className="underline">{shortcut}</span>
+        {label}
+      </span>
+    </button>
+  )
+}
+
+/* ── Table parts ────────────────────────────────────────────────── */
+
+function ColumnHeaderRow() {
+  return (
+    <div className="flex items-end gap-4 px-4 py-2 text-sm text-fg-contrast">
+      <div className="flex-1 basis-0">Scenario</div>
+      <div className="flex-1 basis-0">Input</div>
+      <div className="flex-1 basis-0">Output</div>
+      <div className="w-[200px] flex-shrink-0">Labels</div>
+      <div className="w-[100px] flex-shrink-0">Status</div>
+    </div>
+  )
+}
+
+function GroupHeader({ name }: { name: string }) {
+  return (
+    <div className="px-4 py-2 bg-gray-200">
+      <span className="text-sm font-semibold text-white font-sans">{name}</span>
+    </div>
+  )
+}
+
+/* ── Row ────────────────────────────────────────────────────────── */
 
 function ExampleRow({
   example,
   isSelected,
-  isEditing,
+  editingCell,
+  focusedCell,
   onSelect,
+  onCellSelect,
   onUpdate,
-  onDelete,
-  onStartEdit,
   onCancelEdit,
-  onSuggestRevision,
   onAcceptRevision,
   onDismissRevision,
+  onSuggestRevision,
+  onStartEdit,
 }: {
   example: Example
   isSelected: boolean
-  isEditing: boolean
+  /** Which single cell is being edited on this row. Null means read-only. */
+  editingCell: 'input' | 'output' | null
+  focusedCell: CellId
   onSelect: () => void
+  onCellSelect: (cell: CellId) => void
   onUpdate: (fields: Partial<Example>) => void
-  onDelete: () => void
-  onStartEdit: () => void
   onCancelEdit: () => void
-  onSuggestRevision?: (exampleId: string) => void
   onAcceptRevision?: (exampleId: string) => void
   onDismissRevision?: (exampleId: string) => void
+  onSuggestRevision?: (exampleId: string) => void
+  onStartEdit: () => void
 }) {
+  // Light-grey wash on the focused cell, with a 2px transparent gap on all
+  // sides (achieved via padding + bg-clip-content). Padding stays applied
+  // to every cell so non-focused → focused doesn't shift content.
+  const cellCls = (cell: CellId) =>
+    isSelected && focusedCell === cell ? 'bg-gray-150 bg-clip-content' : ''
   const [editInput, setEditInput] = useState(example.input)
   const [editOutput, setEditOutput] = useState(example.expected_output)
   const [showRevision, setShowRevision] = useState(false)
-  const rowRef = useRef<HTMLTableRowElement>(null)
+  const rowRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     setEditInput(example.input)
@@ -403,7 +690,15 @@ function ExampleRow({
   }, [isSelected])
 
   const handleSaveEdit = () => {
-    onUpdate({ input: editInput, expected_output: editOutput, review_status: 'approved', revision_suggestion: null } as Partial<Example>)
+    // Only persist whichever single cell was being edited. The other cell
+    // never changed, so don't pretend to "approve" both.
+    const update: Partial<Example> = {
+      review_status: 'approved',
+      revision_suggestion: null,
+    } as Partial<Example>
+    if (editingCell === 'input') update.input = editInput
+    else if (editingCell === 'output') update.expected_output = editOutput
+    onUpdate(update)
     onCancelEdit()
   }
 
@@ -418,201 +713,283 @@ function ExampleRow({
   const hasIssues = example.judge_verdict?.issues && example.judge_verdict.issues.length > 0
   const hasRevision = !!example.revision_suggestion
 
-  if (isEditing) {
-    return (
-      <tr ref={rowRef} className="bg-accent/5 border-b border-border">
-        <td className="px-3 py-2 align-top text-muted-foreground">{example.feature_area}</td>
-        <td className="px-3 py-2 align-top">
-          <span className="text-foreground font-medium">{example.feature_area}</span>
-        </td>
-        <td className="px-3 py-2 align-top">
-          <textarea
-            value={editInput}
-            onChange={e => setEditInput(e.target.value)}
-            className="w-full p-2 text-xs bg-background border border-border resize-none"
-            rows={4}
-            onClick={e => e.stopPropagation()}
-          />
-        </td>
-        <td className="px-3 py-2 align-top">
-          <textarea
-            value={editOutput}
-            onChange={e => setEditOutput(e.target.value)}
-            className="w-full p-2 text-xs bg-background border border-border resize-none"
-            rows={4}
-            onClick={e => e.stopPropagation()}
-          />
-        </td>
-        <td className="px-3 py-2 align-top text-right">
-          <div className="flex flex-col gap-1 items-end">
-            <button onClick={(e) => { e.stopPropagation(); handleSaveEdit() }} className="px-2 py-1 text-xs bg-success text-white hover:opacity-90">
-              Save
-            </button>
-            <button onClick={(e) => { e.stopPropagation(); onCancelEdit() }} className="px-2 py-1 text-xs text-muted-foreground hover:text-foreground">
-              Cancel
-            </button>
-          </div>
-        </td>
-      </tr>
-    )
-  }
-
-  // Truncate text for table display
-  const truncate = (text: string, max: number) => text.length > max ? text.slice(0, max) + '…' : text
+  // Scenario column: prefer first coverage tag, fall back to feature_area
+  const scenarioText = example.coverage_tags[0] || example.feature_area
 
   return (
     <>
-      <tr
+      <div
         ref={rowRef}
         onClick={onSelect}
-        className={`border-b ${hasRevision && !showRevision ? 'border-b-amber-500/30' : 'border-border'} cursor-pointer transition-colors ${
+        className={[
+          'flex items-stretch gap-4 px-4 py-4 cursor-pointer transition-colors',
           isSelected
-            ? 'bg-accent/5 border-l-2 border-l-accent'
-            : 'hover:bg-muted/30'
-        } ${REVIEW_COLORS[example.review_status] || ''}`}
+            ? 'bg-bg-default outline outline-2 outline-border-primary -outline-offset-2'
+            : 'bg-gray-150 hover:bg-fill-neutral-hover',
+        ].join(' ')}
       >
-        {/* Scenario / coverage tags */}
-        <td className="px-3 py-2.5 align-top">
-          {example.coverage_tags.length > 0 ? (
-            <div className="flex flex-wrap gap-1">
-              {example.coverage_tags.slice(0, 2).map((tag, i) => (
-                <span key={i} className="text-[10px] px-1.5 py-0.5 bg-muted text-muted-foreground">{tag}</span>
-              ))}
-              {example.coverage_tags.length > 2 && (
-                <span className="text-[10px] text-muted-foreground">+{example.coverage_tags.length - 2}</span>
-              )}
-            </div>
-          ) : (
-            <span className="text-[10px] text-muted-foreground italic">—</span>
-          )}
-        </td>
-
-        {/* Title + labels */}
-        <td className="px-3 py-2.5 align-top">
-          <div className="flex flex-col gap-1">
-            <span className="text-xs font-medium text-foreground leading-tight">{example.feature_area}</span>
-            <div className="flex flex-wrap gap-1">
-              <Badge text={example.source} className={SOURCE_COLORS[example.source] || ''} />
-              <Badge text={example.label} className={LABEL_COLORS[example.label] || ''} />
-              {example.review_status !== 'pending' && (
-                <Badge text={example.review_status} className="bg-muted text-muted-foreground" />
-              )}
-              {hasRevision && (
-                <Badge text="revision" className="bg-amber-500/10 text-amber-400 border-amber-500/20" />
-              )}
-            </div>
+        {/* Scenario */}
+        <div
+          onClick={e => { e.stopPropagation(); onCellSelect('scenario') }}
+          className={`flex-1 basis-0 self-stretch p-px ${cellCls('scenario')}`}
+        >
+          <div className="h-full p-2 flex flex-col gap-1">
+            <div className="text-sm text-fg-contrast leading-[1.5]">{scenarioText}</div>
           </div>
-        </td>
+        </div>
 
         {/* Input */}
-        <td className="px-3 py-2.5 align-top">
-          <div className="text-xs text-foreground/80 leading-relaxed line-clamp-3">
-            {truncate(example.input, 200)}
+        <div
+          onClick={e => { e.stopPropagation(); onCellSelect('input') }}
+          className={`flex-1 basis-0 self-stretch p-px ${cellCls('input')}`}
+        >
+          <div className="h-full p-2">
+            {editingCell === 'input' ? (
+              <EditCell
+                value={editInput}
+                onChange={setEditInput}
+                onSave={handleSaveEdit}
+                onCancel={onCancelEdit}
+              />
+            ) : (
+              <div className="text-sm text-fg-contrast leading-[1.5] whitespace-pre-wrap break-words">
+                {example.input}
+              </div>
+            )}
           </div>
-        </td>
+        </div>
 
-        {/* Expected output */}
-        <td className="px-3 py-2.5 align-top">
-          <div className="text-xs text-foreground/80 leading-relaxed line-clamp-3">
-            {truncate(example.expected_output, 200)}
+        {/* Output */}
+        <div
+          onClick={e => { e.stopPropagation(); onCellSelect('output') }}
+          className={`flex-1 basis-0 self-stretch p-px ${cellCls('output')}`}
+        >
+          <div className="h-full p-2">
+            {editingCell === 'output' ? (
+              <EditCell
+                value={editOutput}
+                onChange={setEditOutput}
+                onSave={handleSaveEdit}
+                onCancel={onCancelEdit}
+              />
+            ) : (
+              <div className="text-sm text-fg-contrast leading-[1.5] whitespace-pre-wrap break-words">
+                {example.expected_output || <span className="text-fg-dim italic">—</span>}
+              </div>
+            )}
           </div>
-        </td>
+        </div>
 
-        {/* Actions */}
-        <td className="px-3 py-2.5 align-top text-right">
-          {isSelected && (
-            <div className="flex gap-1 justify-end flex-wrap">
-              <button onClick={(e) => { e.stopPropagation(); onUpdate({ review_status: 'approved' }) }} className="px-1.5 py-0.5 text-[10px] text-success hover:bg-success/10 transition-colors">
-                Approve
+        {/* Labels */}
+        <div
+          onClick={e => { e.stopPropagation(); onCellSelect('labels') }}
+          className={`w-[200px] flex-shrink-0 self-stretch p-px ${cellCls('labels')}`}
+        >
+          <div className="h-full p-2 flex flex-col gap-2">
+            <div className="flex items-start gap-1 flex-wrap">
+              <Chip>{example.label === 'good' ? 'Good' : example.label === 'bad' ? 'Bad' : 'Unlabeled'}</Chip>
+              <Chip>{example.source.charAt(0).toUpperCase() + example.source.slice(1)}</Chip>
+            </div>
+          </div>
+        </div>
+
+        {/* Status */}
+        <div
+          onClick={e => { e.stopPropagation(); onCellSelect('status') }}
+          className={`w-[100px] flex-shrink-0 self-stretch p-px ${cellCls('status')}`}
+        >
+          <div className="h-full p-2 flex flex-col gap-2">
+            <div className="flex items-center gap-1.5">
+              <StatusDot status={example.review_status} />
+              <span className="text-sm text-fg-contrast capitalize">
+                {example.review_status === 'needs_edit' ? 'Needs edit' : example.review_status}
+              </span>
+            </div>
+            {hasRevision && (
+              <button
+                onClick={e => {
+                  e.stopPropagation()
+                  setShowRevision(!showRevision)
+                }}
+                className="text-[10px] text-purple-700 hover:text-purple-800 self-start"
+              >
+                {showRevision ? 'Hide revision' : 'View revision'}
               </button>
-              <button onClick={(e) => { e.stopPropagation(); onStartEdit() }} className="px-1.5 py-0.5 text-[10px] text-accent hover:bg-accent/10 transition-colors">
+            )}
+            {hasIssues && !hasRevision && onSuggestRevision && (
+              <button
+                onClick={e => {
+                  e.stopPropagation()
+                  onSuggestRevision(example.id)
+                }}
+                className="text-[10px] text-warning hover:opacity-80 self-start"
+              >
+                Suggest fix
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Revision suggestion drawer */}
+      {isSelected && showRevision && hasRevision && example.revision_suggestion && (
+        <div className="px-4 py-3 bg-fill-neutral border-l-2 border-l-border-primary">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[10px] font-medium text-purple-700 uppercase tracking-wider">
+              Suggested revision
+            </span>
+            <div className="flex gap-1.5">
+              {onAcceptRevision && (
+                <button
+                  onClick={e => {
+                    e.stopPropagation()
+                    onAcceptRevision(example.id)
+                  }}
+                  className="px-2 py-0.5 text-[10px] text-success hover:bg-success/10 border border-success/20 transition-colors"
+                >
+                  Accept
+                </button>
+              )}
+              <button
+                onClick={e => {
+                  e.stopPropagation()
+                  handleEditWithRevision()
+                }}
+                className="px-2 py-0.5 text-[10px] text-fg-primary hover:bg-fill-primary/10 border border-fill-primary/20 transition-colors"
+              >
                 Edit
               </button>
-              <button onClick={(e) => { e.stopPropagation(); onUpdate({ review_status: 'rejected' }) }} className="px-1.5 py-0.5 text-[10px] text-danger hover:bg-danger/10 transition-colors">
-                Reject
-              </button>
-              <button onClick={(e) => { e.stopPropagation(); onDelete() }} className="px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-danger transition-colors">
-                Delete
-              </button>
-              {hasIssues && !hasRevision && onSuggestRevision && (
-                <button onClick={(e) => { e.stopPropagation(); onSuggestRevision(example.id) }} className="px-1.5 py-0.5 text-[10px] text-amber-400 hover:bg-amber-500/10 transition-colors">
-                  Suggest fix
-                </button>
-              )}
-              {hasRevision && (
-                <button onClick={(e) => { e.stopPropagation(); setShowRevision(!showRevision) }} className="px-1.5 py-0.5 text-[10px] text-amber-400 hover:bg-amber-500/10 transition-colors">
-                  {showRevision ? 'Hide revision' : 'View revision'}
+              {onDismissRevision && (
+                <button
+                  onClick={e => {
+                    e.stopPropagation()
+                    onDismissRevision(example.id)
+                    setShowRevision(false)
+                  }}
+                  className="px-2 py-0.5 text-[10px] text-fg-dim hover:text-fg-contrast border border-border-hint transition-colors"
+                >
+                  Dismiss
                 </button>
               )}
             </div>
-          )}
-        </td>
-      </tr>
-      {/* Revision suggestion panel */}
-      {isSelected && showRevision && hasRevision && example.revision_suggestion && (
-        <tr className="border-b border-border bg-amber-500/5">
-          <td colSpan={5} className="px-3 py-3">
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-medium text-amber-400 uppercase tracking-wider">Suggested revision</span>
-                <div className="flex gap-1.5">
-                  {onAcceptRevision && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); onAcceptRevision(example.id) }}
-                      className="px-2 py-0.5 text-[10px] text-success hover:bg-success/10 border border-success/20 transition-colors"
-                    >
-                      Accept
-                    </button>
-                  )}
-                  <button
-                    onClick={(e) => { e.stopPropagation(); handleEditWithRevision() }}
-                    className="px-2 py-0.5 text-[10px] text-accent hover:bg-accent/10 border border-accent/20 transition-colors"
-                  >
-                    Edit
-                  </button>
-                  {onDismissRevision && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); onDismissRevision(example.id); setShowRevision(false) }}
-                      className="px-2 py-0.5 text-[10px] text-muted-foreground hover:text-foreground border border-border transition-colors"
-                    >
-                      Dismiss
-                    </button>
-                  )}
-                </div>
-              </div>
-              <p className="text-xs text-muted-foreground italic">{example.revision_suggestion.reasoning}</p>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <div className="text-[10px] text-muted-foreground mb-1 font-medium">Input</div>
-                  <div className="text-xs bg-background p-2 border border-border">
-                    {example.revision_suggestion.input !== example.input ? (
-                      <>
-                        <div className="text-danger/60 line-through mb-1">{truncate(example.input, 300)}</div>
-                        <div className="text-success">{truncate(example.revision_suggestion.input, 300)}</div>
-                      </>
-                    ) : (
-                      <span className="text-muted-foreground">No changes</span>
-                    )}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[10px] text-muted-foreground mb-1 font-medium">Expected Output</div>
-                  <div className="text-xs bg-background p-2 border border-border">
-                    {example.revision_suggestion.expected_output !== example.expected_output ? (
-                      <>
-                        <div className="text-danger/60 line-through mb-1">{truncate(example.expected_output, 300)}</div>
-                        <div className="text-success">{truncate(example.revision_suggestion.expected_output, 300)}</div>
-                      </>
-                    ) : (
-                      <span className="text-muted-foreground">No changes</span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </td>
-        </tr>
+          </div>
+          <p className="text-xs text-fg-dim italic mb-2">{example.revision_suggestion.reasoning}</p>
+          <div className="grid grid-cols-2 gap-3">
+            <RevisionDiff label="Input" before={example.input} after={example.revision_suggestion.input} />
+            <RevisionDiff
+              label="Expected Output"
+              before={example.expected_output}
+              after={example.revision_suggestion.expected_output}
+            />
+          </div>
+        </div>
       )}
     </>
+  )
+}
+
+function Chip({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="px-2 py-1 bg-gray-150 text-sm text-fg-contrast">
+      {children}
+    </span>
+  )
+}
+
+function EditCell({
+  value,
+  onChange,
+  onSave,
+  onCancel,
+}: {
+  value: string
+  onChange: (v: string) => void
+  onSave: () => void
+  onCancel: () => void
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null)
+  // Mount-time focus + cursor at end of text. Selecting via setSelectionRange
+  // after focus works across browsers; just calling .focus() leaves the cursor
+  // at position 0 in some implementations.
+  useEffect(() => {
+    const ta = ref.current
+    if (!ta) return
+    ta.focus()
+    const len = ta.value.length
+    ta.setSelectionRange(len, len)
+  }, [])
+  return (
+    <div className="flex flex-col gap-1" onClick={e => e.stopPropagation()}>
+      <textarea
+        ref={ref}
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        onKeyDown={e => {
+          // Enter saves, Shift+Enter inserts a newline. Esc cancels. Mirrors
+          // the inline-edit pattern in the rest of the app.
+          if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault()
+            onSave()
+          } else if (e.key === 'Escape') {
+            e.preventDefault()
+            onCancel()
+          }
+        }}
+        className="w-full p-2 text-sm bg-bg-default border border-border-hint resize-none text-fg-contrast leading-[1.5]"
+        rows={4}
+      />
+      <div className="flex gap-1 justify-end">
+        <button
+          onClick={onCancel}
+          className="px-2 py-0.5 text-[10px] text-fg-dim hover:text-fg-contrast"
+        >
+          Cancel
+        </button>
+        <button
+          onClick={onSave}
+          className="px-2 py-0.5 text-[10px] bg-success text-white hover:opacity-90"
+        >
+          Save
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function CoverageDot({ score }: { score: number }) {
+  // Same three-tier scheme as the CoverageMap header dot, the charter
+  // dimension chips, etc. Keeps the visual language consistent.
+  const cls = score >= 0.8 ? 'bg-success' : score >= 0.4 ? 'bg-warning' : 'bg-danger'
+  return <span className={`inline-block w-2 h-2 rounded-full ${cls}`} />
+}
+
+function StatusDot({ status }: { status: Example['review_status'] }) {
+  const color =
+    status === 'approved'
+      ? 'bg-success'
+      : status === 'rejected'
+        ? 'bg-danger'
+        : status === 'needs_edit'
+          ? 'bg-warning'
+          : 'bg-gray-500'
+  return <span className={`w-2 h-2 rounded-full ${color}`} />
+}
+
+function RevisionDiff({ label, before, after }: { label: string; before: string; after: string }) {
+  const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n) + '…' : s)
+  return (
+    <div>
+      <div className="text-[10px] text-fg-dim mb-1 font-medium">{label}</div>
+      <div className="text-xs bg-bg-default p-2 border border-border-hint">
+        {after !== before ? (
+          <>
+            <div className="text-danger/60 line-through mb-1">{truncate(before, 300)}</div>
+            <div className="text-success">{truncate(after, 300)}</div>
+          </>
+        ) : (
+          <span className="text-fg-dim">No changes</span>
+        )}
+      </div>
+    </div>
   )
 }
