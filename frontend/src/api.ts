@@ -110,6 +110,15 @@ async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
     throw err
   }
   if (res.status === 401) {
+    let body: { detail?: string; provider?: string; error?: string } = {}
+    try { body = await res.clone().json() } catch { /* not JSON */ }
+    if (body.error === 'llm_auth') {
+      const provider = body.provider === 'openrouter' ? 'OpenRouter' : 'Anthropic'
+      throw new Error(
+        `${provider} rejected the request: ${body.detail || 'auth or model id error'}. ` +
+        `Check the API key in Settings, and that the selected model is available on ${provider}.`,
+      )
+    }
     throw new Error('Invalid or missing API key. Please add your API key in Settings.')
   }
   if (res.status === 402) {
@@ -448,6 +457,42 @@ export async function restoreSkillVersion(
     body: JSON.stringify({ version_id: versionId }),
   })
   if (!res.ok) throw new Error(`Failed to restore skill version: ${res.status}`)
+  return res.json()
+}
+
+export async function cancelEvalRun(
+  sessionId: string,
+  runId: string,
+): Promise<EvalRunSummary> {
+  const res = await apiFetch(
+    `${BASE}/sessions/${sessionId}/eval-runs/${runId}/cancel`,
+    { method: 'POST' },
+  )
+  if (!res.ok) throw new Error(`Failed to cancel eval run: ${res.status}`)
+  return res.json()
+}
+
+export async function promoteSkillVersion(
+  sessionId: string,
+  versionId: string,
+): Promise<SkillVersion> {
+  const res = await apiFetch(
+    `${BASE}/sessions/${sessionId}/skill-versions/${versionId}/promote`,
+    { method: 'POST' },
+  )
+  if (!res.ok) throw new Error(`Failed to promote skill version: ${res.status}`)
+  return res.json()
+}
+
+export async function discardSkillVersion(
+  sessionId: string,
+  versionId: string,
+): Promise<SkillVersion> {
+  const res = await apiFetch(
+    `${BASE}/sessions/${sessionId}/skill-versions/${versionId}/discard`,
+    { method: 'POST' },
+  )
+  if (!res.ok) throw new Error(`Failed to discard skill version: ${res.status}`)
   return res.json()
 }
 

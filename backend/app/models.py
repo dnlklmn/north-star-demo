@@ -177,6 +177,12 @@ class SessionState(BaseModel):
     # active body always lives on charter.task.skill_body; this list is history.
     skill_versions: list[dict] = Field(default_factory=list)
     active_skill_version_id: Optional[str] = None
+    # Pointer to the version currently being trialled. Distinct from active so
+    # the user can iterate on a candidate (run evals, see per-row deltas)
+    # before deciding to promote it. When set, charter.task.skill_body
+    # mirrors the candidate's body so the next eval runs against it. Cleared
+    # on promote (becomes active) or discard (revert to active's body).
+    candidate_skill_version_id: Optional[str] = None
     # Lineage: which skill version was active when each downstream artifact
     # was last generated. Keys: "goals" | "users" | "stories" | "charter" |
     # "dataset" | "scorers". UI shows a "Regenerate" affordance on tabs where
@@ -433,7 +439,11 @@ class RunEvalRequest(BaseModel):
 
 class EvalRunSummary(BaseModel):
     run_id: str
-    status: str  # "pending" | "running" | "done" | "error"
+    status: str  # "pending" | "running" | "done" | "failed" | "error" | "cancelled"
+    # done = ran, may include some errored rows (see `error` for summary if any)
+    # failed = ran, but every row errored (auth/billing/network)
+    # error = run never started (setup/validation error before Braintrust)
+    # cancelled = user clicked Stop while the run was in flight
     project: str
     experiment_name: Optional[str] = None
     experiment_url: Optional[str] = None
@@ -470,7 +480,7 @@ class SkillVersion(BaseModel):
     version: int  # monotonically increasing per session, starting at 1
     body: str
     notes: Optional[str] = None  # short human-readable summary of what changed
-    created_from: str = "manual"  # "seed" | "suggestion" | "manual"
+    created_from: str = "manual"  # "seed" | "suggestion" | "manual" | "restore"
     applied_suggestion_ids: list[str] = Field(default_factory=list)  # if created_from=suggestion
     created_at: Optional[datetime] = None
 

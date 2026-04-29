@@ -1717,37 +1717,65 @@ def build_suggest_improvements_prompt(
     an append — never a full rewrite.
     """
     per_row = eval_run.get("per_row", []) or []
-    # Focus the LLM on actual failures — high-scoring rows don't need edits.
+    # Bucket rows three ways so the LLM has signal even when most rows
+    # errored or all rows passed.
+    #   errored — task threw (auth, rate limit, malformed output). Pattern in
+    #             the error string can suggest skill changes (e.g. "JSON parse
+    #             failed" → "add 'output JSON, no prose' rule").
+    #   failed  — scored but worst_score < 0.8 (raised from 0.6 — judges
+    #             rarely emit 0.6/0.7 numbers; below-0.8 already means trouble).
+    #   passed  — anchor examples so the model sees what's working.
+    errored = []
     failures = []
     successes = []
     for row in per_row:
+        meta = row.get("metadata") or {}
+        row_id = meta.get("id")
         scores = row.get("scores", {}) or {}
-        if not scores:
+        err = row.get("error")
+        if err:
+            errored.append(
+                {
+                    "id": row_id,
+                    "input": row.get("input"),
+                    "error": str(err)[:500],  # cap noisy stack traces
+                }
+            )
             continue
-        worst = min(scores.values()) if scores else 1.0
+        if not scores:
+            # No scores AND no error — likely a scorer parse miss. Treat as
+            # a soft failure so it still informs the analysis.
+            failures.append(
+                {
+                    "id": row_id,
+                    "input": row.get("input"),
+                    "output": row.get("output"),
+                    "expected": row.get("expected"),
+                    "note": "scorer returned no scores",
+                }
+            )
+            continue
+        worst = min(scores.values())
         summary = {
-            "id": (row.get("metadata") or {}).get("id"),
+            "id": row_id,
             "input": row.get("input"),
             "output": row.get("output"),
             "expected": row.get("expected"),
             "scores": scores,
             "worst_score": worst,
         }
-        # Attach one judge response if available — helps the model see *why*.
-        # The scorer adapter stores judge text on metadata["judge_response"] per scorer,
-        # but Braintrust flattens scores to just numbers at the top level. We include
-        # whatever metadata did land.
-        meta = row.get("metadata") or {}
+        # Attach metadata if any — judges sometimes write reasoning here.
         if meta:
             summary["scorer_metadata"] = {k: v for k, v in meta.items() if k != "id"}
-        if worst < 0.6:
+        if worst < 0.8:
             failures.append(summary)
         else:
             successes.append(summary)
 
     # Cap so the prompt doesn't explode.
+    errored = errored[:10]
     failures = failures[:20]
-    successes = successes[:5]  # a few anchors so the model sees what works
+    successes = successes[:5]
 
     alignment = charter.get("alignment", []) or []
     coverage_criteria = (charter.get("coverage") or {}).get("criteria") or []
@@ -1771,11 +1799,18 @@ Coverage criteria:
 ## Eval run summary
 
 - Rows evaluated: {eval_run.get("rows_evaluated", 0)}
+- Rows that errored (task threw): {len(errored)}
+- Rows below 0.8 (scored failures): {len(failures)}
+- Rows passing: {len(successes)}
 - Per-scorer averages: {json.dumps(eval_run.get("scorer_averages", {}), indent=2)}
 
-## Failing rows (worst score < 0.6)
+## Errored rows (task threw before producing output)
 
-{json.dumps(failures, indent=2, default=str) if failures else "(none — this run had no failures, so focus on marginal/low-confidence rows if any)"}
+{json.dumps(errored, indent=2, default=str) if errored else "(none)"}
+
+## Failing rows (worst score < 0.8 OR scorer produced no scores)
+
+{json.dumps(failures, indent=2, default=str) if failures else "(none — every row that ran cleanly passed)"}
 
 ## For reference — a few passing rows
 
@@ -1783,7 +1818,9 @@ Coverage criteria:
 
 ## Your task
 
-Look for patterns across the failing rows. A pattern is 2+ rows failing for a similar reason. Don't propose edits to fix individual outliers.
+Look for patterns across the failing AND errored rows. A pattern is 2+ rows failing for a similar reason — including 2+ rows that errored with the same kind of error. Don't propose edits to fix individual outliers.
+
+If most/all rows errored (e.g. with a runtime/auth/parse error), the SKILL.md may not be the cause — flag it explicitly in your `summary` (e.g. "All N rows errored on JSON parsing — verify the skill emits valid JSON before iterating") and propose at most one defensive edit if the SKILL.md text could plausibly contribute (ambiguous output format instructions, missing 'output JSON only' rule, etc).
 
 For each pattern, propose ONE edit to SKILL.md that would plausibly address it. Edits must be:
 

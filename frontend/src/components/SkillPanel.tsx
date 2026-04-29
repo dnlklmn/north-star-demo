@@ -3,8 +3,10 @@ import { Eye, FileText, Github, History, Loader2, RotateCcw } from 'lucide-react
 import type { SkillVersion } from '../types'
 import {
   createSkillVersion,
+  discardSkillVersion,
   fetchSkillFromUrl,
   listSkillVersions,
+  promoteSkillVersion,
   restoreSkillVersion,
   seedFromSkill,
   setSessionMode,
@@ -34,6 +36,14 @@ interface Props {
   /** Internal name of the prompt builder, e.g. "build_generate_draft_prompt". */
   promptBuilderName?: string | null
   onSkillBodyChange: (body: string) => void
+  /** Pointer to the active version (gets the "active" badge in history). */
+  activeVersionId?: string | null
+  /** Pointer to the candidate version (suggestion-derived, awaiting promote
+   *  or discard). When set, history shows a "candidate" badge + inline
+   *  Promote/Discard buttons on the matching row. */
+  candidateVersionId?: string | null
+  /** Called after Promote/Discard so the parent can refresh session state. */
+  onCandidateChanged?: () => Promise<void> | void
   /** Called after a successful skill-seed (first Analyze). Parent refreshes
    *  session state to pick up extracted goals/users/stories and unlocks
    *  downstream tabs. */
@@ -67,6 +77,9 @@ export default function SkillPanel({
   promptSourcePath,
   promptBuilderName,
   onSkillBodyChange,
+  activeVersionId,
+  candidateVersionId,
+  onCandidateChanged,
   onSeeded,
   onStartFromScratch,
   onNext,
@@ -93,7 +106,7 @@ export default function SkillPanel({
     newText: string
   } | null>(null)
 
-  // Sync drafts with external changes (e.g. ImprovePanel just saved a new
+  // Sync drafts with external changes (e.g. EvaluatePanel just saved a new
   // version, or Home just created a fresh blank session).
   useEffect(() => {
     setDraft(skillBody)
@@ -517,12 +530,50 @@ export default function SkillPanel({
             <ul className="space-y-1">
               {versions.map((v, i) => {
                 const prev = versions[i + 1]
-                const isActive = v.id === activeVersion?.id
+                const isCandidate = candidateVersionId === v.id
+                // Prefer the explicit `activeVersionId` prop when provided
+                // (lets the parent express "active" independently of the
+                // newest version, which matters once candidates exist —
+                // the candidate is newest but NOT active). Fallback to
+                // "newest" for legacy sessions whose state predates the
+                // pointer, but exclude the candidate from that fallback
+                // so it never gets the active badge by accident.
+                const isActive = activeVersionId
+                  ? v.id === activeVersionId
+                  : !isCandidate && v.id === activeVersion?.id
+                const handlePromote = async () => {
+                  try {
+                    await promoteSkillVersion(sessionId, v.id)
+                    const refreshed = await listSkillVersions(sessionId)
+                    setVersions(refreshed)
+                    onSkillBodyChange(v.body)
+                    await onCandidateChanged?.()
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : 'Failed to promote candidate')
+                  }
+                }
+                const handleDiscard = async () => {
+                  try {
+                    await discardSkillVersion(sessionId, v.id)
+                    const refreshed = await listSkillVersions(sessionId)
+                    setVersions(refreshed)
+                    // Body reverts to the active version's body server-side.
+                    const active = refreshed.find((x) => x.id === activeVersionId)
+                    if (active) onSkillBodyChange(active.body)
+                    await onCandidateChanged?.()
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : 'Failed to discard candidate')
+                  }
+                }
                 return (
                   <li
                     key={v.id}
-                    className={`flex items-center gap-3 px-3 py-2 text-xs border border-border ${
-                      isActive ? 'bg-accent/5 border-accent' : 'bg-muted/10'
+                    className={`flex items-center gap-3 px-3 py-2 text-xs border ${
+                      isCandidate
+                        ? 'bg-warning/5 border-warning'
+                        : isActive
+                          ? 'bg-accent/5 border-accent'
+                          : 'bg-muted/10 border-border'
                     }`}
                   >
                     <span className="font-mono text-foreground">v{v.version}</span>
@@ -531,7 +582,34 @@ export default function SkillPanel({
                         active
                       </span>
                     )}
-                    <span className="font-mono text-[10px] text-muted-foreground uppercase">
+                    {isCandidate && (
+                      <span
+                        className="font-mono text-[10px] uppercase px-1.5 py-0.5 bg-warning/15 text-warning"
+                        title="Candidate version awaiting promote/discard. Run an eval against this body, then commit or revert."
+                      >
+                        candidate
+                      </span>
+                    )}
+                    <span
+                      className={`font-mono text-[10px] uppercase px-1.5 py-0.5 ${
+                        v.created_from === 'restore'
+                          ? 'bg-warning/15 text-warning'
+                          : v.created_from === 'suggestion'
+                            ? 'bg-accent/15 text-accent'
+                            : v.created_from === 'seed'
+                              ? 'bg-success/15 text-success'
+                              : 'bg-muted/30 text-muted-foreground'
+                      }`}
+                      title={
+                        v.created_from === 'restore'
+                          ? 'Created by restoring an earlier version'
+                          : v.created_from === 'suggestion'
+                            ? 'Created by accepting an improvement suggestion'
+                            : v.created_from === 'seed'
+                              ? 'The original SKILL.md the project started from'
+                              : 'Manually edited'
+                      }
+                    >
                       {v.created_from}
                     </span>
                     <span className="text-muted-foreground truncate flex-1">
@@ -559,7 +637,25 @@ export default function SkillPanel({
                           <Eye className="w-3.5 h-3.5" />
                         </button>
                       )}
-                      {!isActive && (
+                      {isCandidate && (
+                        <>
+                          <button
+                            onClick={handleDiscard}
+                            className="px-2 py-0.5 text-[10px] font-medium border border-border bg-surface hover:bg-muted/30"
+                            title="Discard candidate — revert SKILL.md to the active version. The candidate stays in history."
+                          >
+                            Discard
+                          </button>
+                          <button
+                            onClick={handlePromote}
+                            className="px-2 py-0.5 text-[10px] font-medium bg-accent text-accent-foreground hover:opacity-90"
+                            title="Promote this candidate to the active version."
+                          >
+                            Promote
+                          </button>
+                        </>
+                      )}
+                      {!isActive && !isCandidate && (
                         <button
                           onClick={() => handleRestore(v)}
                           className="p-1 text-muted-foreground hover:text-foreground"

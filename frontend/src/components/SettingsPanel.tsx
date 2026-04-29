@@ -228,6 +228,12 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                 </div>
                 <p className="text-[10px] text-muted-foreground mt-1.5">
                   Your key is stored locally in this browser and sent with each request. It is never saved on the server.
+                  {apiKeyValue && apiKeyValue.startsWith('sk-ant-') && (
+                    <span className="text-success block mt-0.5">Detected: Anthropic — uses the model id as-is.</span>
+                  )}
+                  {apiKeyValue && apiKeyValue.startsWith('sk-or-') && (
+                    <span className="text-success block mt-0.5">Detected: OpenRouter — Anthropic model ids are auto-prefixed (e.g. claude-sonnet-4-5-20250929 → anthropic/claude-sonnet-4-5).</span>
+                  )}
                   {apiKeyValue && !apiKeyValue.startsWith('sk-ant-') && !apiKeyValue.startsWith('sk-or-') && (
                     <span className="text-warning block mt-0.5">Key should start with "sk-ant-" (Anthropic) or "sk-or-" (OpenRouter)</span>
                   )}

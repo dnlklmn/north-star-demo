@@ -1,13 +1,22 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { Download, ExternalLink, FileText, KeyRound, Loader2, PlayCircle, Settings as SettingsIcon, Sparkles } from 'lucide-react'
-import type { Charter, Dataset, EvalRunSummary } from '../types'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Check, Download, Eye, ExternalLink, FileText, History, KeyRound, Loader2, PlayCircle, RotateCcw, Settings as SettingsIcon, Sparkles, X } from 'lucide-react'
+import type { Charter, Dataset, EvalRunSummary, ImprovementSuggestion, SkillVersion } from '../types'
 import CharterDocument from './CharterDocument'
+import DiffModal from './DiffModal'
+import PanelLayout from './PanelLayout'
 import {
+  cancelEvalRun,
+  createSkillVersion,
+  discardSkillVersion,
   getApiKey,
   getEvalRun,
   hasBraintrustApiKey,
   listEvalRuns,
+  listSkillVersions,
+  promoteSkillVersion,
+  restoreSkillVersion,
   runEval,
+  suggestImprovements,
 } from '../api'
 import {
   JUDGE_MODEL_OPTIONS,
@@ -25,10 +34,13 @@ interface Props {
    *  copy ("the chosen prompt builder" instead of "your SKILL.md"). */
   isPromptEval?: boolean
   onExport: () => void
-  /** Navigate to Improve tab — shown as a CTA below the latest completed run. */
-  onRequestImprove?: () => void
+  skillBody: string
+  onSkillBodyChange: (body: string) => void
+  /** Trigger a new eval run from the post-save CTA. Called with optional
+   *  overrides for project/experiment/limit/include_triggering. */
+  onRunEval: (overrides?: { project?: string; experiment_name?: string; limit?: number; include_triggering?: boolean }) => Promise<unknown>
   /** When set to true, the panel kicks off a run on mount using the most-recent
-   *  run's config (project + flags). Parent should reset this prop after. */
+   *  run's config (project + flags). Parent should reset this flag after. */
   autoRun?: boolean
   /** Called after an auto-run has been started so the parent can clear autoRun. */
   onAutoRunConsumed?: () => void
@@ -47,10 +59,28 @@ interface Props {
    *  the dataset so badges that change at run-completion (e.g. the "new"
    *  tags the backend clears post-run) drop off the UI immediately. */
   onRunTerminal?: () => void
+  /** Pointer to the SKILL version awaiting promote/discard. When set and
+   *  the active run was evaluated on this version, we surface promote/
+   *  discard buttons + per-row regression diff vs the previous active. */
+  candidateVersionId?: string | null
+  /** Pointer to the currently-active SKILL version. Used to compute the
+   *  baseline run for the row-by-row regression diff. */
+  activeVersionId?: string | null
+  /** Called after Promote/Discard so the parent can refresh session state.
+   *  Without this the candidate badge would linger after the action. */
+  onCandidateChanged?: () => Promise<void> | void
+  /** Called after a new SkillVersion is created (suggestion-accept) so the
+   *  parent can refetch session state. */
+  onSessionChanged?: () => Promise<void> | void
 }
 
 const POLL_INTERVAL_MS = 2000
-const TERMINAL_STATUSES = new Set<EvalRunSummary['status']>(['done', 'error'])
+const TERMINAL_STATUSES = new Set<EvalRunSummary['status']>([
+  'done',
+  'error',
+  'failed',
+  'cancelled',
+])
 
 
 function scoreColor(score: number): string {
@@ -75,6 +105,90 @@ function formatWhen(iso: string | null): string {
   return d.toLocaleString()
 }
 
+interface ProposedEdit {
+  suggestion: ImprovementSuggestion
+  appliedBody: string | null
+}
+
+function findRange(body: string, find: string): [number, number] | null {
+  const exact = body.indexOf(find)
+  if (exact !== -1) return [exact, exact + find.length]
+
+  const trimmed = find.trim()
+  if (!trimmed) return null
+  const normalize = (s: string) => s.replace(/\s+/g, ' ').trim()
+  const needle = normalize(trimmed)
+  if (!needle) return null
+
+  let normalizedBody = ''
+  const offsets: number[] = []
+  let inWs = false
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i]
+    if (/\s/.test(ch)) {
+      if (!inWs && normalizedBody.length > 0) {
+        normalizedBody += ' '
+        offsets.push(i)
+      }
+      inWs = true
+    } else {
+      normalizedBody += ch
+      offsets.push(i)
+      inWs = false
+    }
+  }
+  const normIdx = normalizedBody.indexOf(needle)
+  if (normIdx === -1) return null
+  const start = offsets[normIdx]
+  const lastNormIdx = normIdx + needle.length - 1
+  const lastChar = offsets[lastNormIdx]
+  const endChar = body[lastChar]
+  const end = /\s/.test(endChar) ? lastChar : lastChar + 1
+  return [start, end]
+}
+
+function applySuggestion(body: string, s: ImprovementSuggestion): string {
+  if (!s.find) {
+    const sep = body.endsWith('\n') ? '\n' : '\n\n'
+    return body + sep + s.replacement
+  }
+  const range = findRange(body, s.find)
+  if (range === null) {
+    const sep = body.endsWith('\n') ? '\n' : '\n\n'
+    return body + sep + s.replacement
+  }
+  const [start, end] = range
+  return body.slice(0, start) + s.replacement + body.slice(end)
+}
+
+function findMatchedExact(body: string, s: ImprovementSuggestion): boolean {
+  if (!s.find) return true
+  return findRange(body, s.find) !== null
+}
+
+function applyBatch(
+  body: string,
+  suggestions: ImprovementSuggestion[],
+): { body: string; skipped: string[] } {
+  let cur = body
+  const skipped: string[] = []
+  for (const s of suggestions) {
+    cur = applySuggestion(cur, s)
+  }
+  return { body: cur, skipped }
+}
+
+function confidenceColor(c: ImprovementSuggestion['confidence']): string {
+  if (c === 'high') return 'bg-success/15 text-success'
+  if (c === 'medium') return 'bg-warning/15 text-warning'
+  return 'bg-muted text-muted-foreground'
+}
+
+function whenLabel(iso: string | null | undefined): string {
+  if (!iso) return ''
+  return new Date(iso).toLocaleString()
+}
+
 export default function EvaluatePanel({
   sessionId,
   dataset,
@@ -82,7 +196,9 @@ export default function EvaluatePanel({
   hasSkillBody,
   isPromptEval = false,
   onExport,
-  onRequestImprove,
+  skillBody,
+  onSkillBodyChange,
+  onRunEval,
   autoRun,
   onAutoRunConsumed,
   onGoToSkill,
@@ -91,6 +207,10 @@ export default function EvaluatePanel({
   onGenerateScorersInline,
   onOpenSettings,
   onRunTerminal,
+  candidateVersionId,
+  activeVersionId,
+  onCandidateChanged,
+  onSessionChanged,
 }: Props) {
   const [inlineGenScorers, setInlineGenScorers] = useState(false)
   const exampleCount = dataset?.examples?.length || 0
@@ -128,17 +248,49 @@ export default function EvaluatePanel({
   // --- Active run + history ---
   const [activeRun, setActiveRun] = useState<EvalRunSummary | null>(null)
   const [runs, setRuns] = useState<EvalRunSummary[]>([])
+  // Skill versions for the version-timeline section. Lets the eval page show
+  // "v1 (seed) → v2 (suggestion) → v3 (restore from v1)" alongside each
+  // version's best eval avg, so the user sees iteration progress without
+  // hopping back to the Skill tab.
+  const [skillVersions, setSkillVersions] = useState<SkillVersion[]>([])
   const [startError, setStartError] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
   const pollTimerRef = useRef<number | null>(null)
 
   const [runsError, setRunsError] = useState<string | null>(null)
+  // Tracks an in-flight promote/discard so the buttons disable during the
+  // request and the user gets a clear failure if it 4xx's.
+  const [candidateActionBusy, setCandidateActionBusy] = useState(false)
+  const [candidateActionError, setCandidateActionError] = useState<string | null>(null)
   // When set, opens the CharterDocument modal showing exactly what the
   // user clicked "View charter" for — either a run's snapshot or the live one.
   const [viewingCharter, setViewingCharter] = useState<{
     charter: Charter
     title: string
     subtitle?: string
+  } | null>(null)
+
+  // --- Suggestions (merged from ImprovePanel) ---
+  const [summary, setSummary] = useState('')
+  const [suggestions, setSuggestions] = useState<ImprovementSuggestion[]>([])
+  const [accepted, setAccepted] = useState<Set<string>>(new Set())
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set())
+  const [suggesting, setSuggesting] = useState(false)
+  const [suggestError, setSuggestError] = useState<string | null>(null)
+
+  // --- Save ---
+  const [savingNotes, setSavingNotes] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [justSaved, setJustSaved] = useState<SkillVersion | null>(null)
+
+  const [diffVs, setDiffVs] = useState<{
+    title: string
+    subtitle?: string
+    oldLabel: string
+    newLabel: string
+    oldText: string
+    newText: string
   } | null>(null)
   const refreshRuns = useCallback(async () => {
     try {
@@ -154,6 +306,22 @@ export default function EvaluatePanel({
     refreshRuns()
   }, [refreshRuns])
 
+  // Pull skill versions on mount + after every terminal run, so the timeline
+  // reflects newly-saved versions (manual edits, accepted suggestions,
+  // restores). Failure is non-fatal — the rest of the panel still works.
+  const refreshSkillVersions = useCallback(async () => {
+    try {
+      const list = await listSkillVersions(sessionId)
+      setSkillVersions(list)
+    } catch {
+      /* non-fatal */
+    }
+  }, [sessionId])
+
+  useEffect(() => {
+    refreshSkillVersions()
+  }, [refreshSkillVersions])
+
   // Poll the active run until it reaches a terminal state.
   useEffect(() => {
     if (!activeRun || TERMINAL_STATUSES.has(activeRun.status)) {
@@ -165,6 +333,7 @@ export default function EvaluatePanel({
         setActiveRun(fresh)
         if (TERMINAL_STATUSES.has(fresh.status)) {
           refreshRuns()
+          refreshSkillVersions()
           // Tell the parent so it can refetch the dataset — backend clears
           // "new" tags from rows that participated in the run, and we want
           // the "X new rows" banner to drop without a manual reload.
@@ -230,6 +399,135 @@ export default function EvaluatePanel({
   const handleRun = async () => {
     if (!canRun) return
     await runWithConfig()
+  }
+
+  // --- Improvement handlers (merged from ImprovePanel) ---
+  const handleSuggest = async () => {
+    const doneRun = runs.find((r) => r.status === 'done')
+    if (!doneRun) return
+    setSuggesting(true)
+    setSuggestError(null)
+    setSummary('')
+    setSuggestions([])
+    setAccepted(new Set())
+    setDismissed(new Set())
+    setJustSaved(null)
+    try {
+      const res = await suggestImprovements(sessionId, doneRun.run_id)
+      setSuggestions(res.suggestions)
+      setSummary(res.summary || '')
+      if (res.suggestions.length === 0) {
+        setSuggestError(
+          res.summary?.trim()
+            ? null
+            : 'No systematic patterns found. Either the skill is working or the dataset is too small — try more rows.',
+        )
+      }
+    } catch (err) {
+      setSuggestError(err instanceof Error ? err.message : 'Failed to generate suggestions')
+    } finally {
+      setSuggesting(false)
+    }
+  }
+
+  const acceptedSuggestions = useMemo(
+    () => suggestions.filter((s) => accepted.has(s.id)),
+    [suggestions, accepted],
+  )
+
+  const preview: ProposedEdit[] = useMemo(() => {
+    const result: ProposedEdit[] = []
+    let cur = skillBody
+    for (const s of suggestions) {
+      if (!accepted.has(s.id)) continue
+      const next = applySuggestion(cur, s)
+      result.push({ suggestion: s, appliedBody: next })
+      if (next !== null) cur = next
+    }
+    return result
+  }, [suggestions, accepted, skillBody])
+
+  const finalBody = useMemo(() => {
+    const { body } = applyBatch(skillBody, acceptedSuggestions)
+    return body
+  }, [skillBody, acceptedSuggestions])
+
+  const finalChanged = finalBody !== skillBody
+
+  const toggleAccept = (id: string) => {
+    setDismissed((d) => {
+      const next = new Set(d)
+      next.delete(id)
+      return next
+    })
+    setAccepted((a) => {
+      const next = new Set(a)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const toggleDismiss = (id: string) => {
+    setAccepted((a) => {
+      const next = new Set(a)
+      next.delete(id)
+      return next
+    })
+    setDismissed((d) => {
+      const next = new Set(d)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const handleSaveVersion = async (): Promise<boolean> => {
+    if (!finalChanged || acceptedSuggestions.length === 0) return false
+    setSaving(true)
+    setSaveError(null)
+    try {
+      const { body, skipped } = applyBatch(skillBody, acceptedSuggestions)
+      const noteParts = [
+        `Applied ${acceptedSuggestions.length - skipped.length} of ${acceptedSuggestions.length} suggestions`,
+        savingNotes.trim(),
+      ].filter(Boolean)
+      const newVersion = await createSkillVersion(sessionId, {
+        body,
+        notes: noteParts.join(' · ') || undefined,
+        created_from: 'suggestion',
+        applied_suggestion_ids: acceptedSuggestions
+          .filter((s) => !skipped.includes(s.id))
+          .map((s) => s.id),
+      })
+      onSkillBodyChange(body)
+      setSkillVersions((prev) => [newVersion, ...prev])
+      setSuggestions([])
+      setAccepted(new Set())
+      setDismissed(new Set())
+      setSummary('')
+      setSavingNotes('')
+      setJustSaved(newVersion)
+      await onSessionChanged?.()
+      return true
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Failed to save new version')
+      return false
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleRestore = async (v: SkillVersion) => {
+    if (!confirm(`Restore v${v.version} as active? The current body will stay in history.`)) return
+    try {
+      await restoreSkillVersion(sessionId, v.id)
+      onSkillBodyChange(v.body)
+      refreshRuns()
+      refreshSkillVersions()
+    } catch (err) {
+      console.error('Restore failed', err)
+    }
   }
 
   // Auto-trigger when the parent passes autoRun=true (e.g. user clicked
@@ -300,13 +598,91 @@ export default function EvaluatePanel({
     })
   }
 
-  return (
-    <div className="flex flex-col h-full">
-      <div className="px-4 h-12 border-b border-border bg-surface-raised flex items-center justify-between flex-shrink-0">
-        <h2 className="text-sm font-semibold text-foreground">Evaluate</h2>
+  const versionHistoryRight = skillVersions.length > 0 ? (
+    <div>
+      <div className="flex items-center gap-2 mb-3">
+        <History className="w-4 h-4 text-muted-foreground" />
+        <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+          Version history
+        </h3>
+        <span className="text-xs text-muted-foreground">
+          ({skillVersions.length} version{skillVersions.length === 1 ? '' : 's'})
+        </span>
       </div>
+      <ul className="space-y-1">
+        {skillVersions.map((v, i) => {
+          const isActive = v.id === (activeVersionId || skillVersions[0]?.id)
+          const olderVersions = skillVersions.slice(i + 1)
+          return (
+            <li
+              key={v.id}
+              className={`flex items-center gap-3 px-3 py-2 text-xs border border-border ${
+                isActive ? 'bg-accent/5 border-accent' : 'bg-muted/10'
+              }`}
+            >
+              <span className="font-mono text-foreground">v{v.version}</span>
+              {isActive && (
+                <span className="font-mono text-[10px] uppercase px-1.5 py-0.5 bg-accent/20 text-accent">
+                  active
+                </span>
+              )}
+              <span className="font-mono text-[10px] text-muted-foreground uppercase">
+                {v.created_from}
+              </span>
+              <span className="text-muted-foreground truncate flex-1">
+                {v.notes || '—'}
+              </span>
+              <span className="text-muted-foreground flex-shrink-0">
+                {whenLabel(v.created_at)}
+              </span>
+              <div className="flex gap-1 flex-shrink-0">
+                {olderVersions.length > 0 && (
+                  <select
+                    className="text-[10px] bg-background border border-border px-1 py-0.5 focus:outline-none"
+                    value=""
+                    onChange={(e) => {
+                      if (!e.target.value) return
+                      const oldV = skillVersions.find((x) => x.id === e.target.value)
+                      if (!oldV) return
+                      setDiffVs({
+                        title: `v${oldV.version} → v${v.version}`,
+                        subtitle: v.notes || undefined,
+                        oldLabel: `v${oldV.version}`,
+                        newLabel: `v${v.version}`,
+                        oldText: oldV.body,
+                        newText: v.body,
+                      })
+                    }}
+                    title="Diff against a previous version"
+                  >
+                    <option value="" disabled>Diff vs…</option>
+                    {olderVersions.map((o) => (
+                      <option key={o.id} value={o.id}>v{o.version}</option>
+                    ))}
+                  </select>
+                )}
+                {!isActive && (
+                  <button
+                    onClick={() => handleRestore(v)}
+                    className="p-1 text-muted-foreground hover:text-foreground"
+                    title="Restore as active"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  ) : null
 
-      <div className="flex-1 overflow-y-auto p-6">
+  return (
+    <PanelLayout
+      title="Evaluate"
+      right={versionHistoryRight}
+    >
         <div className="max-w-2xl space-y-8">
           {isPromptEval && newSinceRefresh > 0 && (
             <div className="flex items-start gap-3 px-3 py-2 bg-accent/10 border border-accent/30 text-xs">
@@ -320,6 +696,50 @@ export default function EvaluatePanel({
               </div>
             </div>
           )}
+
+          {/* Pending-candidate banner — visible whenever a candidate
+              exists, regardless of run state. Tells the user "you have a
+              proposed change waiting; run an eval to test it, or discard
+              it now". The richer Promote/Discard banner with row-by-row
+              diff appears only after a run lands; this is the always-on
+              entry point that reminds the user the candidate exists. */}
+          {(() => {
+            if (!candidateVersionId) return null
+            const candidate = skillVersions.find((v) => v.id === candidateVersionId)
+            if (!candidate) return null
+            return (
+              <div className="mb-3 flex items-center justify-between gap-3 border border-warning/40 bg-warning/5 px-3 py-2">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-foreground">
+                    Candidate v{candidate.version} pending — run an eval to compare it to the active version.
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-0.5 truncate">
+                    {candidate.notes || 'New SKILL.md from accepted suggestions.'}
+                  </p>
+                </div>
+                <button
+                  onClick={async () => {
+                    setCandidateActionError(null)
+                    setCandidateActionBusy(true)
+                    try {
+                      await discardSkillVersion(sessionId, candidateVersionId)
+                      await refreshSkillVersions()
+                      await onCandidateChanged?.()
+                    } catch (err) {
+                      setCandidateActionError(err instanceof Error ? err.message : 'Failed to discard')
+                    } finally {
+                      setCandidateActionBusy(false)
+                    }
+                  }}
+                  disabled={candidateActionBusy}
+                  className="flex-shrink-0 px-3 py-1.5 text-xs font-medium border border-border bg-surface hover:bg-muted/30 disabled:opacity-50"
+                  title="Discard the candidate without running an eval. Reverts SKILL.md to the active version. The candidate stays in history."
+                >
+                  Discard candidate
+                </button>
+              </div>
+            )
+          })()}
 
           {/* --- Braintrust run section --- */}
           <section>
@@ -556,24 +976,50 @@ export default function EvaluatePanel({
                     {activeRun.status === 'running' && 'Running — this may take a few minutes.'}
                     {activeRun.status === 'done' &&
                       `Done. Evaluated ${activeRun.rows_evaluated}/${activeRun.rows_total} rows.`}
-                    {activeRun.status === 'error' && 'Failed.'}
+                    {activeRun.status === 'failed' && 'Failed — every row errored. See details below.'}
+                    {activeRun.status === 'error' && 'Failed to start the run.'}
+                    {activeRun.status === 'cancelled' && 'Cancelled.'}
                   </p>
                 </div>
+                {(activeRun.status === 'pending' || activeRun.status === 'running') && (
+                  <button
+                    onClick={async () => {
+                      try {
+                        const fresh = await cancelEvalRun(sessionId, activeRun.run_id)
+                        setActiveRun(fresh)
+                        await refreshRuns()
+                      } catch (err) {
+                        setStartError(err instanceof Error ? err.message : 'Failed to cancel')
+                      }
+                    }}
+                    className="px-2 py-1 text-xs font-medium border border-border bg-surface hover:bg-danger/10 hover:text-danger hover:border-danger/40"
+                    title="Stop this eval run. The Braintrust task can't be killed mid-flight, so it'll finish in the background — but we'll drop the results."
+                  >
+                    Stop
+                  </button>
+                )}
                 <span
                   className={`text-xs font-mono uppercase px-2 py-0.5 ${
                     activeRun.status === 'done'
                       ? 'bg-success/15 text-success'
-                      : activeRun.status === 'error'
+                      : activeRun.status === 'error' || activeRun.status === 'failed'
                         ? 'bg-danger/15 text-danger'
-                        : 'bg-accent/15 text-accent'
+                        : activeRun.status === 'cancelled'
+                          ? 'bg-muted text-muted-foreground'
+                          : 'bg-accent/15 text-accent'
                   }`}
                 >
                   {activeRun.status}
                 </span>
               </div>
 
-              {activeRun.status === 'error' && activeRun.error && (
+              {(activeRun.status === 'error' || activeRun.status === 'failed') && activeRun.error && (
                 <pre className="text-xs text-danger whitespace-pre-wrap bg-danger/5 p-2 border border-danger/20">
+                  {activeRun.error}
+                </pre>
+              )}
+              {activeRun.status === 'done' && activeRun.error && (
+                <pre className="text-xs text-warning whitespace-pre-wrap bg-warning/5 p-2 border border-warning/20">
                   {activeRun.error}
                 </pre>
               )}
@@ -608,13 +1054,317 @@ export default function EvaluatePanel({
                     )}
                   </div>
 
+                  {/* Promote / Discard banner — visible only when the
+                      active run was evaluated against the candidate version.
+                      Lets the user commit (promote) or revert (discard)
+                      based on the run results, instead of the candidate
+                      silently becoming the new active. Also shows per-row
+                      regression diff vs the most recent active-version run. */}
+                  {candidateVersionId &&
+                    activeRun.skill_version_id === candidateVersionId &&
+                    (() => {
+                      // Find the latest active-version run as the baseline
+                      // for the row-by-row delta. Same project so scorer set
+                      // matches; same status so we have real numbers.
+                      const baseline = runs.find(
+                        (r) =>
+                          r.run_id !== activeRun.run_id &&
+                          r.project === activeRun.project &&
+                          r.skill_version_id === activeVersionId &&
+                          r.status === 'done',
+                      )
+                      // Per-row diff. Match by metadata.id; compute mean
+                      // score per row across scorers.
+                      const PASS_THRESHOLD = 0.8
+                      const meanScore = (
+                        scores: Record<string, number> | undefined,
+                      ): number | null => {
+                        if (!scores) return null
+                        const vals = Object.values(scores)
+                        if (!vals.length) return null
+                        return vals.reduce((a, b) => a + b, 0) / vals.length
+                      }
+                      const baselineByRow = new Map<string, number>()
+                      if (baseline) {
+                        for (const r of baseline.per_row) {
+                          const id = (r.metadata as Record<string, unknown> | undefined)?.id as string | undefined
+                          const m = meanScore(r.scores)
+                          if (id && m !== null) baselineByRow.set(id, m)
+                        }
+                      }
+                      const regressed: { id: string; before: number; after: number }[] = []
+                      const improved: { id: string; before: number; after: number }[] = []
+                      for (const r of activeRun.per_row) {
+                        const id = (r.metadata as Record<string, unknown> | undefined)?.id as string | undefined
+                        if (!id) continue
+                        const after = meanScore(r.scores)
+                        const before = baselineByRow.get(id)
+                        if (before === undefined || after === null) continue
+                        const wasPassing = before >= PASS_THRESHOLD
+                        const isPassing = after >= PASS_THRESHOLD
+                        if (wasPassing && !isPassing) regressed.push({ id, before, after })
+                        else if (!wasPassing && isPassing) improved.push({ id, before, after })
+                      }
+                      const onPromote = async () => {
+                        setCandidateActionError(null)
+                        setCandidateActionBusy(true)
+                        try {
+                          await promoteSkillVersion(sessionId, candidateVersionId)
+                          await refreshSkillVersions()
+                          await onCandidateChanged?.()
+                        } catch (err) {
+                          setCandidateActionError(err instanceof Error ? err.message : 'Failed to promote')
+                        } finally {
+                          setCandidateActionBusy(false)
+                        }
+                      }
+                      const onDiscard = async () => {
+                        setCandidateActionError(null)
+                        setCandidateActionBusy(true)
+                        try {
+                          await discardSkillVersion(sessionId, candidateVersionId)
+                          await refreshSkillVersions()
+                          await onCandidateChanged?.()
+                        } catch (err) {
+                          setCandidateActionError(err instanceof Error ? err.message : 'Failed to discard')
+                        } finally {
+                          setCandidateActionBusy(false)
+                        }
+                      }
+                      return (
+                        <div className="mb-4 border border-warning/40 bg-warning/5 p-3">
+                          <div className="flex items-start gap-3 flex-wrap">
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium text-foreground">
+                                This run evaluated a candidate version
+                                {activeRun.skill_version_number != null && (
+                                  <> (v{activeRun.skill_version_number})</>
+                                )}
+                                .
+                              </p>
+                              <p className="text-xs text-muted-foreground mt-0.5">
+                                {baseline
+                                  ? `Compared to v${baseline.skill_version_number ?? '?'} (the active version): ${improved.length} row${improved.length === 1 ? '' : 's'} improved, ${regressed.length} regressed.`
+                                  : 'No prior run on the active version to compare against — promote based on overall scores.'}
+                              </p>
+                            </div>
+                            <div className="flex gap-2 flex-shrink-0">
+                              <button
+                                onClick={onDiscard}
+                                disabled={candidateActionBusy}
+                                className="px-3 py-1.5 text-xs font-medium border border-border bg-surface hover:bg-muted/30 disabled:opacity-50"
+                                title="Revert to the previous active version. The candidate stays in history but isn't the body the next eval runs against."
+                              >
+                                Discard candidate
+                              </button>
+                              <button
+                                onClick={onPromote}
+                                disabled={candidateActionBusy}
+                                className="px-3 py-1.5 text-xs font-medium bg-accent text-accent-foreground hover:opacity-90 disabled:opacity-50"
+                                title="Make this candidate the new active SKILL.md."
+                              >
+                                Promote to active
+                              </button>
+                            </div>
+                          </div>
+                          {candidateActionError && (
+                            <p className="mt-2 text-xs text-danger">{candidateActionError}</p>
+                          )}
+                          {regressed.length > 0 && (
+                            <details className="mt-3">
+                              <summary className="text-[10px] font-medium text-danger uppercase tracking-wide cursor-pointer">
+                                {regressed.length} regressed row{regressed.length === 1 ? '' : 's'} (was passing, now failing)
+                              </summary>
+                              <ul className="mt-2 space-y-1">
+                                {regressed.slice(0, 20).map((r) => (
+                                  <li
+                                    key={r.id}
+                                    className="flex items-center gap-2 text-[11px] font-mono px-2 py-1 bg-danger/5"
+                                  >
+                                    <span className="text-foreground truncate flex-1">{r.id.slice(0, 16)}</span>
+                                    <span className="text-muted-foreground">{(r.before * 100).toFixed(0)}%</span>
+                                    <span className="text-danger">→</span>
+                                    <span className="text-danger">{(r.after * 100).toFixed(0)}%</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </details>
+                          )}
+                          {improved.length > 0 && (
+                            <details className="mt-2">
+                              <summary className="text-[10px] font-medium text-success uppercase tracking-wide cursor-pointer">
+                                {improved.length} improved row{improved.length === 1 ? '' : 's'} (was failing, now passing)
+                              </summary>
+                              <ul className="mt-2 space-y-1">
+                                {improved.slice(0, 20).map((r) => (
+                                  <li
+                                    key={r.id}
+                                    className="flex items-center gap-2 text-[11px] font-mono px-2 py-1 bg-success/5"
+                                  >
+                                    <span className="text-foreground truncate flex-1">{r.id.slice(0, 16)}</span>
+                                    <span className="text-muted-foreground">{(r.before * 100).toFixed(0)}%</span>
+                                    <span className="text-success">→</span>
+                                    <span className="text-success">{(r.after * 100).toFixed(0)}%</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </details>
+                          )}
+                        </div>
+                      )
+                    })()}
+
+                  {skillVersions.length > 0 && (() => {
+                    // Skill version timeline — one row per version, with the
+                    // best eval avg achieved on that version. Scoped to the
+                    // active run's project so a different scorer set on
+                    // another project doesn't pollute the comparison. Active
+                    // version (the one this run evaluated) is highlighted.
+                    const bestAvgFor = (versionId: string): number | null => {
+                      const versionRuns = runs.filter(
+                        (r) =>
+                          r.skill_version_id === versionId &&
+                          r.project === activeRun.project &&
+                          r.status === 'done',
+                      )
+                      const avgs = versionRuns
+                        .map((r) => {
+                          const vals = Object.values(r.scorer_averages)
+                          if (!vals.length) return null
+                          return vals.reduce((a, b) => a + b, 0) / vals.length
+                        })
+                        .filter((x): x is number => x !== null)
+                      if (!avgs.length) return null
+                      return Math.max(...avgs)
+                    }
+                    const sorted = [...skillVersions].sort((a, b) => a.version - b.version)
+                    return (
+                      <div className="mb-4">
+                        <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide mb-2">
+                          Skill version timeline
+                        </p>
+                        <ul className="space-y-1">
+                          {sorted.map((v) => {
+                            const avg = bestAvgFor(v.id)
+                            const isActiveVersion = v.id === activeRun.skill_version_id
+                            const isCandidate = v.id === candidateVersionId
+                            const isActive = v.id === activeVersionId
+                            return (
+                              <li
+                                key={v.id}
+                                className={`flex items-center gap-2 text-xs px-2 py-1 ${
+                                  isActiveVersion ? 'bg-accent/5 border-l-2 border-accent' : 'bg-muted/20'
+                                }`}
+                              >
+                                <span className="font-mono text-foreground flex-shrink-0">v{v.version}</span>
+                                {isActive && (
+                                  <span className="font-mono text-[10px] uppercase px-1 py-0.5 bg-accent/20 text-accent flex-shrink-0">
+                                    active
+                                  </span>
+                                )}
+                                {isCandidate && (
+                                  <span className="font-mono text-[10px] uppercase px-1 py-0.5 bg-warning/15 text-warning flex-shrink-0">
+                                    candidate
+                                  </span>
+                                )}
+                                <span
+                                  className={`font-mono text-[10px] uppercase px-1 py-0.5 flex-shrink-0 ${
+                                    v.created_from === 'restore'
+                                      ? 'bg-warning/15 text-warning'
+                                      : v.created_from === 'suggestion'
+                                        ? 'bg-accent/15 text-accent'
+                                        : v.created_from === 'seed'
+                                          ? 'bg-success/15 text-success'
+                                          : 'bg-muted/30 text-muted-foreground'
+                                  }`}
+                                >
+                                  {v.created_from}
+                                </span>
+                                <span className="text-muted-foreground truncate flex-1">
+                                  {v.notes || '—'}
+                                </span>
+                                <span className="font-mono flex-shrink-0">
+                                  {avg !== null ? (
+                                    <span className={scoreColor(avg)}>{(avg * 100).toFixed(0)}%</span>
+                                  ) : (
+                                    <span
+                                      className="text-muted-foreground"
+                                      title={
+                                        isCandidate
+                                          ? "No eval has run on this candidate yet — use the 'Run with Braintrust' panel above to test it."
+                                          : 'No completed run for this version in this project.'
+                                      }
+                                    >
+                                      no run
+                                    </span>
+                                  )}
+                                </span>
+                                {isCandidate && (
+                                  <div className="flex gap-1 flex-shrink-0">
+                                    <button
+                                      onClick={async () => {
+                                        setCandidateActionError(null)
+                                        setCandidateActionBusy(true)
+                                        try {
+                                          await discardSkillVersion(sessionId, v.id)
+                                          await refreshSkillVersions()
+                                          await onCandidateChanged?.()
+                                        } catch (err) {
+                                          setCandidateActionError(
+                                            err instanceof Error ? err.message : 'Failed to discard',
+                                          )
+                                        } finally {
+                                          setCandidateActionBusy(false)
+                                        }
+                                      }}
+                                      disabled={candidateActionBusy}
+                                      className="px-2 py-0.5 text-[10px] font-medium border border-border bg-surface hover:bg-muted/30 disabled:opacity-50"
+                                      title="Discard candidate without running an eval. Reverts SKILL.md to the active version."
+                                    >
+                                      Discard
+                                    </button>
+                                    <button
+                                      onClick={async () => {
+                                        setCandidateActionError(null)
+                                        setCandidateActionBusy(true)
+                                        try {
+                                          await promoteSkillVersion(sessionId, v.id)
+                                          await refreshSkillVersions()
+                                          await onCandidateChanged?.()
+                                        } catch (err) {
+                                          setCandidateActionError(
+                                            err instanceof Error ? err.message : 'Failed to promote',
+                                          )
+                                        } finally {
+                                          setCandidateActionBusy(false)
+                                        }
+                                      }}
+                                      disabled={candidateActionBusy}
+                                      className="px-2 py-0.5 text-[10px] font-medium bg-accent text-accent-foreground hover:opacity-90 disabled:opacity-50"
+                                      title="Promote this candidate to the active version (you can do this without running an eval, but the whole point of the candidate flow is to gate on a confirming run)."
+                                    >
+                                      Promote
+                                    </button>
+                                  </div>
+                                )}
+                              </li>
+                            )
+                          })}
+                        </ul>
+                      </div>
+                    )
+                  })()}
+
                   {Object.keys(activeRun.scorer_averages).length > 0 && (() => {
-                    // Find the previous completed run (most recent one older
-                    // than this run) to compute per-scorer deltas. Preferring
-                    // same-project so the scorer set matches. `runs` comes
-                    // back sorted newest-first from the backend.
+                    // Find both:
+                    //   - previous run (most recent older than this one)
+                    //   - original run (earliest done run on SKILL v1 — what
+                    //     the user started with). Lets the user see whether
+                    //     iteration is paying off vs the seed skill, not just
+                    //     vs the last edit.
+                    // `runs` comes back sorted newest-first from the backend.
                     const activeStart = activeRun.started_at || activeRun.finished_at
-                    const candidates = runs.filter(
+                    const olderDone = runs.filter(
                       (r) =>
                         r.run_id !== activeRun.run_id &&
                         r.status === 'done' &&
@@ -623,24 +1373,69 @@ export default function EvaluatePanel({
                           new Date(r.started_at).getTime() < new Date(activeStart).getTime()),
                     )
                     const previousRun =
-                      candidates.find((r) => r.project === activeRun.project) || candidates[0] || null
+                      olderDone.find((r) => r.project === activeRun.project) || olderDone[0] || null
+                    // Original = oldest done run on SKILL v1 in this project.
+                    // Fall back to oldest done run overall if no v1 run exists
+                    // (e.g. legacy runs without skill_version_number).
+                    const v1Runs = olderDone
+                      .filter((r) => r.project === activeRun.project && r.skill_version_number === 1)
+                      .sort((a, b) => {
+                        const at = a.started_at ? new Date(a.started_at).getTime() : 0
+                        const bt = b.started_at ? new Date(b.started_at).getTime() : 0
+                        return at - bt
+                      })
+                    const fallbackOldest = [...olderDone].sort((a, b) => {
+                      const at = a.started_at ? new Date(a.started_at).getTime() : 0
+                      const bt = b.started_at ? new Date(b.started_at).getTime() : 0
+                      return at - bt
+                    })[0] || null
+                    let originalRun = v1Runs[0] || fallbackOldest
+                    // Don't double-count: if "original" is the same row as
+                    // "previous", drop it — the column would just duplicate.
+                    if (originalRun && previousRun && originalRun.run_id === previousRun.run_id) {
+                      originalRun = null
+                    }
+                    // And don't compare the run to itself.
+                    if (originalRun && originalRun.run_id === activeRun.run_id) {
+                      originalRun = null
+                    }
+                    const previousLabel = previousRun
+                      ? previousRun.skill_version_number != null
+                        ? `SKILL v${previousRun.skill_version_number}`
+                        : previousRun.experiment_name || 'previous'
+                      : null
+                    const originalLabel = originalRun
+                      ? originalRun.skill_version_number != null
+                        ? `SKILL v${originalRun.skill_version_number}`
+                        : 'original'
+                      : null
                     return (
                       <div className="mb-4">
-                        <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide mb-2 flex items-center gap-2">
+                        <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide mb-2 flex items-center gap-2 flex-wrap">
                           <span>Per-scorer averages</span>
-                          {previousRun && (
+                          {previousLabel && (
                             <span className="font-mono normal-case text-muted-foreground/70">
-                              vs{' '}
-                              {previousRun.skill_version_number != null
-                                ? `SKILL v${previousRun.skill_version_number}`
-                                : previousRun.experiment_name || 'previous run'}
+                              vs prev ({previousLabel})
+                            </span>
+                          )}
+                          {originalLabel && (
+                            <span className="font-mono normal-case text-muted-foreground/70">
+                              · vs original ({originalLabel})
                             </span>
                           )}
                         </p>
                         <ul className="space-y-1">
                           {Object.entries(activeRun.scorer_averages).map(([name, avg]) => {
                             const prev = previousRun?.scorer_averages?.[name]
-                            const delta = prev !== undefined ? avg - prev : null
+                            const orig = originalRun?.scorer_averages?.[name]
+                            const prevDelta = prev !== undefined ? avg - prev : null
+                            const origDelta = orig !== undefined ? avg - orig : null
+                            const deltaClass = (d: number) =>
+                              Math.abs(d) < 0.01
+                                ? 'text-muted-foreground'
+                                : d > 0
+                                  ? 'text-success'
+                                  : 'text-danger'
                             return (
                               <li
                                 key={name}
@@ -648,19 +1443,22 @@ export default function EvaluatePanel({
                               >
                                 <span className="font-mono text-foreground truncate flex-1">{name}</span>
                                 <div className="flex items-center gap-2 flex-shrink-0">
-                                  {delta !== null && (
+                                  {prevDelta !== null && (
                                     <span
-                                      className={`font-mono ${
-                                        Math.abs(delta) < 0.01
-                                          ? 'text-muted-foreground'
-                                          : delta > 0
-                                            ? 'text-success'
-                                            : 'text-danger'
-                                      }`}
-                                      title={`Previous: ${(prev! * 100).toFixed(0)}%`}
+                                      className={`font-mono ${deltaClass(prevDelta)}`}
+                                      title={`vs prev: ${(prev! * 100).toFixed(0)}%`}
                                     >
-                                      {delta > 0 ? '+' : ''}
-                                      {(delta * 100).toFixed(0)}pp
+                                      {prevDelta > 0 ? '+' : ''}
+                                      {(prevDelta * 100).toFixed(0)}pp
+                                    </span>
+                                  )}
+                                  {origDelta !== null && (
+                                    <span
+                                      className={`font-mono ${deltaClass(origDelta)}`}
+                                      title={`vs original: ${(orig! * 100).toFixed(0)}%`}
+                                    >
+                                      ({origDelta > 0 ? '+' : ''}
+                                      {(origDelta * 100).toFixed(0)}pp)
                                     </span>
                                   )}
                                   <span className={`font-mono font-medium ${scoreColor(avg)}`}>
@@ -675,18 +1473,304 @@ export default function EvaluatePanel({
                     )
                   })()}
 
-                  {onRequestImprove && (
-                    <div className="mb-4 flex items-center justify-between gap-3 border border-accent/40 bg-accent/5 px-3 py-2">
-                      <p className="text-xs text-foreground">
-                        Results look off? Analyze failures and get proposed SKILL.md edits.
+                  {/* --- Suggest improvements --- */}
+                  <div className="mb-4">
+                    <div className="flex items-center gap-2 mb-3">
+                      <Sparkles className="w-4 h-4 text-accent" />
+                      <h4 className="text-sm font-semibold text-foreground">Suggest improvements</h4>
+                    </div>
+                    {(() => {
+                      const doneRun = runs.find((r) => r.status === 'done')
+                      if (!doneRun) {
+                        return (
+                          <div className="px-3 py-2 bg-warning/10 border border-warning/30 text-xs text-foreground">
+                            No completed eval runs yet. Run one first.
+                          </div>
+                        )
+                      }
+                      return (
+                        <>
+                          <button
+                            onClick={handleSuggest}
+                            disabled={suggesting}
+                            className={`inline-flex items-center gap-2 px-4 py-2 text-sm font-medium ${
+                              !suggesting
+                                ? 'bg-accent text-accent-foreground hover:opacity-90 cursor-pointer'
+                                : 'bg-muted text-muted-foreground cursor-not-allowed'
+                            }`}
+                          >
+                            {suggesting ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <Sparkles className="w-4 h-4" />
+                            )}
+                            Analyze this run
+                          </button>
+                          {suggestError && (
+                            <p className="mt-2 text-xs text-danger">{suggestError}</p>
+                          )}
+                          {!suggestions.length && summary && (
+                            <p className="mt-2 text-xs text-foreground bg-muted/20 p-2 border-l-2 border-accent">
+                              {summary}
+                            </p>
+                          )}
+                        </>
+                      )
+                    })()}
+                  </div>
+
+                  {/* --- Suggestions list --- */}
+                  {suggestions.length > 0 && (
+                    <div className="mb-4">
+                      {summary && (
+                        <p className="text-sm text-foreground bg-muted/20 p-3 mb-3 border-l-2 border-accent">
+                          {summary}
+                        </p>
+                      )}
+
+                      <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide mb-2">
+                        Proposed edits ({suggestions.length})
                       </p>
-                      <button
-                        onClick={onRequestImprove}
-                        className="flex-shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-accent text-accent-foreground hover:opacity-90"
-                      >
-                        <Sparkles className="w-3.5 h-3.5" />
-                        Improve skill
-                      </button>
+
+                      <ul className="space-y-2">
+                        {suggestions.map((s) => {
+                          const isAccepted = accepted.has(s.id)
+                          const isDismissed = dismissed.has(s.id)
+                          const isCollapsed = isAccepted || isDismissed
+                          const applied = applySuggestion(skillBody, s)
+                          const findMatched = findMatchedExact(skillBody, s)
+
+                          if (isCollapsed) {
+                            const shortFind = s.find.length > 40 ? s.find.slice(0, 40) + '…' : s.find
+                            const shortRepl = s.replacement.length > 40 ? s.replacement.slice(0, 40) + '…' : s.replacement
+                            return (
+                              <li
+                                key={s.id}
+                                className={`border px-3 py-2 text-xs flex items-center gap-2 ${
+                                  isAccepted
+                                    ? 'border-accent bg-accent/5'
+                                    : 'border-border bg-muted/10 opacity-60'
+                                }`}
+                              >
+                                <span
+                                  className={`font-mono text-[10px] uppercase px-1.5 py-0.5 flex-shrink-0 ${
+                                    isAccepted
+                                      ? 'bg-accent/20 text-accent'
+                                      : 'bg-muted text-muted-foreground'
+                                  }`}
+                                >
+                                  {isAccepted ? 'accepted' : 'dismissed'}
+                                </span>
+                                <span className="text-foreground truncate flex-1">
+                                  {s.find ? (
+                                    <>
+                                      <span className="font-mono line-through text-muted-foreground">{shortFind}</span>{' '}
+                                      →{' '}
+                                      <span className="font-mono text-foreground">{shortRepl}</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <span className="text-muted-foreground">append</span>{' '}
+                                      <span className="font-mono text-foreground">{shortRepl}</span>
+                                    </>
+                                  )}
+                                </span>
+                                <div className="flex gap-1 flex-shrink-0">
+                                  <button
+                                    onClick={() => setDiffVs({
+                                      title: s.summary,
+                                      subtitle: s.rationale,
+                                      oldLabel: 'current SKILL.md',
+                                      newLabel: 'after this edit',
+                                      oldText: skillBody,
+                                      newText: applied,
+                                    })}
+                                    className="p-1 text-muted-foreground hover:text-foreground"
+                                    title="Preview diff"
+                                  >
+                                    <Eye className="w-3.5 h-3.5" />
+                                  </button>
+                                  <button
+                                    onClick={() => isAccepted ? toggleAccept(s.id) : toggleDismiss(s.id)}
+                                    className="p-1 text-muted-foreground hover:text-foreground"
+                                    title="Undo"
+                                  >
+                                    <RotateCcw className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </li>
+                            )
+                          }
+
+                          return (
+                            <li
+                              key={s.id}
+                              className="border border-border bg-surface-raised p-3 text-xs"
+                            >
+                              <div className="flex items-start gap-2 mb-2">
+                                <span className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                                  {s.kind.replace('_', ' ')}
+                                </span>
+                                <span className={`font-mono text-[10px] uppercase px-1.5 py-0.5 ${confidenceColor(s.confidence)}`}>
+                                  {s.confidence}
+                                </span>
+                                {!findMatched && s.find && (
+                                  <span
+                                    className="font-mono text-[10px] uppercase px-1.5 py-0.5 bg-warning/15 text-warning"
+                                    title="The model quoted a snippet that doesn't appear verbatim in the current SKILL.md (probably whitespace drift). Accepting will append the new text to the end of the file instead."
+                                  >
+                                    will append (snippet drift)
+                                  </span>
+                                )}
+                                <div className="ml-auto flex gap-1 flex-shrink-0">
+                                  <button
+                                    onClick={() => setDiffVs({
+                                      title: s.summary,
+                                      subtitle: s.rationale,
+                                      oldLabel: 'current SKILL.md',
+                                      newLabel: 'after this edit',
+                                      oldText: skillBody,
+                                      newText: applied,
+                                    })}
+                                    className="p-1 text-muted-foreground hover:text-foreground"
+                                    title="Preview diff"
+                                  >
+                                    <Eye className="w-3.5 h-3.5" />
+                                  </button>
+                                  <button
+                                    onClick={() => toggleAccept(s.id)}
+                                    className="p-1 text-muted-foreground hover:text-success"
+                                    title={findMatched ? 'Accept' : "Accept (couldn't locate snippet — will append)"}
+                                  >
+                                    <Check className="w-3.5 h-3.5" />
+                                  </button>
+                                  <button
+                                    onClick={() => toggleDismiss(s.id)}
+                                    className="p-1 text-muted-foreground hover:text-danger"
+                                    title="Dismiss"
+                                  >
+                                    <X className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </div>
+
+                              <p className="text-sm font-medium text-foreground mb-1">{s.summary}</p>
+                              <p className="text-xs text-muted-foreground mb-2">{s.rationale}</p>
+
+                              {s.find && (
+                                <details className="mb-1">
+                                  <summary className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide cursor-pointer">
+                                    Replace
+                                  </summary>
+                                  <pre className="mt-1 p-2 bg-danger/5 text-foreground whitespace-pre-wrap break-words font-mono text-[11px]">
+                                    {s.find}
+                                  </pre>
+                                </details>
+                              )}
+                              <details>
+                                <summary className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide cursor-pointer">
+                                  {s.find ? 'With' : 'Append'}
+                                </summary>
+                                <pre className="mt-1 p-2 bg-success/5 text-foreground whitespace-pre-wrap break-words font-mono text-[11px]">
+                                  {s.replacement}
+                                </pre>
+                              </details>
+
+                              {(s.source_row_ids.length > 0 || s.source_scorer_names.length > 0) && (
+                                <div className="mt-2 pt-2 border-t border-border/50 flex flex-wrap gap-1 text-[10px] text-muted-foreground">
+                                  {s.source_scorer_names.map((n) => (
+                                    <span key={n} className="font-mono px-1.5 py-0.5 bg-muted/50">{n}</span>
+                                  ))}
+                                  {s.source_row_ids.slice(0, 5).map((id) => (
+                                    <span key={id} className="font-mono px-1.5 py-0.5 bg-muted/50">{id.slice(0, 8)}</span>
+                                  ))}
+                                </div>
+                              )}
+                            </li>
+                          )
+                        })}
+                      </ul>
+
+                      {/* --- Save block --- */}
+                      {acceptedSuggestions.length > 0 && (
+                        <div className="mt-4 border border-accent p-3 bg-accent/5">
+                          <p className="text-sm font-medium text-foreground mb-1">
+                            Ready to save v{(skillVersions[0]?.version ?? 0) + 1}
+                          </p>
+                          <p className="text-xs text-muted-foreground mb-3">
+                            {acceptedSuggestions.length} suggestion{acceptedSuggestions.length === 1 ? '' : 's'} accepted ·{' '}
+                            {preview.filter((p) => p.appliedBody === null).length} couldn't be applied (find text not in SKILL.md).
+                          </p>
+                          <div className="flex gap-2 mb-2">
+                            <input
+                              type="text"
+                              value={savingNotes}
+                              onChange={(e) => setSavingNotes(e.target.value)}
+                              placeholder="Optional note about this version..."
+                              className="flex-1 text-xs bg-background border border-border px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-accent"
+                            />
+                            <button
+                              onClick={() => setDiffVs({
+                                title: `Preview v${(skillVersions[0]?.version ?? 0) + 1}`,
+                                oldLabel: `v${skillVersions[0]?.version ?? 0}`,
+                                newLabel: `v${(skillVersions[0]?.version ?? 0) + 1} (preview)`,
+                                oldText: skillBody,
+                                newText: finalBody,
+                              })}
+                              className="px-3 py-1.5 text-xs font-medium bg-muted text-foreground hover:bg-muted/70"
+                            >
+                              <Eye className="w-3.5 h-3.5 inline" /> Preview combined diff
+                            </button>
+                            <button
+                              onClick={async () => {
+                                const saved = await handleSaveVersion()
+                                if (saved) {
+                                  setJustSaved(null)
+                                }
+                              }}
+                              disabled={saving || !finalChanged}
+                              className={`px-3 py-1.5 text-xs font-medium ${
+                                finalChanged && !saving
+                                  ? 'bg-accent text-accent-foreground hover:opacity-90'
+                                  : 'bg-muted text-muted-foreground cursor-not-allowed'
+                              }`}
+                            >
+                              {saving && <Loader2 className="w-3.5 h-3.5 animate-spin inline" />}
+                              Save new version
+                            </button>
+                          </div>
+                          {saveError && <p className="text-xs text-danger">{saveError}</p>}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* --- Post-save CTA --- */}
+                  {justSaved && (
+                    <div className="mb-4 border border-warning bg-warning/5 p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold text-foreground">
+                            v{justSaved.version} ready as a candidate.
+                          </p>
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            Evaluate the new version to see if it actually improves things.
+                            {justSaved.applied_suggestion_ids.length > 0 && (
+                              <> Applied {justSaved.applied_suggestion_ids.length} suggestion{justSaved.applied_suggestion_ids.length === 1 ? '' : 's'}.</>
+                            )}
+                          </p>
+                        </div>
+                        <button
+                          onClick={async () => {
+                            setJustSaved(null)
+                            const run = await onRunEval({})
+                            if (run) setActiveRun(run as EvalRunSummary)
+                          }}
+                          className="flex-shrink-0 px-3 py-1.5 text-xs font-medium bg-accent text-accent-foreground hover:opacity-90"
+                        >
+                          Evaluate new version
+                        </button>
+                      </div>
                     </div>
                   )}
 
@@ -748,7 +1832,7 @@ export default function EvaluatePanel({
                   )}
                 </>
               )}
-            </section>
+                     </section>
           )}
 
           {/* --- Run history --- always visible once the user has an API
@@ -881,17 +1965,28 @@ export default function EvaluatePanel({
               </div>
             </button>
           </section>
-        </div>
-      </div>
 
-      {viewingCharter && (
-        <CharterDocument
-          charter={viewingCharter.charter}
-          title={viewingCharter.title}
-          subtitle={viewingCharter.subtitle}
-          onClose={() => setViewingCharter(null)}
-        />
-      )}
-    </div>
+          {viewingCharter && (
+            <CharterDocument
+              charter={viewingCharter.charter}
+              title={viewingCharter.title}
+              subtitle={viewingCharter.subtitle}
+              onClose={() => setViewingCharter(null)}
+            />
+          )}
+
+          {diffVs && (
+            <DiffModal
+              title={diffVs.title}
+              subtitle={diffVs.subtitle}
+              oldLabel={diffVs.oldLabel}
+              newLabel={diffVs.newLabel}
+              oldText={diffVs.oldText}
+              newText={diffVs.newText}
+              onClose={() => setDiffVs(null)}
+            />
+          )}
+        </div>
+    </PanelLayout>
   )
 }

@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 
 import anthropic
@@ -59,7 +60,12 @@ _request_api_key: contextvars.ContextVar[str | None] = contextvars.ContextVar('_
 # Cached settings (refreshed each LLM call)
 _cached_settings: dict | None = None
 
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+# OpenRouter exposes an Anthropic-compatible endpoint at /api/v1/messages.
+# The Anthropic SDK appends `/v1/messages` to whatever base_url it's given,
+# so the base must end at `/api` — using `/api/v1` causes a double `/v1/v1/`
+# path that 404s into OpenRouter's HTML homepage, which the SDK then mis-
+# parses into garbage and the call returns nonsense (or 500s downstream).
+OPENROUTER_BASE_URL = "https://openrouter.ai/api"
 
 
 def _is_openrouter_key(key: str) -> bool:
@@ -101,6 +107,37 @@ def get_model() -> str:
     return os.environ.get("MODEL_NAME", "claude-sonnet-4-5-20250929")
 
 
+def _is_request_using_openrouter() -> bool:
+    """True when the current request will hit OpenRouter, either because the
+    per-request key is an `sk-or-` key or because the env-var fallback resolves
+    to OpenRouter (no ANTHROPIC_API_KEY but OPENROUTER_API_KEY set)."""
+    request_key = _request_api_key.get(None)
+    if request_key:
+        return _is_openrouter_key(request_key)
+    return (
+        not os.environ.get("ANTHROPIC_API_KEY")
+        and bool(os.environ.get("OPENROUTER_API_KEY"))
+    )
+
+
+_DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
+
+
+def _resolve_model(name: str) -> str:
+    """Map an Anthropic-native model id to the form the active provider expects.
+
+    OpenRouter doesn't accept bare Anthropic ids like `claude-sonnet-4-20250514`
+    — it wants `anthropic/claude-sonnet-4`. When the request is going to
+    OpenRouter and the configured model isn't already namespaced, strip any
+    `-YYYYMMDD` suffix and prefix `anthropic/`. Direct-Anthropic calls are
+    unchanged."""
+    if not _is_request_using_openrouter():
+        return name
+    if "/" in name:
+        return name
+    return f"anthropic/{_DATE_SUFFIX_RE.sub('', name)}"
+
+
 def get_creativity() -> float:
     if _cached_settings and "creativity" in _cached_settings:
         return float(_cached_settings["creativity"])
@@ -136,6 +173,41 @@ class LLMBillingError(Exception):
         self.provider = provider
 
 
+class LLMAuthError(Exception):
+    """Raised when the provider rejects the API key (wrong key, key for the
+    wrong provider, or model id the provider doesn't recognize). Surfaces as
+    HTTP 401 so the frontend's existing 'invalid key' path catches it instead
+    of falling through to a generic 500."""
+
+    def __init__(self, message: str, provider: str = "anthropic"):
+        super().__init__(message)
+        self.provider = provider
+
+
+def _current_provider() -> str:
+    return "openrouter" if _is_request_using_openrouter() else "anthropic"
+
+
+def _is_auth_error(err: Exception) -> bool:
+    """Detect auth/model-id failures across providers. Anthropic and OpenRouter
+    both return 4xx with a textual body — no shared error class."""
+    msg = str(err).lower()
+    needles = (
+        "authentication",
+        "missing authentication header",
+        "invalid api key",
+        "invalid_api_key",
+        "invalid x-api-key",
+        "unauthorized",
+        "user_not_found",
+        "no auth credentials",
+        "model not found",
+        "no endpoints found",
+        "not a valid model",
+    )
+    return any(n in msg for n in needles)
+
+
 def _is_billing_error(err: Exception) -> bool:
     """Detect 'out of credits' / 'billing' style errors from Anthropic and
     OpenRouter. Both providers return 400-class errors with a textual body
@@ -160,21 +232,28 @@ def _call_llm(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
     # Map creativity (0-1) to temperature (0-1)
     temperature = creativity
 
-    logger.info(f"_call_llm: model={model}, max_tokens={max_tokens}, prompt_len={len(prompt)}")
+    resolved_model = _resolve_model(model)
+    logger.info(
+        f"_call_llm: model={model}, resolved={resolved_model}, "
+        f"provider={_current_provider()}, max_tokens={max_tokens}, "
+        f"prompt_len={len(prompt)}"
+    )
     start = time.time()
     try:
         response = get_client().messages.create(
-            model=model,
+            model=resolved_model,
             max_tokens=max_tokens,
             temperature=temperature,
             messages=[{"role": "user", "content": prompt}],
         )
     except Exception as e:
         logger.error(f"_call_llm FAILED: {type(e).__name__}: {e}")
-        # Translate billing-style failures into a typed exception so the API
-        # layer can return a friendly 402 instead of a generic 500.
+        # Translate provider 4xx failures into typed exceptions so the API
+        # layer can return a friendly 402/401 instead of a generic 500.
         if _is_billing_error(e):
-            raise LLMBillingError(str(e)) from e
+            raise LLMBillingError(str(e), provider=_current_provider()) from e
+        if _is_auth_error(e):
+            raise LLMAuthError(str(e), provider=_current_provider()) from e
         raise
     elapsed_ms = int((time.time() - start) * 1000)
     logger.info(f"_call_llm: OK in {elapsed_ms}ms, output_tokens={response.usage.output_tokens}")
@@ -208,14 +287,16 @@ def _call_llm_cached(prefix: str, suffix: str, max_tokens: int = 4096) -> tuple[
     creativity = get_creativity()
     temperature = creativity
 
+    resolved_model = _resolve_model(model)
     logger.info(
-        f"_call_llm_cached: model={model}, max_tokens={max_tokens}, "
+        f"_call_llm_cached: model={model}, resolved={resolved_model}, "
+        f"provider={_current_provider()}, max_tokens={max_tokens}, "
         f"prefix_len={len(prefix)}, suffix_len={len(suffix)}"
     )
     start = time.time()
     try:
         response = get_client().messages.create(
-            model=model,
+            model=resolved_model,
             max_tokens=max_tokens,
             temperature=temperature,
             messages=[
@@ -235,7 +316,9 @@ def _call_llm_cached(prefix: str, suffix: str, max_tokens: int = 4096) -> tuple[
     except Exception as e:
         logger.error(f"_call_llm_cached FAILED: {type(e).__name__}: {e}")
         if _is_billing_error(e):
-            raise LLMBillingError(str(e)) from e
+            raise LLMBillingError(str(e), provider=_current_provider()) from e
+        if _is_auth_error(e):
+            raise LLMAuthError(str(e), provider=_current_provider()) from e
         raise
     elapsed_ms = int((time.time() - start) * 1000)
     usage = response.usage
@@ -388,18 +471,23 @@ async def call_generate_suggestions(state: SessionState) -> tuple[tuple[list[Sug
     text, meta = _call_llm(prompt, max_tokens=1024)
     data = _extract_json(text)
 
+    # Defensive: some providers/models occasionally emit entries missing
+    # required fields. Drop those instead of 500-ing the whole turn — losing
+    # one suggestion is better than the user retrying the entire charter gen.
     suggestions = [
         Suggestion(
-            section=s["section"],
-            text=s["text"],
+            section=s.get("section", ""),
+            text=s.get("text", ""),
             good=s.get("good"),
             bad=s.get("bad"),
         )
         for s in data.get("suggestions", [])
+        if isinstance(s, dict) and s.get("section") and s.get("text")
     ]
     suggested_stories = [
-        SuggestedStory(who=s["who"], what=s["what"], why=s.get("why", ""))
+        SuggestedStory(who=s.get("who", ""), what=s.get("what", ""), why=s.get("why", ""))
         for s in data.get("user_stories", [])
+        if isinstance(s, dict) and s.get("who") and s.get("what")
     ]
     return (_dedupe_suggestions(suggestions), _dedupe_stories(suggested_stories)), [meta]
 
