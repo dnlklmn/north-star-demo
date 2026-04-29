@@ -1251,25 +1251,16 @@ export default function EvaluatePanel({
             )
           })()}
 
-          {/* --- Braintrust run section --- */}
-          <section>
-            <div className="flex items-center gap-2 mb-3">
-              <div className="w-8 h-8 bg-accent/10 flex items-center justify-center">
-                <PlayCircle className="w-4 h-4 text-accent" />
-              </div>
-              <div>
-                <h3 className="text-sm font-semibold text-foreground">Run with Braintrust</h3>
-                <p className="text-xs text-muted-foreground">
-                  {isPromptEval
-                    ? "Replays the prompt under test against each sampled turn snapshot, scores with the project's scorers, streams results into Braintrust."
-                    : "Runs each approved dataset row through Claude with your SKILL.md as system prompt, scores with the charter's scorers, streams results into Braintrust."}
-                </p>
-              </div>
-            </div>
-
+          {/* --- Run config row — single horizontal strip with the three
+              fields the user actually changes (limit, judge, off-target),
+              big purple Run button on the right. PROJECT/EXPERIMENT moved
+              to "More options" since they have sensible defaults the user
+              rarely touches. The page title + description above replaces
+              the old "Run with Braintrust" section header. */}
+          <section className="space-y-3 mb-8">
             {/* Readiness — list of missing preconditions with fix-it buttons */}
             {blockers.length > 0 && (
-              <ul className="mb-3 space-y-1">
+              <ul className="space-y-1">
                 {blockers.map((b) => (
                   <li
                     key={b.id}
@@ -1294,7 +1285,7 @@ export default function EvaluatePanel({
             {/* Missing Braintrust key — full-width banner routes the user to
                 Settings rather than cluttering the run panel with a key input. */}
             {!keySaved && (
-              <div className="mb-3 flex items-center justify-between gap-3 px-3 py-2 bg-warning/10 border border-warning/30 text-xs">
+              <div className="flex items-center justify-between gap-3 px-3 py-2 bg-warning/10 border border-warning/30 text-xs">
                 <div className="flex items-center gap-2 min-w-0">
                   <KeyRound className="w-3.5 h-3.5 text-warning flex-shrink-0" />
                   <span className="text-foreground truncate">
@@ -1313,34 +1304,10 @@ export default function EvaluatePanel({
               </div>
             )}
 
-            {/* Run config */}
-            <div className="grid grid-cols-2 gap-3 mb-3">
-              <div>
-                <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide block mb-1">
-                  Project
-                </label>
-                <input
-                  type="text"
-                  value={project}
-                  onChange={(e) => setProject(e.target.value)}
-                  placeholder="northstar-eval"
-                  className="w-full text-xs bg-background border border-border px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-accent"
-                />
-              </div>
-              <div>
-                <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide block mb-1">
-                  Experiment (optional)
-                </label>
-                <input
-                  type="text"
-                  value={experiment}
-                  onChange={(e) => setExperiment(e.target.value)}
-                  placeholder="auto"
-                  className="w-full text-xs bg-background border border-border px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-accent"
-                />
-              </div>
-              <div>
-                <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide block mb-1">
+            {/* Compact run-config row */}
+            <div className="flex items-end gap-4 flex-wrap">
+              <div className="flex flex-col gap-1.5 w-[140px]">
+                <label className="text-[10px] font-semibold text-fg-dim uppercase tracking-wide">
                   Limit (rows)
                 </label>
                 <input
@@ -1349,109 +1316,149 @@ export default function EvaluatePanel({
                   value={limit}
                   onChange={(e) => setLimit(e.target.value)}
                   placeholder={`${approvedCount} approved`}
-                  className="w-full text-xs bg-background border border-border px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-accent"
+                  className="w-full text-sm bg-fill-dip border border-border-hint px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-fill-primary"
                 />
               </div>
-              {!isPromptEval && (
-                <div className="flex items-end">
-                  <label
-                    className="flex items-center gap-2 text-xs text-foreground cursor-pointer"
-                    title="Off-target rows have no expected_output — this will just log what Claude produces, not score it. Use skill-creator for proper routing evals."
-                  >
-                    <input
-                      type="checkbox"
-                      checked={includeTriggering}
-                      onChange={(e) => setIncludeTriggering(e.target.checked)}
-                      className="w-3.5 h-3.5"
-                    />
-                    Include off-target rows (should NOT trigger)
-                  </label>
-                </div>
-              )}
-              <div className="col-span-2">
+
+              <div className="flex flex-col gap-1.5 flex-1 min-w-[200px]">
                 <label
-                  className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide block mb-1"
+                  className="text-[10px] font-semibold text-fg-dim uppercase tracking-wide"
                   title="Model used to grade scorer outputs. Anthropic judges work out of the box; non-Claude (OpenRouter) options require an sk-or-... key in Settings."
                 >
                   Judge model
                 </label>
-                {/* Always show the picker — Anthropic judges work without an
-                    OpenRouter key. Non-Anthropic options stay disabled until
-                    an sk-or-... key is configured. Routing for the selected
-                    model (direct Anthropic vs via OpenRouter) is summarized
-                    in the status line below. */}
                 <select
                   value={judgeModel}
                   onChange={(e) => updateJudgeModel(e.target.value)}
-                  className="w-full text-xs bg-background border border-border px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-accent"
+                  className="w-full text-sm bg-fill-dip border border-border-hint px-3 py-2.5 focus:outline-none focus:ring-1 focus:ring-fill-primary"
                 >
                   {JUDGE_MODEL_OPTIONS.map((opt) => {
                     const needsOR = opt.provider === 'openrouter'
                     const disabled = needsOR && !hasOpenRouterKey
                     return (
-                      <option
-                        key={opt.label}
-                        value={opt.value ?? ''}
-                        disabled={disabled}
-                      >
+                      <option key={opt.label} value={opt.value ?? ''} disabled={disabled}>
                         {opt.label}
                       </option>
                     )
                   })}
                 </select>
-                {(() => {
-                  // Tell the user which API the selected judge will hit:
-                  //   - With an sk-or-... key, EVERY model routes via OpenRouter
-                  //     (Anthropic ones included — OpenRouter proxies them).
-                  //   - Without one, only Anthropic-native options work; OR
-                  //     options are disabled and we surface the upgrade path.
-                  const selectedOpt = JUDGE_MODEL_OPTIONS.find(o => (o.value ?? '') === judgeModel) || JUDGE_MODEL_OPTIONS[0]
-                  if (hasOpenRouterKey) {
-                    return (
-                      <p className="mt-1 text-[10px] text-muted-foreground">
-                        Routes via OpenRouter (your stored API key is sk-or-…).
-                      </p>
-                    )
-                  }
-                  if (selectedOpt.provider === 'openrouter') {
-                    return (
-                      <button
-                        onClick={onOpenSettings}
-                        className="mt-1 inline-flex items-center gap-1 text-[10px] text-warning hover:text-foreground"
-                      >
-                        <SettingsIcon className="w-3 h-3" />
-                        This judge needs an OpenRouter key — add one in Settings.
-                      </button>
-                    )
-                  }
-                  return (
-                    <p className="mt-1 text-[10px] text-muted-foreground">
-                      Routes direct to Anthropic. Add an OpenRouter key in Settings to also evaluate with GPT, Gemini, Llama.
-                    </p>
-                  )
-                })()}
               </div>
+
+              {!isPromptEval && (
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-[10px] font-semibold text-fg-dim uppercase tracking-wide">
+                    Off-target rows
+                  </label>
+                  <div className="inline-flex border border-border-hint p-0.5">
+                    <button
+                      type="button"
+                      onClick={() => setIncludeTriggering(false)}
+                      className={`px-3 py-2 text-sm font-medium ${
+                        !includeTriggering
+                          ? 'bg-fill-neutral text-fg-contrast'
+                          : 'text-fg-dim hover:text-fg-contrast'
+                      }`}
+                    >
+                      Exclude
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIncludeTriggering(true)}
+                      className={`px-3 py-2 text-sm font-medium ${
+                        includeTriggering
+                          ? 'bg-fill-neutral text-fg-contrast'
+                          : 'text-fg-dim hover:text-fg-contrast'
+                      }`}
+                    >
+                      Include
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <button
+                onClick={handleRun}
+                disabled={!canRun}
+                className={`inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold ${
+                  canRun
+                    ? 'bg-fill-primary text-bg-default hover:opacity-90 cursor-pointer'
+                    : 'bg-fill-neutral text-fg-dim cursor-not-allowed'
+                }`}
+              >
+                {starting || (activeRun && !TERMINAL_STATUSES.has(activeRun.status)) ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Sparkles className="w-4 h-4" />
+                )}
+                Run evaluation
+              </button>
             </div>
 
-            <button
-              onClick={handleRun}
-              disabled={!canRun}
-              className={`inline-flex items-center gap-2 px-4 py-2 text-sm font-medium ${
-                canRun
-                  ? 'bg-accent text-accent-foreground hover:opacity-90 cursor-pointer'
-                  : 'bg-muted text-muted-foreground cursor-not-allowed'
-              }`}
-            >
-              {starting || (activeRun && !TERMINAL_STATUSES.has(activeRun.status)) ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <PlayCircle className="w-4 h-4" />
-              )}
-              Run evaluation
-            </button>
-            {startError && (
-              <p className="mt-2 text-xs text-danger">{startError}</p>
-            )}
+            {/* Judge routing hint sits under the row so it doesn't widen any column */}
+            {(() => {
+              const selectedOpt =
+                JUDGE_MODEL_OPTIONS.find((o) => (o.value ?? '') === judgeModel) ||
+                JUDGE_MODEL_OPTIONS[0]
+              if (hasOpenRouterKey) {
+                return (
+                  <p className="text-[10px] text-fg-dim">
+                    Routes via OpenRouter (your stored API key is sk-or-…).
+                  </p>
+                )
+              }
+              if (selectedOpt.provider === 'openrouter') {
+                return (
+                  <button
+                    onClick={onOpenSettings}
+                    className="inline-flex items-center gap-1 text-[10px] text-warning hover:text-fg-contrast"
+                  >
+                    <SettingsIcon className="w-3 h-3" />
+                    This judge needs an OpenRouter key — add one in Settings.
+                  </button>
+                )
+              }
+              return (
+                <p className="text-[10px] text-fg-dim">
+                  Routes direct to Anthropic. Add an OpenRouter key in Settings to also evaluate with GPT, Gemini, Llama.
+                </p>
+              )
+            })()}
+
+            {/* Project + experiment overrides — collapsed by default */}
+            <details className="text-xs">
+              <summary className="cursor-pointer text-fg-dim hover:text-fg-contrast inline-flex items-center gap-1.5">
+                <ChevronDown className="w-3.5 h-3.5" />
+                More options (project, experiment name)
+              </summary>
+              <div className="grid grid-cols-2 gap-3 mt-3">
+                <div>
+                  <label className="text-[10px] font-semibold text-fg-dim uppercase tracking-wide block mb-1">
+                    Project
+                  </label>
+                  <input
+                    type="text"
+                    value={project}
+                    onChange={(e) => setProject(e.target.value)}
+                    placeholder="northstar-eval"
+                    className="w-full text-sm bg-fill-dip border border-border-hint px-3 py-2 focus:outline-none focus:ring-1 focus:ring-fill-primary"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] font-semibold text-fg-dim uppercase tracking-wide block mb-1">
+                    Experiment (optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={experiment}
+                    onChange={(e) => setExperiment(e.target.value)}
+                    placeholder="auto"
+                    className="w-full text-sm bg-fill-dip border border-border-hint px-3 py-2 focus:outline-none focus:ring-1 focus:ring-fill-primary"
+                  />
+                </div>
+              </div>
+            </details>
+
+            {startError && <p className="text-xs text-danger">{startError}</p>}
           </section>
 
           {/* --- Active run status --- */}
