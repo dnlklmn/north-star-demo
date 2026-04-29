@@ -1757,18 +1757,19 @@ export default function EvaluatePanel({
                      </section>
           )}
 
-          {/* --- Run history --- always visible once the user has an API
-               key saved, so they can see runs from this session and tell
-               immediately if fetching failed. Shows all runs including the
-               currently-viewed one (marked as 'viewing'). */}
+          {/* --- Run history --- restyled to status-dot + name + score
+               percentage, with inline metadata (Skill: vN, Judge: model)
+               below each run name. Click a row to make it active and see
+               its per-scorer table inline (the active-run details section
+               above renders against activeRun). */}
           <section>
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-[10px] font-semibold text-fg-dim uppercase tracking-wider">
                 Run history
               </h3>
               <button
                 onClick={() => refreshRuns()}
-                className="text-[10px] uppercase tracking-wide text-muted-foreground hover:text-foreground"
+                className="text-[10px] uppercase tracking-wide text-fg-dim hover:text-fg-contrast"
                 title="Refresh history from the server"
               >
                 Refresh
@@ -1780,83 +1781,129 @@ export default function EvaluatePanel({
               </div>
             )}
             {runs.length === 0 && !runsError && (
-              <p className="text-xs text-muted-foreground/70 italic">
-                No runs yet — start one above.
-              </p>
+              <p className="text-xs text-fg-dim italic">No runs yet — start one above.</p>
             )}
             {runs.length > 0 && (
-              <ul className="space-y-1">
+              <ul className="space-y-0.5">
                 {runs.map((r) => {
                   const isActive = activeRun?.run_id === r.run_id
+                  // Status dot color — green dot for healthy runs, red for
+                  // any errored/cancelled state, yellow while running.
+                  const dotColor =
+                    r.status === 'done'
+                      ? 'bg-success'
+                      : r.status === 'error' || r.status === 'failed'
+                        ? 'bg-danger'
+                        : r.status === 'cancelled'
+                          ? 'bg-fg-dim'
+                          : 'bg-warning'
+                  // Avg score (mean of per-scorer averages) — drives the
+                  // colored badge on the right.
+                  const meanScore = (() => {
+                    if (r.status !== 'done') return null
+                    const vals = Object.values(r.scorer_averages)
+                    if (!vals.length) return null
+                    return vals.reduce((a, b) => a + b, 0) / vals.length
+                  })()
+                  const scoreBadgeBg =
+                    meanScore == null
+                      ? 'bg-fill-neutral text-fg-dim'
+                      : meanScore >= 0.8
+                        ? 'bg-success/20 text-success'
+                        : meanScore >= 0.5
+                          ? 'bg-warning/20 text-warning'
+                          : 'bg-danger/20 text-danger'
+                  // Skill version → derive Active/Candidate/Latest tag the way
+                  // the design shows it.
+                  const skillTag =
+                    r.skill_version_id === candidateVersionId
+                      ? 'Candidate'
+                      : r.skill_version_id === activeVersionId
+                        ? 'Active'
+                        : null
                   return (
                     <li
                       key={r.run_id}
                       onClick={() => setActiveRun(r)}
-                      className={`flex items-center justify-between text-xs px-3 py-2 cursor-pointer ${
+                      className={`px-4 py-3 cursor-pointer ${
                         isActive
-                          ? 'bg-accent/10 border-l-2 border-accent'
-                          : 'bg-muted/20 hover:bg-muted/40'
+                          ? 'bg-fill-neutral/40'
+                          : 'bg-fill-neutral/20 hover:bg-fill-neutral/30'
                       }`}
                     >
-                      <div className="min-w-0 flex-1">
-                        <p className="text-foreground truncate flex items-center gap-2 flex-wrap">
-                          {isActive && (
-                            <span className="font-mono text-[10px] uppercase px-1 bg-accent/20 text-accent">
-                              viewing
-                            </span>
+                      <div className="flex items-center gap-3">
+                        <span
+                          className={`w-2 h-2 rounded-full flex-shrink-0 ${dotColor}`}
+                          title={r.status}
+                        />
+                        <span className="text-sm font-semibold text-fg-contrast truncate flex-1">
+                          {r.project}
+                          {r.experiment_name && (
+                            <span className="text-fg-dim font-normal"> · {r.experiment_name}</span>
                           )}
-                          <span>{r.project}</span>
-                          {r.experiment_name && <span>· {r.experiment_name}</span>}
-                          {r.skill_version_number != null && (
-                            <span className="font-mono text-[10px] uppercase px-1 bg-muted/40 text-muted-foreground">
-                              SKILL v{r.skill_version_number}
-                            </span>
-                          )}
-                          {judgeLabel(r.judge_model_used) && (
-                            <span
-                              className="font-mono text-[10px] uppercase px-1 bg-muted/40 text-muted-foreground"
-                              title="Judge model used to grade this run"
-                            >
-                              JUDGE: {judgeLabel(r.judge_model_used)}
-                            </span>
-                          )}
-                        </p>
-                        <p className="text-muted-foreground">
-                          {formatWhen(r.started_at)} · {r.rows_evaluated}/{r.rows_total} rows
-                          {r.status === 'done' && Object.keys(r.scorer_averages).length > 0 && (() => {
-                            const vals = Object.values(r.scorer_averages)
-                            const mean = vals.reduce((a, b) => a + b, 0) / vals.length
-                            return <> · avg {(mean * 100).toFixed(0)}%</>
-                          })()}
-                        </p>
-                      </div>
-                      {r.charter_snapshot && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            setViewingCharter({
-                              charter: r.charter_snapshot as Charter,
-                              title: `Charter used for this run`,
-                              subtitle: `${r.project}${r.experiment_name ? ' · ' + r.experiment_name : ''}${r.skill_version_number != null ? ' · SKILL v' + r.skill_version_number : ''}`,
-                            })
-                          }}
-                          className="ml-2 p-1 text-muted-foreground hover:text-foreground"
-                          title="View the charter this run evaluated"
+                        </span>
+                        <span className="text-sm text-fg-dim/70 flex-shrink-0">
+                          {r.rows_evaluated}/{r.rows_total} rows
+                        </span>
+                        <span
+                          className={`font-mono text-sm font-semibold px-2 py-0.5 flex-shrink-0 ${scoreBadgeBg}`}
                         >
-                          <FileText className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                      <span
-                        className={`ml-3 font-mono text-[10px] uppercase px-1.5 py-0.5 ${
-                          r.status === 'done'
-                            ? 'bg-success/15 text-success'
-                            : r.status === 'error'
-                              ? 'bg-danger/15 text-danger'
-                              : 'bg-accent/15 text-accent'
-                        }`}
-                      >
-                        {r.status}
-                      </span>
+                          {meanScore == null
+                            ? r.status.toUpperCase()
+                            : `${(meanScore * 100).toFixed(0)}%`}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-4 mt-1.5 ml-5 text-xs text-fg-dim flex-wrap">
+                        {r.skill_version_number != null && (
+                          <span className="text-fg-contrast">
+                            <span className="text-fg-dim">Skill:</span>{' '}
+                            <span className="font-semibold">v{r.skill_version_number}</span>
+                            {skillTag && (
+                              <span className="ml-1 font-mono text-[10px] uppercase px-1 py-0.5 bg-fill-neutral/60 text-fg-dim">
+                                {skillTag}
+                              </span>
+                            )}
+                          </span>
+                        )}
+                        {judgeLabel(r.judge_model_used) && (
+                          <span className="text-fg-contrast">
+                            <span className="text-fg-dim">Judge:</span>{' '}
+                            <span className="font-semibold">
+                              {judgeLabel(r.judge_model_used)}
+                            </span>
+                          </span>
+                        )}
+                        {r.charter_snapshot && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setViewingCharter({
+                                charter: r.charter_snapshot as Charter,
+                                title: `Charter used for this run`,
+                                subtitle: `${r.project}${r.experiment_name ? ' · ' + r.experiment_name : ''}${r.skill_version_number != null ? ' · SKILL v' + r.skill_version_number : ''}`,
+                              })
+                            }}
+                            className="inline-flex items-center gap-1 font-mono text-fg-dim hover:text-fg-contrast"
+                            title="View the charter this run evaluated"
+                          >
+                            <FileText className="w-3.5 h-3.5" />
+                            View charter
+                          </button>
+                        )}
+                        {r.experiment_url && (
+                          <a
+                            href={r.experiment_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="inline-flex items-center gap-1 font-mono text-fg-dim hover:text-fg-contrast"
+                          >
+                            View in braintrust
+                            <ExternalLink className="w-3.5 h-3.5" />
+                          </a>
+                        )}
+                      </div>
                     </li>
                   )
                 })}
