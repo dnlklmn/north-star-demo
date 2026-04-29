@@ -62,11 +62,15 @@ from .models import (
     PatchCharterRequest,
     ProceedResponse,
     ProjectSummary,
+    PromptTargetInfo,
+    CreatePromptEvalRequest,
+    CreatePromptEvalResponse,
     RestoreSkillVersionRequest,
     RunEvalRequest,
     SendMessageRequest,
     SendMessageResponse,
     SessionState,
+    SessionKind,
     SetModeRequest,
     Settings,
     SkillSeedRequest,
@@ -87,6 +91,7 @@ from .models import (
     UpdateSettingsRequest,
     ValidateResponse,
 )
+from .prompt_eval import get_prompt_target, list_prompt_targets
 from .tools import (
     LLMBillingError,
     call_suggest_goals,
@@ -95,6 +100,7 @@ from .tools import (
     call_validate_charter,
     call_generate_suggestions,
     call_synthesize_examples,
+    call_retag_examples_against_charter,
     call_review_examples,
     call_gap_analysis,
     call_generate_scorers,
@@ -177,12 +183,36 @@ app.add_middleware(ApiKeyMiddleware)
 # --- Helpers ---
 
 async def _load_state(session_id: str) -> tuple[SessionState, list[dict]]:
-    """Load session state from DB, raise 404 if not found."""
+    """Load session state from DB, raise 404 if not found.
+
+    Backfills prompt-eval metadata (prompt_source_path / prompt_builder_name)
+    from the registry for sessions created before those fields existed, so
+    the Prompt panel can show provenance without forcing the user to recreate.
+    Persists silently — no separate migration step needed.
+    """
     row = await db.get_session(session_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Session not found")
     state = SessionState.model_validate(row["state"])
     conversation = row["conversation"]
+
+    if (
+        state.kind == SessionKind.prompt
+        and state.prompt_target
+        and (not state.prompt_source_path or not state.prompt_builder_name)
+    ):
+        pt = get_prompt_target(state.prompt_target)
+        if pt is not None:
+            mutated = False
+            if not state.prompt_source_path and pt.source_path:
+                state.prompt_source_path = pt.source_path
+                mutated = True
+            if not state.prompt_builder_name and pt.builder_name:
+                state.prompt_builder_name = pt.builder_name
+                mutated = True
+            if mutated:
+                await db.update_session(session_id, state.model_dump(), conversation)
+
     return state, conversation
 
 
@@ -351,6 +381,8 @@ async def list_sessions():
             agent_status=r["agent_status"],
             has_charter=r.get("has_charter", False),
             has_dataset=r.get("has_dataset", False),
+            kind=r.get("kind", "skill"),
+            prompt_target=r.get("prompt_target"),
         )
         for r in rows
     ]
@@ -503,6 +535,247 @@ async def seed_from_skill(session_id: str, req: SkillSeedRequest):
     )
 
 
+# --- Prompt-eval (eval North Star's own prompts) ---
+
+@app.get("/prompt-targets", response_model=list[PromptTargetInfo])
+async def list_prompt_targets_endpoint():
+    """List the North Star prompts that can be evaluated."""
+    return [PromptTargetInfo(**info) for info in list_prompt_targets()]
+
+
+@app.post("/sessions/prompt-eval", response_model=CreatePromptEvalResponse)
+async def create_prompt_eval_session(req: CreatePromptEvalRequest):
+    """Spin up a prompt-eval project end-to-end.
+
+    Creates a kind='prompt' session that mirrors a regular skill-eval workspace:
+    a synthetic SKILL.md describing the prompt under test seeds goals/users/
+    stories via call_skill_seed; sampled turns of that prompt's turn_type land
+    in the dataset. The user reviews + advances through Goals → Users →
+    Charter → Scorers → Evaluate exactly like a skill eval. The eval runner
+    diverges only at task time — instead of running skill_body as a system
+    prompt, it rebuilds SessionState and re-invokes the prompt builder.
+    """
+    pt = get_prompt_target(req.prompt_target)
+    if pt is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown prompt_target '{req.prompt_target}'. "
+                   f"Known: {[t['target'] for t in list_prompt_targets()]}",
+        )
+
+    sample_size = max(1, min(200, req.sample_size or 30))
+    session_id = str(uuid.uuid4())
+
+    # Initial state: marked as kind=prompt + triggered eval mode (so the Skill
+    # tab is visible — the synthetic body lives there and explains the prompt
+    # under test). agent_status=review skips the discovery flow; the user
+    # works the populated workspace, not a chat session.
+    state = SessionState(
+        session_id=session_id,
+        agent_status=AgentStatus.review,
+        eval_mode=EvalMode.triggered,
+        kind=SessionKind.prompt,
+        prompt_target=req.prompt_target,
+        prompt_source_path=pt.source_path,
+        prompt_builder_name=pt.builder_name,
+    )
+    # User can paste/edit the prompt body in the create modal. When they do,
+    # use that text for the seed pass + Skill panel. None / empty = registered.
+    seed_body = (req.prompt_body or "").strip() or pt.prompt_text
+
+    state.charter.task.skill_name = pt.label
+    state.charter.task.skill_description = pt.description
+    state.charter.task.skill_body = seed_body
+
+    # Snapshot the prompt text as v1 so lineage banners + version diff
+    # infrastructure work the same as in a regular skill eval.
+    _append_skill_version(
+        state,
+        body=seed_body,
+        created_from="seed",
+        notes=f"Initial render of {pt.builder_name} with placeholder variables.",
+    )
+    _stamp_lineage(state, "goals", "users", "stories")
+
+    name = req.name or f"Prompt eval — {pt.label}"
+    await db.create_session(session_id, state.model_dump(), name=name)
+
+    # Feed the rendered prompt straight into the skill-seed pipeline. This is
+    # the same LLM call the SKILL.md-paste flow makes — the only difference is
+    # the body is the actual prompt under test, not a SKILL.md. ~5–15s but
+    # gives us populated goals/users/stories instead of an empty workspace.
+    try:
+        seed_data, seed_calls = await call_skill_seed(
+            seed_body, pt.label, pt.description,
+        )
+    except Exception:  # noqa: BLE001
+        seed_data, seed_calls = {}, []
+
+    seed_task = seed_data.get("task") or {}
+    if seed_task.get("input_description"):
+        state.charter.task.input_description = seed_task["input_description"]
+    if seed_task.get("output_description"):
+        state.charter.task.output_description = seed_task["output_description"]
+    if seed_task.get("sample_input"):
+        state.charter.task.sample_input = seed_task["sample_input"]
+    if seed_task.get("sample_output"):
+        state.charter.task.sample_output = seed_task["sample_output"]
+
+    goals_lower: set[str] = set()
+    for g in seed_data.get("goals", []) or []:
+        if g and g.lower() not in goals_lower:
+            state.extracted_goals.append(g)
+            goals_lower.add(g.lower())
+
+    users_lower: set[str] = set()
+    for u in seed_data.get("users", []) or []:
+        if u and u.lower() not in users_lower:
+            state.extracted_users.append(u)
+            users_lower.add(u.lower())
+
+    story_keys: set[tuple[str, str]] = set()
+    for s in seed_data.get("positive_stories", []) or []:
+        if s.get("who") and s.get("what"):
+            key = (s["who"].lower(), s["what"].lower().strip()[:40])
+            if key not in story_keys:
+                state.extracted_stories.append({**s, "kind": "positive"})
+                story_keys.add(key)
+    for s in seed_data.get("off_target_stories", []) or []:
+        if s.get("who") and s.get("what"):
+            key = (s["who"].lower(), s["what"].lower().strip()[:40])
+            if key not in story_keys:
+                state.extracted_stories.append({**s, "kind": "off_target"})
+                story_keys.add(key)
+
+    # Mirror into the structured input fields the UI reads.
+    state.input.goals = list(state.extracted_goals)
+    role_to_stories: dict[str, list[dict]] = {}
+    for s in state.extracted_stories:
+        who = s.get("who", "").strip()
+        if not who:
+            continue
+        role_to_stories.setdefault(who, []).append({
+            "what": s.get("what", ""),
+            "why": s.get("why", ""),
+            "kind": s.get("kind", "positive"),
+        })
+    state.input.story_groups = [
+        {"role": role, "stories": stories} for role, stories in role_to_stories.items()
+    ]
+
+    # Also populate the free-form text fields that build_generate_draft_prompt
+    # reads from. Without this, "Generate charter" sees an empty input and
+    # produces an empty charter, which then breaks gap analysis downstream.
+    # Mirrors agent._build_input_from_extractions exactly.
+    if state.extracted_goals:
+        state.input.business_goals = "\n".join(f"- {g}" for g in state.extracted_goals)
+    if state.extracted_stories:
+        story_lines = []
+        for s in state.extracted_stories:
+            who = s.get("who", "user")
+            what = s.get("what", "")
+            why = s.get("why", "")
+            story_lines.append(f"As a {who}, I want to {what}" + (f", so that {why}" if why else ""))
+        state.input.user_stories = "\n".join(story_lines)
+
+    await _save_state(session_id, state, [])
+
+    if seed_calls:
+        await db.create_turn(
+            session_id=session_id,
+            turn_type="skill_seed",
+            input_snapshot={
+                "prompt_target": req.prompt_target,
+                "prompt_text_len": len(seed_body),
+            },
+            llm_calls=seed_calls,
+            parsed_output=seed_data,
+        )
+
+    # Sample turns. Excluding self is moot today (state has no turns yet)
+    # but matters once re-runs land their own generate-style turns.
+    sampled = await db.sample_turns_for_prompt_eval(
+        turn_type=req.prompt_target,
+        limit=sample_size * 3,
+        exclude_session_id=session_id,
+    )
+
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for t in sampled:
+        snap = t.get("input_snapshot") or {}
+        key = json.dumps(snap, sort_keys=True)[:1000]
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(t)
+        if len(deduped) >= sample_size:
+            break
+
+    dataset = await db.create_dataset(
+        session_id=session_id,
+        name=f"{pt.label} — sampled turns",
+        charter_snapshot={},
+    )
+
+    # feature_area: bucket rows by a coarse signal so the dataset table isn't
+    # 21 identical-looking rows. For the generate target the obvious signal
+    # is "did the user supply only goals, only stories, or both" — that maps
+    # directly to which charter dimensions the prompt has signal for.
+    def _bucket_for_generate(snap: dict) -> str:
+        has_goals = bool((snap.get("business_goals") or "").strip())
+        has_stories = bool((snap.get("user_stories") or "").strip())
+        if has_goals and has_stories:
+            return "goals+stories"
+        if has_goals:
+            return "goals_only"
+        if has_stories:
+            return "stories_only"
+        return "empty_input"
+
+    bucket_fn = _bucket_for_generate if req.prompt_target == "generate" else (lambda s: req.prompt_target)
+
+    example_rows: list[dict] = []
+    for t in deduped:
+        snap = t.get("input_snapshot") or {}
+        # Historical agent_message lives on the turn but generate-style turns
+        # store the produced charter under parsed_output instead. Capture
+        # whichever is present so the user can see what was produced before
+        # — useful as a comparison even when scorers are reference-free.
+        historical = t.get("agent_message") or ""
+        if not historical:
+            parsed = t.get("parsed_output")
+            if isinstance(parsed, (dict, list)):
+                historical = json.dumps(parsed)[:4000]
+            elif isinstance(parsed, str):
+                historical = parsed[:4000]
+        example_rows.append({
+            "feature_area": bucket_fn(snap),
+            "input": json.dumps(snap),
+            "expected_output": historical,
+            "coverage_tags": ["prompt-eval", req.prompt_target],
+            "source": "turns_sample",
+            "label": "unlabeled",
+            "review_status": "approved",
+        })
+    if example_rows:
+        await db.bulk_create_examples(dataset["id"], example_rows)
+        await db.update_dataset_stats(dataset["id"])
+
+    return CreatePromptEvalResponse(
+        session_id=session_id,
+        prompt_target=req.prompt_target,
+        rows_sampled=len(sampled),
+        rows_deduped=len(deduped),
+        dataset_id=dataset["id"],
+        message=(
+            f"Seeded goals/users/stories from synthetic description, sampled "
+            f"{len(sampled)} turns, deduped to {len(deduped)}. Generate the "
+            f"charter and scorers next."
+        ),
+    )
+
+
 @app.patch("/sessions/{session_id}/scorers")
 async def update_session_scorers(session_id: str, body: dict):
     """Save generated scorers to session state."""
@@ -544,8 +817,56 @@ async def delete_session(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
 
 
+async def _retag_dataset_after_charter(session_id: str, charter: dict) -> None:
+    """Background: re-tag a prompt-eval dataset against a freshly-generated
+    charter so the Coverage Map matrix lines up with the charter's axes.
+
+    Safe to fire-and-forget — failures are logged but don't surface to the
+    user. The user can also re-run manually via the dataset endpoint.
+    """
+    try:
+        dataset = await db.get_dataset_by_session(session_id)
+        if dataset is None:
+            return
+        # Refresh the charter_snapshot first — gap_analysis and scorers read
+        # from there, and it was set to {} at session-create time (before the
+        # charter existed).
+        await db.update_dataset_charter_snapshot(dataset["id"], charter)
+        examples = await db.get_examples(dataset["id"])
+        if not examples:
+            return
+        batch_size = 10
+        for i in range(0, len(examples), batch_size):
+            batch = examples[i:i + batch_size]
+            retags, call_meta = await call_retag_examples_against_charter(charter, batch)
+            for r in retags:
+                eid = r.get("example_id")
+                if not eid:
+                    continue
+                update_fields: dict = {}
+                fa = r.get("feature_area")
+                if isinstance(fa, str) and fa.strip():
+                    update_fields["feature_area"] = fa.strip()
+                tags = r.get("coverage_tags")
+                if isinstance(tags, list):
+                    update_fields["coverage_tags"] = [t for t in tags if isinstance(t, str) and t.strip()]
+                if update_fields:
+                    await db.update_example(eid, update_fields)
+            await db.create_turn(
+                session_id=session_id,
+                turn_type="retag",
+                input_snapshot={"charter": charter, "example_count": len(batch), "auto": True},
+                llm_calls=call_meta,
+                parsed_output={"retags": retags},
+            )
+        await db.update_dataset_stats(dataset["id"])
+    except Exception:  # noqa: BLE001
+        logger.exception("Auto-retag after charter generation failed for session %s", session_id)
+
+
 @app.post("/sessions/{session_id}/message", response_model=SendMessageResponse)
 async def send_message(session_id: str, req: SendMessageRequest):
+    import asyncio
     state, conversation = await _load_state(session_id)
 
     result = await run_agent_turn(state, req.message, regenerate=req.regenerate)
@@ -557,6 +878,16 @@ async def send_message(session_id: str, req: SendMessageRequest):
         f"Turn complete: session={session_id} status={state.agent_status.value} "
         f"tools={result.tool_calls} rounds={state.rounds_of_questions}"
     )
+
+    # For prompt-eval projects: when the agent just generated a fresh charter,
+    # re-tag the dataset (sampled from `turns`) against the charter's axes so
+    # the Coverage Map matrix becomes meaningful. Fire-and-forget so we don't
+    # add 5–15s to the message turn — the user can refresh the dataset to see
+    # updated tags, or trigger manually via the retag endpoint.
+    if state.kind == SessionKind.prompt and "generate_draft" in result.tool_calls:
+        asyncio.create_task(
+            _retag_dataset_after_charter(session_id, state.charter.model_dump())
+        )
 
     return SendMessageResponse(
         message=result.message,
@@ -1220,6 +1551,169 @@ async def auto_review_examples(dataset_id: str):
     return {"reviewed": len(all_reviews), "reviews": all_reviews}
 
 
+@app.post("/datasets/{dataset_id}/refresh-from-turns")
+async def refresh_dataset_from_turns(dataset_id: str):
+    """Pull any new historical turns into a prompt-eval dataset.
+
+    Re-samples turns matching the session's prompt_target, dedupes against
+    every input already in the dataset, and bulk-inserts the net-new rows
+    with a "new" coverage tag so the UI can flag fresh evidence the user
+    hasn't reviewed yet. Returns counts so callers can render a notice.
+
+    No-op for sessions that aren't kind=prompt — use the manual import flow
+    or synthesize for skill-eval datasets instead.
+    """
+    dataset = await db.get_dataset(dataset_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    state, _ = await _load_state(dataset["session_id"])
+    if state.kind != SessionKind.prompt or not state.prompt_target:
+        return {"added": 0, "total": 0, "message": "Not a prompt-eval dataset"}
+
+    pt = get_prompt_target(state.prompt_target)
+    if pt is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown prompt_target on session: {state.prompt_target}",
+        )
+
+    # Hash every existing example's input so we can skip turns that match.
+    existing = await db.get_examples(dataset_id)
+    existing_hashes: set[str] = set()
+    for ex in existing:
+        existing_hashes.add((ex.get("input") or "")[:1000])
+
+    # Sample widely so dedup has room to work — we'll cap by what's actually new.
+    sampled = await db.sample_turns_for_prompt_eval(
+        turn_type=state.prompt_target,
+        limit=200,
+        exclude_session_id=dataset["session_id"],
+    )
+
+    def _bucket_for_generate(snap: dict) -> str:
+        has_goals = bool((snap.get("business_goals") or "").strip())
+        has_stories = bool((snap.get("user_stories") or "").strip())
+        if has_goals and has_stories:
+            return "goals+stories"
+        if has_goals:
+            return "goals_only"
+        if has_stories:
+            return "stories_only"
+        return "empty_input"
+
+    bucket_fn = _bucket_for_generate if state.prompt_target == "generate" else (lambda s: state.prompt_target)
+
+    new_rows: list[dict] = []
+    seen_in_batch: set[str] = set()
+    for t in sampled:
+        snap = t.get("input_snapshot") or {}
+        input_str = json.dumps(snap)
+        key = input_str[:1000]
+        if key in existing_hashes or key in seen_in_batch:
+            continue
+        seen_in_batch.add(key)
+
+        historical = t.get("agent_message") or ""
+        if not historical:
+            parsed = t.get("parsed_output")
+            if isinstance(parsed, (dict, list)):
+                historical = json.dumps(parsed)[:4000]
+            elif isinstance(parsed, str):
+                historical = parsed[:4000]
+
+        new_rows.append({
+            "feature_area": bucket_fn(snap),
+            "input": input_str,
+            "expected_output": historical,
+            # "new" tag lets the UI badge these rows; the user can clear it
+            # by reviewing/relabeling. Keeps the existing prompt-eval +
+            # target tags alongside.
+            "coverage_tags": ["prompt-eval", state.prompt_target, "new"],
+            "source": "turns_sample",
+            "label": "unlabeled",
+            "review_status": "approved",
+        })
+
+    if new_rows:
+        await db.bulk_create_examples(dataset_id, new_rows)
+        await db.update_dataset_stats(dataset_id)
+
+    return {
+        "added": len(new_rows),
+        "total": len(existing) + len(new_rows),
+        "message": (
+            f"Added {len(new_rows)} new turn{'s' if len(new_rows) != 1 else ''}"
+            if new_rows else "No new turns since last refresh"
+        ),
+    }
+
+
+@app.post("/datasets/{dataset_id}/retag-against-charter")
+async def retag_examples_against_charter(dataset_id: str):
+    """Re-tag every example's feature_area + coverage_tags against the current
+    charter. Built for prompt-eval (where the dataset is sampled from `turns`
+    before the charter exists, so the seeded `feature_area` buckets don't
+    align with the charter's alignment areas), but works for any dataset.
+
+    Idempotent — re-running just refreshes tags against the latest charter.
+    """
+    dataset = await db.get_dataset(dataset_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    state, _ = await _load_state(dataset["session_id"])
+    charter = state.charter.model_dump()
+
+    coverage = (charter.get("coverage") or {}).get("criteria") or []
+    alignment = charter.get("alignment") or []
+    if not coverage and not alignment:
+        raise HTTPException(
+            status_code=400,
+            detail="Charter has no coverage criteria or alignment entries to tag against. Generate the charter first.",
+        )
+
+    # Keep charter_snapshot in sync so /gaps and any scorer-side reads see
+    # today's charter, not whatever was on the dataset at create time.
+    await db.update_dataset_charter_snapshot(dataset_id, charter)
+
+    examples = await db.get_examples(dataset_id)
+    if not examples:
+        return {"retagged": 0, "message": "Dataset is empty"}
+
+    # Batch — same size as auto-review so we share rate-limit characteristics.
+    batch_size = 10
+    all_retags: list[dict] = []
+    for i in range(0, len(examples), batch_size):
+        batch = examples[i:i + batch_size]
+        retags, call_meta = await call_retag_examples_against_charter(charter, batch)
+        for r in retags:
+            eid = r.get("example_id")
+            if not eid:
+                continue
+            update_fields: dict = {}
+            fa = r.get("feature_area")
+            if isinstance(fa, str) and fa.strip():
+                update_fields["feature_area"] = fa.strip()
+            tags = r.get("coverage_tags")
+            if isinstance(tags, list):
+                update_fields["coverage_tags"] = [t for t in tags if isinstance(t, str) and t.strip()]
+            if update_fields:
+                await db.update_example(eid, update_fields)
+        all_retags.extend(retags)
+
+        await db.create_turn(
+            session_id=dataset["session_id"],
+            turn_type="retag",
+            input_snapshot={"charter": charter, "example_count": len(batch)},
+            llm_calls=call_meta,
+            parsed_output={"retags": retags},
+        )
+
+    await db.update_dataset_stats(dataset_id)
+    return {"retagged": len(all_retags), "retags": all_retags}
+
+
 @app.post("/datasets/{dataset_id}/suggest-revisions")
 async def suggest_revisions(dataset_id: str, req: SuggestRevisionsRequest):
     """Suggest revisions for examples that have review issues."""
@@ -1435,6 +1929,7 @@ def _eval_run_to_summary(run: dict) -> EvalRunSummary:
         finished_at=run.get("finished_at"),
         skill_version_id=run.get("skill_version_id"),
         skill_version_number=run.get("skill_version_number"),
+        judge_model_used=run.get("judge_model_used"),
         charter_snapshot=run.get("charter_snapshot"),
         improvement_suggestions=run.get("improvement_suggestions"),
         improvement_summary=run.get("improvement_summary"),
@@ -1449,6 +1944,8 @@ async def _execute_eval_run(
     braintrust_key: str,
     anthropic_key: str | None,
     req: RunEvalRequest,
+    prompt_target: str | None = None,
+    prompt_body_template: str | None = None,
 ) -> None:
     """Background task: runs the blocking eval off the event loop.
 
@@ -1478,6 +1975,8 @@ async def _execute_eval_run(
             judge_model=req.judge_model or DEFAULT_JUDGE_MODEL,
             include_triggering=req.include_triggering,
             limit=req.limit,
+            prompt_target=prompt_target,
+            prompt_body_template=prompt_body_template,
         )
         await db.update_eval_run(run_id, {
             "status": "done",
@@ -1489,6 +1988,24 @@ async def _execute_eval_run(
             "scorer_averages": result.scorer_averages,
             "per_row": result.per_row,
         })
+        # Clear the "new" tag from any rows in this session's dataset that
+        # carried it. They've now been part of an eval run, so they're no
+        # longer fresh-since-last-refresh evidence.
+        try:
+            run_row = await db.get_eval_run(run_id)
+            if run_row:
+                dataset = await db.get_dataset_by_session(run_row["session_id"])
+                if dataset:
+                    examples = await db.get_examples(dataset["id"])
+                    for ex in examples:
+                        tags = ex.get("coverage_tags") or []
+                        if "new" in tags:
+                            await db.update_example(
+                                ex["id"],
+                                {"coverage_tags": [t for t in tags if t != "new"]},
+                            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to clear 'new' tags after eval run %s", run_id)
     except Exception as e:  # noqa: BLE001
         logger.exception("Eval run %s failed", run_id)
         await db.update_eval_run(run_id, {
@@ -1518,8 +2035,9 @@ async def run_eval_for_session(session_id: str, req: RunEvalRequest, request: Re
         )
 
     state, conversation = await _load_state(session_id)
+    is_prompt_eval = state.kind == SessionKind.prompt
     skill_body = state.charter.task.skill_body or ""
-    if not skill_body.strip():
+    if not is_prompt_eval and not skill_body.strip():
         raise HTTPException(
             status_code=400,
             detail="Session has no skill_body on its charter. Seed from a SKILL.md first.",
@@ -1545,23 +2063,32 @@ async def run_eval_for_session(session_id: str, req: RunEvalRequest, request: Re
     # Capture the active SKILL.md version so this run is tied to a specific edit.
     # If the session was seeded before versioning landed, auto-create v1 from
     # the current body so later diffs have something to compare against.
-    active_ver_id = state.active_skill_version_id
+    # Skipped entirely for prompt-eval projects — no SKILL.md is involved.
+    active_ver_id: str | None = None
     active_ver_num: int | None = None
-    if not state.skill_versions:
-        record = _append_skill_version(
-            state,
-            body=skill_body,
-            created_from="seed",
-            notes="Backfilled v1 from existing SKILL.md body.",
-        )
-        active_ver_id = record["id"]
-        active_ver_num = record["version"]
-        await _save_state(session_id, state, conversation)
-    else:
-        for v in state.skill_versions:
-            if v.get("id") == active_ver_id:
-                active_ver_num = v.get("version")
-                break
+    if not is_prompt_eval:
+        active_ver_id = state.active_skill_version_id
+        if not state.skill_versions:
+            record = _append_skill_version(
+                state,
+                body=skill_body,
+                created_from="seed",
+                notes="Backfilled v1 from existing SKILL.md body.",
+            )
+            active_ver_id = record["id"]
+            active_ver_num = record["version"]
+            await _save_state(session_id, state, conversation)
+        else:
+            for v in state.skill_versions:
+                if v.get("id") == active_ver_id:
+                    active_ver_num = v.get("version")
+                    break
+
+    # Resolve the judge model now (rather than only inside _execute_eval_run)
+    # so we can persist it on the run row and the UI can show "ran with X" in
+    # history. Falls back to the env-var default when the request didn't pin one.
+    from .eval_runner import DEFAULT_JUDGE_MODEL as _DEFAULT_JUDGE
+    judge_model_resolved = req.judge_model or _DEFAULT_JUDGE
 
     run_id = str(_uuid.uuid4())
     run_row = await db.create_eval_run(
@@ -1573,6 +2100,7 @@ async def run_eval_for_session(session_id: str, req: RunEvalRequest, request: Re
         skill_version_id=active_ver_id,
         skill_version_number=active_ver_num,
         charter_snapshot=state.charter.model_dump(),
+        judge_model_used=judge_model_resolved,
     )
 
     asyncio.create_task(
@@ -1584,6 +2112,13 @@ async def run_eval_for_session(session_id: str, req: RunEvalRequest, request: Re
             braintrust_key=braintrust_key,
             anthropic_key=anthropic_key,
             req=req,
+            prompt_target=state.prompt_target if is_prompt_eval else None,
+            # For prompt-eval: feed the session's active skill_body to the
+            # task as the prompt template. This is the user's in-app version
+            # — possibly edited/restored from version history. The eval task
+            # substitutes row snapshots into placeholders, so per-version
+            # iteration in-app drives what scores.
+            prompt_body_template=skill_body if is_prompt_eval else None,
         )
     )
 

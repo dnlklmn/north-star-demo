@@ -42,6 +42,11 @@ interface ExampleReviewProps {
   onAcceptRevision?: (exampleId: string) => void
   onDismissRevision?: (exampleId: string) => void
   revisionsLoading?: boolean
+  /** Re-tags every example's feature_area + coverage_tags against the current
+   *  charter. Only useful for prompt-eval datasets seeded from sampled turns —
+   *  the parent passes undefined for skill-eval to hide the button. */
+  onRetagAgainstCharter?: () => void
+  retagLoading?: boolean
 }
 
 export default function ExampleReview({
@@ -64,6 +69,8 @@ export default function ExampleReview({
   onAcceptRevision,
   onDismissRevision,
   revisionsLoading,
+  onRetagAgainstCharter,
+  retagLoading,
 }: ExampleReviewProps) {
   const [filterArea, setFilterArea] = useState<string>('')
   const [filterLabel, setFilterLabel] = useState<string>('')
@@ -297,6 +304,10 @@ export default function ExampleReview({
     pending: examples.filter(e => e.review_status === 'pending').length,
     approved: examples.filter(e => e.review_status === 'approved').length,
     rejected: examples.filter(e => e.review_status === 'rejected').length,
+    // Rows tagged "new" in coverage_tags arrived via the prompt-eval
+    // auto-refresh (turns landed since the last visit). Surface the count
+    // in the header so the user notices fresh evidence without digging.
+    newSinceRefresh: examples.filter(e => (e.coverage_tags || []).includes('new')).length,
   }
 
   const actOnSelected = (fn: (ex: Example) => void) => {
@@ -317,6 +328,12 @@ export default function ExampleReview({
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <div className="text-xs text-fg-dim">
             {stats.total} total · {stats.pending} pending · {stats.approved} approved
+            {stats.newSinceRefresh > 0 && (
+              <>
+                {' · '}
+                <span className="text-accent font-medium">{stats.newSinceRefresh} new</span>
+              </>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -340,6 +357,16 @@ export default function ExampleReview({
             >
               Auto-review
             </button>
+            {onRetagAgainstCharter && (
+              <button
+                onClick={onRetagAgainstCharter}
+                disabled={loading || retagLoading || stats.total === 0}
+                className="px-2 py-1 text-xs border border-border-hint hover:bg-fill-neutral transition-colors disabled:opacity-50"
+                title="Re-tag every row's feature_area and coverage_tags against the current charter. Useful after generating or editing the charter so the Coverage Map matrix lines up."
+              >
+                {retagLoading ? 'Retagging…' : 'Retag against charter'}
+              </button>
+            )}
             {onSuggestRevisions && (
               <button
                 onClick={onSuggestRevisions}
@@ -722,7 +749,7 @@ function ExampleRow({
         ref={rowRef}
         onClick={onSelect}
         className={[
-          'flex items-stretch gap-4 px-4 py-4 cursor-pointer transition-colors',
+          'flex items-stretch gap-4 px-4 py-4 cursor-pointer transition-colors max-h-[480px]',
           isSelected
             ? 'bg-bg-default outline outline-2 outline-border-primary -outline-offset-2'
             : 'bg-gray-150 hover:bg-fill-neutral-hover',
@@ -731,9 +758,9 @@ function ExampleRow({
         {/* Scenario */}
         <div
           onClick={e => { e.stopPropagation(); onCellSelect('scenario') }}
-          className={`flex-1 basis-0 self-stretch p-px ${cellCls('scenario')}`}
+          className={`flex-1 basis-0 self-stretch p-px overflow-hidden ${cellCls('scenario')}`}
         >
-          <div className="h-full p-2 flex flex-col gap-1">
+          <div className="h-full p-2 flex flex-col gap-1 overflow-y-auto">
             <div className="text-sm text-fg-contrast leading-[1.5]">{scenarioText}</div>
           </div>
         </div>
@@ -741,9 +768,9 @@ function ExampleRow({
         {/* Input */}
         <div
           onClick={e => { e.stopPropagation(); onCellSelect('input') }}
-          className={`flex-1 basis-0 self-stretch p-px ${cellCls('input')}`}
+          className={`flex-1 basis-0 self-stretch p-px overflow-hidden ${cellCls('input')}`}
         >
-          <div className="h-full p-2">
+          <div className="h-full p-2 overflow-y-auto">
             {editingCell === 'input' ? (
               <EditCell
                 value={editInput}
@@ -762,9 +789,9 @@ function ExampleRow({
         {/* Output */}
         <div
           onClick={e => { e.stopPropagation(); onCellSelect('output') }}
-          className={`flex-1 basis-0 self-stretch p-px ${cellCls('output')}`}
+          className={`flex-1 basis-0 self-stretch p-px overflow-hidden ${cellCls('output')}`}
         >
-          <div className="h-full p-2">
+          <div className="h-full p-2 overflow-y-auto">
             {editingCell === 'output' ? (
               <EditCell
                 value={editOutput}

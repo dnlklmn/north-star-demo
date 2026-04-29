@@ -12,13 +12,20 @@ export interface JudgeModelOption {
   provider: "anthropic" | "openrouter";
 }
 
+// `provider` here is "where the model is hosted natively" — Anthropic-native
+// models can also route via OpenRouter when the user's key is sk-or-..., so
+// the field is a routing-eligibility flag, not a label. The dropdown shows
+// just the model name; routing is explained below the picker based on the
+// user's current key.
 export const JUDGE_MODEL_OPTIONS: JudgeModelOption[] = [
-  { label: "Default (Claude Sonnet)", value: undefined, provider: "anthropic" },
-  { label: "Claude Opus 4", value: "claude-opus-4-7", provider: "anthropic" },
-  { label: "GPT-4o (OpenRouter)", value: "openai/gpt-4o", provider: "openrouter" },
-  { label: "GPT-4o mini (OpenRouter)", value: "openai/gpt-4o-mini", provider: "openrouter" },
-  { label: "Gemini 2.5 Pro (OpenRouter)", value: "google/gemini-2.5-pro", provider: "openrouter" },
-  { label: "Llama 3.3 70B (OpenRouter)", value: "meta-llama/llama-3.3-70b-instruct", provider: "openrouter" },
+  { label: "Default (Claude Sonnet 4.5)", value: undefined, provider: "anthropic" },
+  { label: "Claude Sonnet 4.5", value: "claude-sonnet-4-5-20250929", provider: "anthropic" },
+  { label: "Claude Opus 4.7", value: "claude-opus-4-7", provider: "anthropic" },
+  { label: "Claude Haiku 4.5", value: "claude-haiku-4-5-20251001", provider: "anthropic" },
+  { label: "GPT-4o", value: "openai/gpt-4o", provider: "openrouter" },
+  { label: "GPT-4o mini", value: "openai/gpt-4o-mini", provider: "openrouter" },
+  { label: "Gemini 2.5 Pro", value: "google/gemini-2.5-pro", provider: "openrouter" },
+  { label: "Llama 3.3 70B", value: "meta-llama/llama-3.3-70b-instruct", provider: "openrouter" },
 ];
 
 const JUDGE_MODEL_KEY = "northstar.judge_model";

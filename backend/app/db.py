@@ -129,7 +129,7 @@ async def _create_tables() -> None:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 id              TEXT PRIMARY KEY DEFAULT 'default',
-                model_name      TEXT NOT NULL DEFAULT 'claude-sonnet-4-20250514',
+                model_name      TEXT NOT NULL DEFAULT 'claude-sonnet-4-5-20250929',
                 max_rounds      INTEGER NOT NULL DEFAULT 3,
                 creativity       REAL NOT NULL DEFAULT 0.2,
                 updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -138,6 +138,22 @@ async def _create_tables() -> None:
         # Ensure default settings row exists
         await conn.execute("""
             INSERT INTO settings (id) VALUES ('default') ON CONFLICT (id) DO NOTHING;
+        """)
+        # One-time heal: retire dead model IDs that an earlier dropdown shipped.
+        # The retired snapshots 404 at request time, which surfaces as
+        # "Internal Server Error" on Improve / charter generation. Map them to
+        # the closest live model in the same family.
+        await conn.execute("""
+            UPDATE settings SET model_name = 'claude-sonnet-4-5-20250929'
+            WHERE model_name = 'claude-sonnet-4-20250514';
+        """)
+        await conn.execute("""
+            UPDATE settings SET model_name = 'claude-haiku-4-5-20251001'
+            WHERE model_name = 'claude-haiku-4-20250514';
+        """)
+        await conn.execute("""
+            UPDATE settings SET model_name = 'claude-opus-4-7'
+            WHERE model_name = 'claude-opus-4-20250514';
         """)
         # Migration: add revision_suggestion column to examples
         await conn.execute("""
@@ -200,6 +216,12 @@ async def _create_tables() -> None:
         """)
         await conn.execute("""
             ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS improvement_summary TEXT;
+        """)
+        # Migration: capture the judge model used for each run so the history
+        # UI can show "ran with claude-opus-4-7" etc. without having to dig
+        # into per_row metadata. NULL on old rows; new rows always populate.
+        await conn.execute("""
+            ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS judge_model_used TEXT;
         """)
 
 
@@ -294,6 +316,8 @@ async def list_sessions(limit: int = 50) -> list[dict]:
                 or charter.get("alignment")
             )
             row["has_charter"] = has_charter
+            row["kind"] = (state or {}).get("kind", "skill")
+            row["prompt_target"] = (state or {}).get("prompt_target")
             results.append(row)
         return results
 
@@ -449,6 +473,59 @@ async def get_turns(session_id: str) -> list[dict]:
             session_id,
         )
         return [_parse_turn_row(r) for r in rows]
+
+
+async def sample_turns_for_prompt_eval(
+    turn_type: str,
+    limit: int = 50,
+    exclude_session_id: str | None = None,
+) -> list[dict]:
+    """Sample completed turns for a prompt-eval seed.
+
+    Filters: matching turn_type, has parsed_output (excludes mid-flight failures),
+    and at least one llm_call recorded. Optionally excludes the prompt-eval
+    project's own session so it doesn't sample turns it generated itself once
+    re-runs start landing in turns.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if exclude_session_id is not None:
+            rows = await conn.fetch(
+                """
+                SELECT id, session_id, created_at, turn_type, input_snapshot,
+                       parsed_output, agent_message
+                FROM turns
+                WHERE turn_type = $1
+                  AND parsed_output IS NOT NULL
+                  AND jsonb_array_length(llm_calls) > 0
+                  AND session_id <> $3
+                ORDER BY created_at DESC
+                LIMIT $2
+                """,
+                turn_type, limit, exclude_session_id,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT id, session_id, created_at, turn_type, input_snapshot,
+                       parsed_output, agent_message
+                FROM turns
+                WHERE turn_type = $1
+                  AND parsed_output IS NOT NULL
+                  AND jsonb_array_length(llm_calls) > 0
+                ORDER BY created_at DESC
+                LIMIT $2
+                """,
+                turn_type, limit,
+            )
+        results = []
+        for r in rows:
+            d = dict(r)
+            for key in ("input_snapshot", "parsed_output"):
+                if isinstance(d.get(key), str):
+                    d[key] = json.loads(d[key])
+            results.append(d)
+        return results
 
 
 async def get_activity(
@@ -645,6 +722,18 @@ async def create_dataset_version(dataset_id: str, charter_snapshot: dict) -> dic
         return _parse_dataset_row(row)
 
 
+async def update_dataset_charter_snapshot(dataset_id: str, charter: dict) -> None:
+    """Refresh the dataset's stored charter snapshot — used when the live
+    charter has changed and gap analysis / scorers should compare against
+    the new version (e.g. prompt-eval just generated its first charter)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE datasets SET charter_snapshot = $1 WHERE id = $2",
+            json.dumps(charter), dataset_id,
+        )
+
+
 async def update_dataset_stats(dataset_id: str) -> dict:
     """Recompute and update cached stats for a dataset."""
     pool = await get_pool()
@@ -726,14 +815,16 @@ async def bulk_create_examples(dataset_id: str, examples: list[dict]) -> list[di
             row = await conn.fetchrow(
                 """
                 INSERT INTO examples (id, dataset_id, feature_area, input, expected_output,
-                    coverage_tags, source, label, label_reason, should_trigger, is_adversarial)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    coverage_tags, source, label, label_reason, review_status,
+                    should_trigger, is_adversarial)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 RETURNING *
                 """,
                 str(uuid.uuid4()), dataset_id, ex["feature_area"], ex["input"],
                 ex.get("expected_output", "") or "",
                 json.dumps(ex.get("coverage_tags", [])), ex.get("source", "manual"),
                 ex.get("label", "unlabeled"), ex.get("label_reason"),
+                ex.get("review_status", "pending"),
                 ex.get("should_trigger"),
                 ex.get("is_adversarial"),
             )
@@ -862,7 +953,7 @@ async def get_settings() -> dict:
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM settings WHERE id = 'default'")
         if row is None:
-            return {"model_name": "claude-sonnet-4-20250514", "max_rounds": 3, "creativity": 0.2}
+            return {"model_name": "claude-sonnet-4-5-20250929", "max_rounds": 3, "creativity": 0.2}
         return dict(row)
 
 
@@ -953,6 +1044,7 @@ async def create_eval_run(
     skill_version_id: str | None,
     skill_version_number: int | None,
     charter_snapshot: dict | None = None,
+    judge_model_used: str | None = None,
 ) -> dict:
     """Insert a fresh pending eval run. The background task later updates it."""
     pool = await get_pool()
@@ -962,13 +1054,15 @@ async def create_eval_run(
             """
             INSERT INTO eval_runs (
                 id, session_id, status, project, experiment_name,
-                rows_total, skill_version_id, skill_version_number, charter_snapshot
+                rows_total, skill_version_id, skill_version_number, charter_snapshot,
+                judge_model_used
             )
-            VALUES ($1, $2, 'pending', $3, $4, $5, $6, $7, $8::jsonb)
+            VALUES ($1, $2, 'pending', $3, $4, $5, $6, $7, $8::jsonb, $9)
             RETURNING *
             """,
             run_id, session_id, project, experiment_name,
             rows_total, skill_version_id, skill_version_number, charter_json,
+            judge_model_used,
         )
         return _parse_eval_run_row(row)
 
