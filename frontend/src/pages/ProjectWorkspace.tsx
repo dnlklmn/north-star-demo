@@ -1793,7 +1793,7 @@ export default function ProjectWorkspace() {
 
           {/* Nav groups */}
           {(state.eval_mode === "triggered" || state.charter.task.skill_body) && (
-            <SidebarGroup label={isPromptEval ? "PROMPT" : "SKILL"}>
+            <SidebarGroup hideTopDivider>
               <SidebarItem
                 label={isPromptEval ? "Prompt" : "Skill"}
                 icon={<GoalsIcon width={24} height={24} />}
@@ -1803,7 +1803,11 @@ export default function ProjectWorkspace() {
             </SidebarGroup>
           )}
 
-          <SidebarGroup label="INPUT">
+          <SidebarGroup
+            hideTopDivider={
+              !(state.eval_mode === "triggered" || state.charter.task.skill_body)
+            }
+          >
             <SidebarItem
               label="Business Goals"
               icon={<GoalsIcon width={24} height={24} />}
@@ -1824,7 +1828,7 @@ export default function ProjectWorkspace() {
             />
           </SidebarGroup>
 
-          <SidebarGroup label="GENERATE">
+          <SidebarGroup>
             <SidebarItem
               label="Charter"
               icon={<CharterIcon width={24} height={24} />}
@@ -1848,7 +1852,7 @@ export default function ProjectWorkspace() {
             />
           </SidebarGroup>
 
-          <SidebarGroup label="OUTPUT">
+          <SidebarGroup>
             <SidebarItem
               label="Evaluations"
               icon={<StarIcon width={24} height={24} />}
@@ -2343,20 +2347,25 @@ function buildCoverageGenerateModalProps(req: CoverageGenerateRequestExt): {
   };
 }
 
+/**
+ * SidebarGroup — visually a thin divider above the group's items.
+ * The original "INPUT/GENERATE/OUTPUT" labels were noise in the new design;
+ * the grouping is communicated by the divider lines instead.
+ */
 function SidebarGroup({
-  label,
+  label: _label,
   children,
+  hideTopDivider,
 }: {
-  label: string;
+  label?: string;
   children: React.ReactNode;
+  hideTopDivider?: boolean;
 }) {
   return (
-    <div className="mb-6">
-      <div className="text-[10px] font-medium uppercase tracking-wider text-fg-dim px-2 mb-1">
-        {label}
-      </div>
+    <>
+      {!hideTopDivider && <div className="border-t border-border-hint mx-2 my-2" />}
       <div className="flex flex-col">{children}</div>
-    </div>
+    </>
   );
 }
 
@@ -2379,18 +2388,22 @@ function SidebarItem({
     <button
       onClick={onClick}
       disabled={disabled}
-      className={`flex gap-2 items-center justify-between px-2 h-8 text-sm text-left transition-colors ${
+      className={`flex gap-2.5 items-center justify-between px-2 py-2 text-base text-left transition-colors ${
         active
-          ? "bg-fill-neutral text-fg-contrast"
+          ? "bg-fill-primary/10 text-fg-primary font-bold [&_svg]:text-fg-primary"
           : disabled
             ? "text-fg-dim/50 cursor-not-allowed"
-            : "text-fg-contrast hover:bg-fill-neutral/50"
+            : "text-fg-contrast hover:bg-fill-neutral/50 font-medium"
       }`}
     >
       {icon ?? <StarIcon />}
       <span className="truncate w-full">{label}</span>
       {badge && (
-        <span className="font-mono text-[10px] text-fg-dim bg-fill-neutral px-1.5 py-0.5 ml-2">
+        <span
+          className={`font-mono text-[10px] px-1.5 py-0.5 ml-2 ${
+            active ? "bg-fill-primary/20 text-fg-primary" : "bg-fill-neutral text-fg-dim"
+          }`}
+        >
           {badge}
         </span>
       )}

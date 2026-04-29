@@ -661,6 +661,265 @@ export default function EvaluatePanel({
     })
   }
 
+  // Improve sidebar — sits in the right rail, mirrors the SuggestionBox
+  // pattern used by Goals/Users/Charter (sparkle header + refresh + body).
+  // Visible whenever there's a completed run to analyze or any in-flight
+  // suggestion state. The previous Improve content lived inline in the
+  // main column; the new Figma design moves it to a persistent right
+  // column so the user can iterate on the candidate without losing the
+  // run results context.
+  const doneRunForImprove = runs.find((r) => r.status === 'done' || r.status === 'failed')
+  const newSkillVersionNumber = (skillVersions[0]?.version ?? 0) + 1
+  const couldNotApplyCount = preview.filter((p) => p.mode === 'appended').length
+  const improveRight = (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Sparkles className="w-4 h-4 text-fg-primary" />
+          <span className="text-base font-semibold text-fg-contrast">Improve skill</span>
+        </div>
+        {doneRunForImprove && (
+          <button
+            onClick={handleSuggest}
+            disabled={suggesting}
+            className="p-1.5 text-fg-dim hover:text-fg-contrast disabled:opacity-50"
+            title={suggesting ? 'Analyzing…' : 'Re-analyze the latest run'}
+          >
+            {suggesting ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <RotateCcw className="w-4 h-4" />
+            )}
+          </button>
+        )}
+      </div>
+
+      {!doneRunForImprove && (
+        <p className="text-xs text-fg-dim">
+          Run an evaluation first. Improve uses the latest run's failures to propose targeted SKILL.md edits.
+        </p>
+      )}
+
+      {doneRunForImprove && !suggestions.length && !suggesting && !suggestError && !summary && (
+        <div className="space-y-2">
+          <p className="text-xs text-fg-dim">
+            Analyzes failures in the latest run and proposes targeted edits to your SKILL.md.
+          </p>
+          <button
+            onClick={handleSuggest}
+            className="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium bg-fill-primary text-bg-default hover:opacity-90"
+          >
+            <Sparkles className="w-4 h-4" />
+            Analyze this run
+          </button>
+        </div>
+      )}
+
+      {suggesting && !suggestions.length && (
+        <div className="flex items-center gap-2 text-xs text-fg-dim">
+          <Loader2 className="w-4 h-4 animate-spin" />
+          Analyzing failures…
+        </div>
+      )}
+
+      {suggestError && <p className="text-xs text-danger">{suggestError}</p>}
+
+      {summary && (
+        <p className="text-sm text-fg-contrast leading-relaxed">{summary}</p>
+      )}
+
+      {suggestions.length > 0 && (
+        <>
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-fg-dim">
+            Proposed edits ({suggestions.length})
+          </p>
+
+          <ul className="space-y-2">
+            {suggestions.map((s) => {
+              const isAccepted = accepted.has(s.id)
+              const isDismissed = dismissed.has(s.id)
+              const { body: applied } = applySuggestion(skillBody, s)
+              const matchKind = getMatchKind(skillBody, s)
+              const willAppend = matchKind === 'appended' && !!s.find
+
+              return (
+                <li
+                  key={s.id}
+                  className={`p-3 text-sm space-y-2 ${
+                    isAccepted
+                      ? 'bg-fill-primary/5 border border-fill-primary/40'
+                      : isDismissed
+                        ? 'bg-fill-neutral/30 opacity-60'
+                        : 'bg-fill-neutral/40'
+                  }`}
+                >
+                  <div className="flex items-start gap-2">
+                    <p className="flex-1 text-sm text-fg-contrast leading-snug">
+                      {s.summary}
+                    </p>
+                    <div className="flex gap-1 flex-shrink-0">
+                      <button
+                        onClick={() =>
+                          setDiffVs({
+                            title: s.summary,
+                            subtitle: s.rationale,
+                            oldLabel: 'current SKILL.md',
+                            newLabel: 'after this edit',
+                            oldText: skillBody,
+                            newText: applied,
+                          })
+                        }
+                        className="p-1 text-fg-dim hover:text-fg-contrast"
+                        title="Preview diff"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                      </button>
+                      {!isAccepted && !isDismissed && (
+                        <>
+                          <button
+                            onClick={() => toggleAccept(s.id)}
+                            className="p-1 text-fg-dim hover:text-success"
+                            title={
+                              willAppend
+                                ? "Accept (couldn't locate snippet — will append)"
+                                : 'Accept'
+                            }
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={() => toggleDismiss(s.id)}
+                            className="p-1 text-fg-dim hover:text-danger"
+                            title="Dismiss"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </>
+                      )}
+                      {(isAccepted || isDismissed) && (
+                        <button
+                          onClick={() =>
+                            isAccepted ? toggleAccept(s.id) : toggleDismiss(s.id)
+                          }
+                          className="p-1 text-fg-dim hover:text-fg-contrast"
+                          title="Undo"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {willAppend && (
+                    <p className="text-[10px] uppercase tracking-wide text-warning">
+                      Will append (snippet drift)
+                    </p>
+                  )}
+
+                  <p className="text-xs text-fg-dim leading-relaxed">{s.rationale}</p>
+
+                  {s.find && (
+                    <div className="space-y-1">
+                      <p className="text-[10px] font-semibold uppercase tracking-wide text-fg-dim">
+                        Replace
+                      </p>
+                      <pre className="px-2 py-1.5 bg-success/15 text-success whitespace-pre-wrap break-words font-mono text-xs leading-snug">
+                        {s.find}
+                      </pre>
+                    </div>
+                  )}
+                  <div className="space-y-1">
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-fg-dim">
+                      {s.find ? 'With' : 'Append'}
+                    </p>
+                    <pre className="px-2 py-1.5 bg-danger/15 text-danger whitespace-pre-wrap break-words font-mono text-xs leading-snug">
+                      {s.replacement}
+                    </pre>
+                  </div>
+                </li>
+              )
+            })}
+          </ul>
+
+          {acceptedSuggestions.length > 0 && (
+            <div className="border border-fill-primary/40 bg-fill-primary/5 p-3 space-y-2">
+              <p className="text-sm font-semibold text-fg-contrast">
+                Ready to save v{newSkillVersionNumber}
+              </p>
+              <p className="text-xs text-fg-dim">
+                {acceptedSuggestions.length} accepted
+                {couldNotApplyCount > 0 && (
+                  <> · {couldNotApplyCount} appended due to drift</>
+                )}
+              </p>
+              <input
+                type="text"
+                value={savingNotes}
+                onChange={(e) => setSavingNotes(e.target.value)}
+                placeholder="Optional note about this version…"
+                className="w-full text-xs bg-fill-dip border border-border-hint px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-fill-primary"
+              />
+              <div className="flex gap-2">
+                <button
+                  onClick={() =>
+                    setDiffVs({
+                      title: `Preview v${newSkillVersionNumber}`,
+                      oldLabel: `v${skillVersions[0]?.version ?? 0}`,
+                      newLabel: `v${newSkillVersionNumber} (preview)`,
+                      oldText: skillBody,
+                      newText: finalBody,
+                    })
+                  }
+                  className="px-2.5 py-1 text-xs font-medium border border-border-hint text-fg-contrast hover:bg-fill-neutral/30"
+                >
+                  <Eye className="w-3.5 h-3.5 inline mr-1" />
+                  Preview
+                </button>
+                <button
+                  onClick={async () => {
+                    const ok = await handleSaveVersion()
+                    if (ok) setJustSaved(null)
+                  }}
+                  disabled={saving || !finalChanged}
+                  className={`flex-1 px-3 py-1 text-xs font-medium ${
+                    finalChanged && !saving
+                      ? 'bg-fill-primary text-bg-default hover:opacity-90'
+                      : 'bg-fill-neutral text-fg-dim cursor-not-allowed'
+                  }`}
+                >
+                  {saving && <Loader2 className="w-3.5 h-3.5 animate-spin inline mr-1" />}
+                  Save as v{newSkillVersionNumber}
+                </button>
+              </div>
+              {saveError && <p className="text-xs text-danger">{saveError}</p>}
+            </div>
+          )}
+        </>
+      )}
+
+      {justSaved && (
+        <div className="border border-warning/40 bg-warning/5 p-3 space-y-2">
+          <p className="text-sm font-semibold text-fg-contrast">
+            v{justSaved.version} ready as a candidate.
+          </p>
+          <p className="text-xs text-fg-dim">
+            Evaluate the new version to see if it actually improves things.
+          </p>
+          <button
+            onClick={async () => {
+              setJustSaved(null)
+              const run = await onRunEval({})
+              if (run) setActiveRun(run as EvalRunSummary)
+            }}
+            className="w-full px-3 py-1.5 text-xs font-medium bg-fill-primary text-bg-default hover:opacity-90"
+          >
+            Evaluate new version
+          </button>
+        </div>
+      )}
+    </div>
+  )
+
   const versionHistoryRight = skillVersions.length > 0 ? (
     <div>
       <div className="flex items-center gap-2 mb-3">
@@ -743,8 +1002,13 @@ export default function EvaluatePanel({
 
   return (
     <PanelLayout
-      title="Evaluate"
-      right={versionHistoryRight}
+      title="Evaluations"
+      subtitle={
+        isPromptEval
+          ? "Replays the prompt under test against each sampled turn snapshot, scores with the project's scorers, streams results into Braintrust."
+          : "Runs each approved dataset row through Claude with your SKILL.md as system prompt, scores with the project's scorers, streams results into Braintrust."
+      }
+      right={improveRight}
     >
         <div className="max-w-2xl space-y-8">
           {isPromptEval && newSinceRefresh > 0 && (
@@ -1536,315 +1800,10 @@ export default function EvaluatePanel({
                     )
                   })()}
 
-                  {/* --- Suggest improvements --- */}
-                  <div className="mb-4">
-                    <div className="flex items-center gap-2 mb-3">
-                      <Sparkles className="w-4 h-4 text-accent" />
-                      <h4 className="text-sm font-semibold text-foreground">Suggest improvements</h4>
-                    </div>
-                    {(() => {
-                      const doneRun = runs.find((r) => r.status === 'done')
-                      if (!doneRun) {
-                        return (
-                          <div className="px-3 py-2 bg-warning/10 border border-warning/30 text-xs text-foreground">
-                            No completed eval runs yet. Run one first.
-                          </div>
-                        )
-                      }
-                      return (
-                        <>
-                          <button
-                            onClick={handleSuggest}
-                            disabled={suggesting}
-                            className={`inline-flex items-center gap-2 px-4 py-2 text-sm font-medium ${
-                              !suggesting
-                                ? 'bg-accent text-accent-foreground hover:opacity-90 cursor-pointer'
-                                : 'bg-muted text-muted-foreground cursor-not-allowed'
-                            }`}
-                          >
-                            {suggesting ? (
-                              <Loader2 className="w-4 h-4 animate-spin" />
-                            ) : (
-                              <Sparkles className="w-4 h-4" />
-                            )}
-                            Analyze this run
-                          </button>
-                          {suggestError && (
-                            <p className="mt-2 text-xs text-danger">{suggestError}</p>
-                          )}
-                          {!suggestions.length && summary && (
-                            <p className="mt-2 text-xs text-foreground bg-muted/20 p-2 border-l-2 border-accent">
-                              {summary}
-                            </p>
-                          )}
-                        </>
-                      )
-                    })()}
-                  </div>
+                  {/* Improve flow lives in the right rail (improveRight) — see top of return. */}
 
-                  {/* --- Suggestions list --- */}
-                  {suggestions.length > 0 && (
-                    <div className="mb-4">
-                      {summary && (
-                        <p className="text-sm text-foreground bg-muted/20 p-3 mb-3 border-l-2 border-accent">
-                          {summary}
-                        </p>
-                      )}
-
-                      <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide mb-2">
-                        Proposed edits ({suggestions.length})
-                      </p>
-
-                      <ul className="space-y-2">
-                        {suggestions.map((s) => {
-                          const isAccepted = accepted.has(s.id)
-                          const isDismissed = dismissed.has(s.id)
-                          const isCollapsed = isAccepted || isDismissed
-                          // Show the per-suggestion preview against the
-                          // *current* body, independent of other accepts.
-                          // The save flow uses applyBatch for sequential
-                          // application, but here we just want to know
-                          // what this single suggestion would do.
-                          const { body: applied } = applySuggestion(skillBody, s)
-                          const matchKind = getMatchKind(skillBody, s)
-                          // 'exact' or 'normalized' means we found a real
-                          // edit point; 'appended' means the find drifted
-                          // and we'll tack the replacement onto the end.
-                          const findMatched = matchKind !== 'appended' || !s.find
-
-                          if (isCollapsed) {
-                            const shortFind = s.find.length > 40 ? s.find.slice(0, 40) + '…' : s.find
-                            const shortRepl = s.replacement.length > 40 ? s.replacement.slice(0, 40) + '…' : s.replacement
-                            return (
-                              <li
-                                key={s.id}
-                                className={`border px-3 py-2 text-xs flex items-center gap-2 ${
-                                  isAccepted
-                                    ? 'border-accent bg-accent/5'
-                                    : 'border-border bg-muted/10 opacity-60'
-                                }`}
-                              >
-                                <span
-                                  className={`font-mono text-[10px] uppercase px-1.5 py-0.5 flex-shrink-0 ${
-                                    isAccepted
-                                      ? 'bg-accent/20 text-accent'
-                                      : 'bg-muted text-muted-foreground'
-                                  }`}
-                                >
-                                  {isAccepted ? 'accepted' : 'dismissed'}
-                                </span>
-                                <span className="text-foreground truncate flex-1">
-                                  {s.find ? (
-                                    <>
-                                      <span className="font-mono line-through text-muted-foreground">{shortFind}</span>{' '}
-                                      →{' '}
-                                      <span className="font-mono text-foreground">{shortRepl}</span>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <span className="text-muted-foreground">append</span>{' '}
-                                      <span className="font-mono text-foreground">{shortRepl}</span>
-                                    </>
-                                  )}
-                                </span>
-                                <div className="flex gap-1 flex-shrink-0">
-                                  <button
-                                    onClick={() => setDiffVs({
-                                      title: s.summary,
-                                      subtitle: s.rationale,
-                                      oldLabel: 'current SKILL.md',
-                                      newLabel: 'after this edit',
-                                      oldText: skillBody,
-                                      newText: applied,
-                                    })}
-                                    className="p-1 text-muted-foreground hover:text-foreground"
-                                    title="Preview diff"
-                                  >
-                                    <Eye className="w-3.5 h-3.5" />
-                                  </button>
-                                  <button
-                                    onClick={() => isAccepted ? toggleAccept(s.id) : toggleDismiss(s.id)}
-                                    className="p-1 text-muted-foreground hover:text-foreground"
-                                    title="Undo"
-                                  >
-                                    <RotateCcw className="w-3.5 h-3.5" />
-                                  </button>
-                                </div>
-                              </li>
-                            )
-                          }
-
-                          return (
-                            <li
-                              key={s.id}
-                              className="border border-border bg-surface-raised p-3 text-xs"
-                            >
-                              <div className="flex items-start gap-2 mb-2">
-                                <span className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
-                                  {s.kind.replace('_', ' ')}
-                                </span>
-                                <span className={`font-mono text-[10px] uppercase px-1.5 py-0.5 ${confidenceColor(s.confidence)}`}>
-                                  {s.confidence}
-                                </span>
-                                {!findMatched && s.find && (
-                                  <span
-                                    className="font-mono text-[10px] uppercase px-1.5 py-0.5 bg-warning/15 text-warning"
-                                    title="The model quoted a snippet that doesn't appear verbatim in the current SKILL.md (probably whitespace drift). Accepting will append the new text to the end of the file instead."
-                                  >
-                                    will append (snippet drift)
-                                  </span>
-                                )}
-                                <div className="ml-auto flex gap-1 flex-shrink-0">
-                                  <button
-                                    onClick={() => setDiffVs({
-                                      title: s.summary,
-                                      subtitle: s.rationale,
-                                      oldLabel: 'current SKILL.md',
-                                      newLabel: 'after this edit',
-                                      oldText: skillBody,
-                                      newText: applied,
-                                    })}
-                                    className="p-1 text-muted-foreground hover:text-foreground"
-                                    title="Preview diff"
-                                  >
-                                    <Eye className="w-3.5 h-3.5" />
-                                  </button>
-                                  <button
-                                    onClick={() => toggleAccept(s.id)}
-                                    className="p-1 text-muted-foreground hover:text-success"
-                                    title={findMatched ? 'Accept' : "Accept (couldn't locate snippet — will append)"}
-                                  >
-                                    <Check className="w-3.5 h-3.5" />
-                                  </button>
-                                  <button
-                                    onClick={() => toggleDismiss(s.id)}
-                                    className="p-1 text-muted-foreground hover:text-danger"
-                                    title="Dismiss"
-                                  >
-                                    <X className="w-3.5 h-3.5" />
-                                  </button>
-                                </div>
-                              </div>
-
-                              <p className="text-sm font-medium text-foreground mb-1">{s.summary}</p>
-                              <p className="text-xs text-muted-foreground mb-2">{s.rationale}</p>
-
-                              {s.find && (
-                                <details className="mb-1">
-                                  <summary className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide cursor-pointer">
-                                    Replace
-                                  </summary>
-                                  <pre className="mt-1 p-2 bg-danger/5 text-foreground whitespace-pre-wrap break-words font-mono text-[11px]">
-                                    {s.find}
-                                  </pre>
-                                </details>
-                              )}
-                              <details>
-                                <summary className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide cursor-pointer">
-                                  {s.find ? 'With' : 'Append'}
-                                </summary>
-                                <pre className="mt-1 p-2 bg-success/5 text-foreground whitespace-pre-wrap break-words font-mono text-[11px]">
-                                  {s.replacement}
-                                </pre>
-                              </details>
-
-                              {(s.source_row_ids.length > 0 || s.source_scorer_names.length > 0) && (
-                                <div className="mt-2 pt-2 border-t border-border/50 flex flex-wrap gap-1 text-[10px] text-muted-foreground">
-                                  {s.source_scorer_names.map((n) => (
-                                    <span key={n} className="font-mono px-1.5 py-0.5 bg-muted/50">{n}</span>
-                                  ))}
-                                  {s.source_row_ids.slice(0, 5).map((id) => (
-                                    <span key={id} className="font-mono px-1.5 py-0.5 bg-muted/50">{id.slice(0, 8)}</span>
-                                  ))}
-                                </div>
-                              )}
-                            </li>
-                          )
-                        })}
-                      </ul>
-
-                      {/* --- Save block --- */}
-                      {acceptedSuggestions.length > 0 && (
-                        <div className="mt-4 border border-accent p-3 bg-accent/5">
-                          <p className="text-sm font-medium text-foreground mb-1">
-                            Ready to save v{(skillVersions[0]?.version ?? 0) + 1}
-                          </p>
-                          <p className="text-xs text-muted-foreground mb-3">
-                            {acceptedSuggestions.length} suggestion{acceptedSuggestions.length === 1 ? '' : 's'} accepted ·{' '}
-                            {preview.filter((p) => p.appliedBody === null).length} couldn't be applied (find text not in SKILL.md).
-                          </p>
-                          <div className="flex gap-2 mb-2">
-                            <input
-                              type="text"
-                              value={savingNotes}
-                              onChange={(e) => setSavingNotes(e.target.value)}
-                              placeholder="Optional note about this version..."
-                              className="flex-1 text-xs bg-background border border-border px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-accent"
-                            />
-                            <button
-                              onClick={() => setDiffVs({
-                                title: `Preview v${(skillVersions[0]?.version ?? 0) + 1}`,
-                                oldLabel: `v${skillVersions[0]?.version ?? 0}`,
-                                newLabel: `v${(skillVersions[0]?.version ?? 0) + 1} (preview)`,
-                                oldText: skillBody,
-                                newText: finalBody,
-                              })}
-                              className="px-3 py-1.5 text-xs font-medium bg-muted text-foreground hover:bg-muted/70"
-                            >
-                              <Eye className="w-3.5 h-3.5 inline" /> Preview combined diff
-                            </button>
-                            <button
-                              onClick={async () => {
-                                const saved = await handleSaveVersion()
-                                if (saved) {
-                                  setJustSaved(null)
-                                }
-                              }}
-                              disabled={saving || !finalChanged}
-                              className={`px-3 py-1.5 text-xs font-medium ${
-                                finalChanged && !saving
-                                  ? 'bg-accent text-accent-foreground hover:opacity-90'
-                                  : 'bg-muted text-muted-foreground cursor-not-allowed'
-                              }`}
-                            >
-                              {saving && <Loader2 className="w-3.5 h-3.5 animate-spin inline" />}
-                              Save new version
-                            </button>
-                          </div>
-                          {saveError && <p className="text-xs text-danger">{saveError}</p>}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* --- Post-save CTA --- */}
-                  {justSaved && (
-                    <div className="mb-4 border border-warning bg-warning/5 p-4">
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="min-w-0">
-                          <p className="text-sm font-semibold text-foreground">
-                            v{justSaved.version} ready as a candidate.
-                          </p>
-                          <p className="text-xs text-muted-foreground mt-0.5">
-                            Evaluate the new version to see if it actually improves things.
-                            {justSaved.applied_suggestion_ids.length > 0 && (
-                              <> Applied {justSaved.applied_suggestion_ids.length} suggestion{justSaved.applied_suggestion_ids.length === 1 ? '' : 's'}.</>
-                            )}
-                          </p>
-                        </div>
-                        <button
-                          onClick={async () => {
-                            setJustSaved(null)
-                            const run = await onRunEval({})
-                            if (run) setActiveRun(run as EvalRunSummary)
-                          }}
-                          className="flex-shrink-0 px-3 py-1.5 text-xs font-medium bg-accent text-accent-foreground hover:opacity-90"
-                        >
-                          Evaluate new version
-                        </button>
-                      </div>
-                    </div>
-                  )}
+                  {/* Suggestions list, save block, post-save CTA all moved
+                      to the right rail (improveRight). */}
 
                   {activeRun.per_row.length > 0 && (
                     <details className="mt-2">
