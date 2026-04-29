@@ -42,6 +42,8 @@ import {
   updateExample as apiUpdateExample,
   deleteExample as apiDeleteExample,
   autoReviewExamples,
+  refreshDatasetFromTurns,
+  retagExamplesAgainstCharter,
   getGapAnalysis,
   exportDataset,
   datasetChat,
@@ -213,6 +215,7 @@ export default function ProjectWorkspace() {
   const [scorers, setScorers] = useState<ScorerDef[]>([]);
 
   const [revisionsLoading, setRevisionsLoading] = useState(false);
+  const [retagLoading, setRetagLoading] = useState(false);
   const [gapAnalysis, setGapAnalysis] = useState<GapAnalysis | null>(null);
   const [showCoverageMap, setShowCoverageMap] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -288,6 +291,7 @@ export default function ProjectWorkspace() {
          );
          const hasSkillBody = !!s.charter.task.skill_body;
          const isTriggered = s.eval_mode === "triggered";
+         const isPromptEval = s.kind === "prompt";
 
          // Check for ?tab= query param (e.g. ?tab=goals from Home modal)
          const tabParam = searchParams.get("tab");
@@ -300,10 +304,29 @@ export default function ProjectWorkspace() {
          // (no skill body yet) also land on Skill so the paste form is the
          // first thing the user sees.
          try {
-           const ds = await getDataset(urlSessionId);
+           let ds = await getDataset(urlSessionId);
+           // For prompt-eval projects, opportunistically pull any new turns
+           // landed since the last visit so the dataset stays current. The
+           // backend tags new rows with "new" in coverage_tags so the UI can
+           // badge them. Failure is non-fatal — we just show what we have.
+           if (isPromptEval) {
+             try {
+               const result = await refreshDatasetFromTurns(ds.id);
+               if (result.added > 0) {
+                 ds = await getDataset(urlSessionId);
+               }
+             } catch (err) {
+               console.warn("auto-refresh from turns failed:", err);
+             }
+           }
            setDataset(ds);
            if (tabFromUrl) {
              setActiveTab(tabFromUrl);
+           } else if (isPromptEval) {
+             // Prompt-eval projects always land on the Prompt tab so the
+             // user reads the synthetic description before scrolling through
+             // the auto-seeded INPUT and on into Charter / Scorers.
+             setActiveTab("skill");
            } else if (ds.examples?.length > 0) {
              setActiveTab("dataset");
            } else if (hasCharter) {
@@ -315,6 +338,8 @@ export default function ProjectWorkspace() {
            // No dataset yet
            if (tabFromUrl) {
              setActiveTab(tabFromUrl);
+           } else if (isPromptEval) {
+             setActiveTab("skill");
            } else if (hasCharter) {
              setActiveTab("charter");
            } else if (hasSkillBody || isTriggered) {
@@ -357,10 +382,20 @@ export default function ProjectWorkspace() {
   // mirroring the old standalone "new skill eval" page while keeping the
   // user in the project workspace throughout.
   const isTriggered = state.eval_mode === "triggered";
+  // Prompt-eval projects share the full skill-eval flow: synthetic SKILL.md
+  // describes the prompt under test, gets seeded through call_skill_seed
+  // into goals/users/stories, then the user reviews the charter + generates
+  // scorers exactly like a regular skill eval. The only divergence happens
+  // at run time, where the eval task replays the prompt builder instead
+  // of running skill_body as a system prompt.
+  const isPromptEval = state.kind === "prompt";
   const skillReady = !!state.charter.task.skill_body || !isTriggered;
   const usersAvailable = skillReady && nonEmptyGoals.length >= 2;
   const charterAvailable = skillReady && (hasCharter || loading);
-  const datasetAvailable = skillReady && hasCharter;
+  // Prompt-eval seeds the dataset up-front, so it's available even before
+  // the charter has been generated. Skill mode still gates on hasCharter
+  // because that's where dataset feature_areas come from.
+  const datasetAvailable = isPromptEval ? !!dataset : (skillReady && hasCharter);
   const scorersAvailable = skillReady && hasCharter;
   const evaluateAvailable = skillReady && !!dataset;
 
@@ -1407,6 +1442,21 @@ export default function ProjectWorkspace() {
     }
   }, [dataset]);
 
+  const handleRetagAgainstCharter = useCallback(async () => {
+    if (!dataset) return;
+    setRetagLoading(true);
+    try {
+      await retagExamplesAgainstCharter(dataset.id);
+      const fullDs = await getDataset(dataset.session_id);
+      setDataset(fullDs);
+    } catch (err) {
+      console.error("Failed to retag against charter:", err);
+      alert(`Retag failed: ${err instanceof Error ? err.message : "Unknown error"}`);
+    } finally {
+      setRetagLoading(false);
+    }
+  }, [dataset]);
+
   const handleSuggestRevision = useCallback(
     async (exampleId: string) => {
       if (!dataset) return;
@@ -1731,9 +1781,9 @@ export default function ProjectWorkspace() {
 
           {/* Nav groups */}
           {(state.eval_mode === "triggered" || state.charter.task.skill_body) && (
-            <SidebarGroup label="SKILL">
+            <SidebarGroup label={isPromptEval ? "PROMPT" : "SKILL"}>
               <SidebarItem
-                label="Skill"
+                label={isPromptEval ? "Prompt" : "Skill"}
                 icon={<GoalsIcon width={24} height={24} />}
                 active={activeTab === "skill"}
                 onClick={() => setActiveTab("skill")}
@@ -1817,6 +1867,9 @@ export default function ProjectWorkspace() {
               skillBody={state.charter.task.skill_body || ""}
               skillName={state.charter.task.skill_name ?? null}
               skillDescription={state.charter.task.skill_description ?? null}
+              isPromptEval={isPromptEval}
+              promptSourcePath={state.prompt_source_path ?? null}
+              promptBuilderName={state.prompt_builder_name ?? null}
               onSkillBodyChange={(body) => {
                 setState((prev) => ({
                   ...prev,
@@ -2017,6 +2070,8 @@ export default function ProjectWorkspace() {
                     onAcceptRevision={handleAcceptRevision}
                     onDismissRevision={handleDismissRevision}
                     revisionsLoading={revisionsLoading}
+                    onRetagAgainstCharter={isPromptEval && hasCharter ? handleRetagAgainstCharter : undefined}
+                    retagLoading={retagLoading}
                   />
                   {/* Once every example has been reviewed, surface the tri-state
                       scorers CTA — Generate / Regenerate / Go to — mirroring the
@@ -2135,6 +2190,7 @@ export default function ProjectWorkspace() {
               dataset={dataset}
               scorerCount={scorers.length}
               hasSkillBody={!!state.charter.task.skill_body}
+              isPromptEval={isPromptEval}
               onExport={handleExport}
               onRequestImprove={() => {
                 setImproveAutoAnalyze(true);
@@ -2154,6 +2210,15 @@ export default function ProjectWorkspace() {
                 setState(s.state as SessionState);
               }}
               onOpenSettings={() => setShowSettings(true)}
+              onRunTerminal={async () => {
+                if (!urlSessionId) return;
+                try {
+                  const fresh = await getDataset(urlSessionId);
+                  setDataset(fresh);
+                } catch (err) {
+                  console.warn("dataset refetch after run-terminal failed:", err);
+                }
+              }}
             />
           )}
 

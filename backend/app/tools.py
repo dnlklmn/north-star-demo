@@ -30,6 +30,7 @@ from .models import (
 from .prompt import (
     build_discovery_turn_prompt,
     build_generate_draft_prompt,
+    build_retag_examples_against_charter_prompt,
     build_validate_charter_prompt,
     build_conversational_turn_prompt,
     build_generate_suggestions_prompt,
@@ -97,7 +98,7 @@ def get_client() -> anthropic.Anthropic:
 def get_model() -> str:
     if _cached_settings and _cached_settings.get("model_name"):
         return _cached_settings["model_name"]
-    return os.environ.get("MODEL_NAME", "claude-sonnet-4-20250514")
+    return os.environ.get("MODEL_NAME", "claude-sonnet-4-5-20250929")
 
 
 def get_creativity() -> float:
@@ -565,6 +566,23 @@ async def call_review_examples(charter: dict, examples: list[dict]) -> tuple[lis
     text, meta = _call_llm(prompt, max_tokens=4096)
     data = _extract_json(text)
     return data.get("reviews", []), [meta]
+
+
+async def call_retag_examples_against_charter(
+    charter: dict, examples: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """Re-tag examples (feature_area + coverage_tags) against the charter.
+
+    Returns (retags, call metadata list). Each retag is
+    {example_id, feature_area, coverage_tags}. Used by prompt-eval to align
+    the auto-seeded dataset with the just-generated charter so the Coverage
+    Map matrix becomes useful.
+    """
+    await _refresh_settings()
+    prompt = build_retag_examples_against_charter_prompt(charter, examples)
+    text, meta = _call_llm(prompt, max_tokens=4096)
+    data = _extract_json(text)
+    return data.get("retags", []), [meta]
 
 
 async def call_dataset_chat(

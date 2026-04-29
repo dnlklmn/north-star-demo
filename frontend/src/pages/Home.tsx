@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { Plus, Trash2, Loader2 } from "lucide-react";
+import { Plus, Trash2, Loader2, ChevronDown } from "lucide-react";
 import type { ProjectSummary } from "../types";
 import {
+  createPromptEvalSession,
   createSession,
   deleteSession,
   listSessions,
@@ -18,6 +19,7 @@ import {
 import Button from "../components/ui/Button";
 import IconButton from "../components/ui/IconButton";
 import NewSkillEvalModal from "../components/NewSkillEvalModal";
+import NewPromptEvalModal from "../components/NewPromptEvalModal";
 import SettingsPanel from "../components/SettingsPanel";
 import { GearIcon, StarIcon } from "../components/ui/Icons";
 
@@ -48,7 +50,29 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [isNewSkillModalOpen, setIsNewSkillModalOpen] = useState(false);
+  const [isNewPromptModalOpen, setIsNewPromptModalOpen] = useState(false);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
   const [showSettings, setShowSettings] = useState(false);
+
+  // Close the new-eval dropdown on outside click or Escape.
+  useEffect(() => {
+    if (!isMenuOpen) return;
+    const onClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setIsMenuOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setIsMenuOpen(false);
+    };
+    window.addEventListener("mousedown", onClick);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onClick);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [isMenuOpen]);
 
   const fetchProjects = useCallback(async () => {
     try {
@@ -67,7 +91,31 @@ export default function Home() {
 
   // Open modal to collect skill input before creating session
   const openNewSkillModal = () => {
+    setIsMenuOpen(false);
     setIsNewSkillModalOpen(true);
+  };
+
+  const openNewPromptModal = () => {
+    setIsMenuOpen(false);
+    setIsNewPromptModalOpen(true);
+  };
+
+  const handleCreatePromptEval = async (target: string, sampleSize: number, body: string) => {
+    setCreating(true);
+    try {
+      const res = await createPromptEvalSession({
+        prompt_target: target,
+        sample_size: sampleSize,
+        prompt_body: body,
+      });
+      setIsNewPromptModalOpen(false);
+      navigate(`/project/${res.session_id}?tab=skill`);
+    } catch (err) {
+      console.error("Failed to create prompt eval:", err);
+      alert(`Error: ${err instanceof Error ? err.message : "Unknown error"}`);
+    } finally {
+      setCreating(false);
+    }
   };
 
   // Handle "Analyze" click from modal
@@ -171,15 +219,39 @@ export default function Home() {
             <GearIcon />
             Settings
           </Button>
-          <Button
-            size="small"
-            variant="primary"
-            onClick={openNewSkillModal}
-            disabled={creating}
-          >
-            {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-            New skill eval
-          </Button>
+          <div ref={menuRef} className="relative flex items-stretch">
+            <Button
+              size="small"
+              variant="primary"
+              onClick={openNewSkillModal}
+              disabled={creating}
+              className="rounded-r-none"
+            >
+              {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+              New skill eval
+            </Button>
+            <Button
+              size="small"
+              variant="primary"
+              onClick={() => setIsMenuOpen((v) => !v)}
+              disabled={creating}
+              aria-label="More eval types"
+              className="rounded-l-none border-l border-black/20 px-2"
+            >
+              <ChevronDown className="w-4 h-4" />
+            </Button>
+            {isMenuOpen && (
+              <div className="absolute right-0 top-full mt-1 w-56 bg-surface-raised border border-border shadow-lg z-30">
+                <button
+                  type="button"
+                  onClick={openNewPromptModal}
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-fill-neutral/30 text-foreground"
+                >
+                  New prompt eval
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
@@ -226,6 +298,11 @@ export default function Home() {
                       <span className="text-sm text-fg-contrast truncate">
                         {project.name}
                       </span>
+                      {project.kind === "prompt" && (
+                        <span className="font-mono text-xs text-fg-dim bg-fill-neutral px-1.5 py-0.5">
+                          prompt
+                        </span>
+                      )}
                       {badge && (
                         <span className="font-mono text-xs text-fg-dim bg-fill-neutral px-1.5 py-0.5">
                           {badge}
@@ -261,6 +338,12 @@ export default function Home() {
         isLoading={creating}
         onClose={() => setIsNewSkillModalOpen(false)}
         onAnalyze={handleAnalyze}
+      />
+      <NewPromptEvalModal
+        isOpen={isNewPromptModalOpen}
+        isLoading={creating}
+        onClose={() => setIsNewPromptModalOpen(false)}
+        onCreate={handleCreatePromptEval}
       />
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
     </div>

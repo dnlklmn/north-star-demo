@@ -21,6 +21,9 @@ interface Props {
   dataset: Dataset | null
   scorerCount: number
   hasSkillBody: boolean
+  /** True for kind=prompt projects. Skips skill_body precondition + reframes
+   *  copy ("the chosen prompt builder" instead of "your SKILL.md"). */
+  isPromptEval?: boolean
   onExport: () => void
   /** Navigate to Improve tab — shown as a CTA below the latest completed run. */
   onRequestImprove?: () => void
@@ -40,6 +43,10 @@ interface Props {
   /** Opens the Settings modal so the user can add missing API keys
    *  (Braintrust for running evals, OpenRouter for non-Claude judges). */
   onOpenSettings?: () => void
+  /** Called when an eval run reaches a terminal state. Parent should refetch
+   *  the dataset so badges that change at run-completion (e.g. the "new"
+   *  tags the backend clears post-run) drop off the UI immediately. */
+  onRunTerminal?: () => void
 }
 
 const POLL_INTERVAL_MS = 2000
@@ -50,6 +57,16 @@ function scoreColor(score: number): string {
   if (score >= 0.8) return 'text-success'
   if (score >= 0.5) return 'text-warning'
   return 'text-danger'
+}
+
+/** Map the raw judge model ID stored on a run to a friendly label.
+ *  Falls back to the raw ID for models that aren't in our known list
+ *  (e.g. older runs predating an option update). */
+function judgeLabel(modelId: string | null | undefined): string | null {
+  if (!modelId) return null
+  const opt = JUDGE_MODEL_OPTIONS.find((o) => o.value === modelId)
+  if (opt) return opt.label.replace(' (OpenRouter)', '').replace('Default (', '').replace(')', '')
+  return modelId
 }
 
 function formatWhen(iso: string | null): string {
@@ -63,6 +80,7 @@ export default function EvaluatePanel({
   dataset,
   scorerCount,
   hasSkillBody,
+  isPromptEval = false,
   onExport,
   onRequestImprove,
   autoRun,
@@ -72,11 +90,18 @@ export default function EvaluatePanel({
   onGoToScorers,
   onGenerateScorersInline,
   onOpenSettings,
+  onRunTerminal,
 }: Props) {
   const [inlineGenScorers, setInlineGenScorers] = useState(false)
   const exampleCount = dataset?.examples?.length || 0
   const approvedCount = (dataset?.examples || []).filter(
     (e) => e.review_status === 'approved',
+  ).length
+  // Rows tagged "new" — added by the prompt-eval auto-refresh from turns.
+  // We show a notice on this tab so the user knows the dataset has grown
+  // since the last eval run and a re-run would cover the new evidence.
+  const newSinceRefresh = (dataset?.examples || []).filter(
+    (e) => (e.coverage_tags || []).includes('new'),
   ).length
 
   // --- Braintrust key (managed in Settings now; we only check presence) ---
@@ -140,6 +165,10 @@ export default function EvaluatePanel({
         setActiveRun(fresh)
         if (TERMINAL_STATUSES.has(fresh.status)) {
           refreshRuns()
+          // Tell the parent so it can refetch the dataset — backend clears
+          // "new" tags from rows that participated in the run, and we want
+          // the "X new rows" banner to drop without a manual reload.
+          onRunTerminal?.()
         }
       } catch {
         // transient — try again next tick
@@ -156,7 +185,7 @@ export default function EvaluatePanel({
 
   const canRun =
     keySaved &&
-    hasSkillBody &&
+    (isPromptEval || hasSkillBody) &&
     scorerCount > 0 &&
     approvedCount > 0 &&
     !starting &&
@@ -172,10 +201,16 @@ export default function EvaluatePanel({
           experiment_name: overrides?.experiment_name ?? (experiment.trim() || undefined),
           limit: overrides?.limit ?? (limit.trim() ? parseInt(limit, 10) : undefined),
           include_triggering: overrides?.include_triggering ?? includeTriggering,
-          // Only forward a judge_model override when OpenRouter is actually
-          // configured — a stale localStorage value from before the key was
-          // removed would otherwise error out on the backend.
-          judge_model: hasOpenRouterKey && judgeModel ? judgeModel : undefined,
+          // Forward a judge_model override whenever it's set, but suppress
+          // it for OpenRouter slugs when no OR key is configured — those
+          // would 404 on the backend. Anthropic IDs (no slash) always go
+          // through.
+          judge_model:
+            judgeModel
+              ? (judgeModel.includes('/') && !hasOpenRouterKey
+                  ? undefined
+                  : judgeModel)
+              : undefined,
         })
         setActiveRun(run)
         // Refresh immediately so the pending row shows up in history, and
@@ -229,7 +264,7 @@ export default function EvaluatePanel({
   if (!keySaved) {
     blockers.push({ id: 'key', label: 'Braintrust API key required (enter below)' })
   }
-  if (!hasSkillBody) {
+  if (!isPromptEval && !hasSkillBody) {
     blockers.push({
       id: 'skill',
       label: 'Paste a SKILL.md to seed the session',
@@ -273,6 +308,19 @@ export default function EvaluatePanel({
 
       <div className="flex-1 overflow-y-auto p-6">
         <div className="max-w-2xl space-y-8">
+          {isPromptEval && newSinceRefresh > 0 && (
+            <div className="flex items-start gap-3 px-3 py-2 bg-accent/10 border border-accent/30 text-xs">
+              <Sparkles className="w-4 h-4 text-accent flex-shrink-0 mt-0.5" />
+              <div className="text-foreground">
+                <span className="font-medium">
+                  {newSinceRefresh} new {newSinceRefresh === 1 ? 'row' : 'rows'} added
+                </span>{' '}
+                since the last eval run — turns landed in production and were
+                auto-imported into the dataset. Run the eval to score them.
+              </div>
+            </div>
+          )}
+
           {/* --- Braintrust run section --- */}
           <section>
             <div className="flex items-center gap-2 mb-3">
@@ -282,8 +330,9 @@ export default function EvaluatePanel({
               <div>
                 <h3 className="text-sm font-semibold text-foreground">Run with Braintrust</h3>
                 <p className="text-xs text-muted-foreground">
-                  Runs each approved dataset row through Claude with your SKILL.md as system prompt,
-                  scores with the charter's scorers, streams results into Braintrust.
+                  {isPromptEval
+                    ? "Replays the prompt under test against each sampled turn snapshot, scores with the project's scorers, streams results into Braintrust."
+                    : "Runs each approved dataset row through Claude with your SKILL.md as system prompt, scores with the charter's scorers, streams results into Braintrust."}
                 </p>
               </div>
             </div>
@@ -373,58 +422,84 @@ export default function EvaluatePanel({
                   className="w-full text-xs bg-background border border-border px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-accent"
                 />
               </div>
-              <div className="flex items-end">
-                <label
-                  className="flex items-center gap-2 text-xs text-foreground cursor-pointer"
-                  title="Off-target rows have no expected_output — this will just log what Claude produces, not score it. Use skill-creator for proper routing evals."
-                >
-                  <input
-                    type="checkbox"
-                    checked={includeTriggering}
-                    onChange={(e) => setIncludeTriggering(e.target.checked)}
-                    className="w-3.5 h-3.5"
-                  />
-                  Include off-target rows (should NOT trigger)
-                </label>
-              </div>
+              {!isPromptEval && (
+                <div className="flex items-end">
+                  <label
+                    className="flex items-center gap-2 text-xs text-foreground cursor-pointer"
+                    title="Off-target rows have no expected_output — this will just log what Claude produces, not score it. Use skill-creator for proper routing evals."
+                  >
+                    <input
+                      type="checkbox"
+                      checked={includeTriggering}
+                      onChange={(e) => setIncludeTriggering(e.target.checked)}
+                      className="w-3.5 h-3.5"
+                    />
+                    Include off-target rows (should NOT trigger)
+                  </label>
+                </div>
+              )}
               <div className="col-span-2">
                 <label
                   className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide block mb-1"
-                  title="Model used to grade scorer outputs. Non-Claude judges route via OpenRouter — configure an sk-or-... key in Settings to enable. The skill under test always runs on Claude."
+                  title="Model used to grade scorer outputs. Anthropic judges work out of the box; non-Claude (OpenRouter) options require an sk-or-... key in Settings."
                 >
                   Judge model
                 </label>
-                {hasOpenRouterKey ? (
-                  <select
-                    value={judgeModel}
-                    onChange={(e) => updateJudgeModel(e.target.value)}
-                    className="w-full text-xs bg-background border border-border px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-accent"
-                  >
-                    {JUDGE_MODEL_OPTIONS.map((opt) => (
-                      <option key={opt.label} value={opt.value ?? ''}>
+                {/* Always show the picker — Anthropic judges work without an
+                    OpenRouter key. Non-Anthropic options stay disabled until
+                    an sk-or-... key is configured. Routing for the selected
+                    model (direct Anthropic vs via OpenRouter) is summarized
+                    in the status line below. */}
+                <select
+                  value={judgeModel}
+                  onChange={(e) => updateJudgeModel(e.target.value)}
+                  className="w-full text-xs bg-background border border-border px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-accent"
+                >
+                  {JUDGE_MODEL_OPTIONS.map((opt) => {
+                    const needsOR = opt.provider === 'openrouter'
+                    const disabled = needsOR && !hasOpenRouterKey
+                    return (
+                      <option
+                        key={opt.label}
+                        value={opt.value ?? ''}
+                        disabled={disabled}
+                      >
                         {opt.label}
                       </option>
-                    ))}
-                  </select>
-                ) : (
-                  // Non-Claude judges require an OpenRouter key. Rather than
-                  // silently failing on run, we disable the picker and route
-                  // the user to Settings to add one.
-                  <div className="flex items-center justify-between gap-3 px-3 py-2 bg-muted/30 border border-border text-xs">
-                    <span className="text-muted-foreground truncate">
-                      Claude Sonnet (default). Add an OpenRouter key to pick a non-Claude judge.
-                    </span>
-                    {onOpenSettings && (
+                    )
+                  })}
+                </select>
+                {(() => {
+                  // Tell the user which API the selected judge will hit:
+                  //   - With an sk-or-... key, EVERY model routes via OpenRouter
+                  //     (Anthropic ones included — OpenRouter proxies them).
+                  //   - Without one, only Anthropic-native options work; OR
+                  //     options are disabled and we surface the upgrade path.
+                  const selectedOpt = JUDGE_MODEL_OPTIONS.find(o => (o.value ?? '') === judgeModel) || JUDGE_MODEL_OPTIONS[0]
+                  if (hasOpenRouterKey) {
+                    return (
+                      <p className="mt-1 text-[10px] text-muted-foreground">
+                        Routes via OpenRouter (your stored API key is sk-or-…).
+                      </p>
+                    )
+                  }
+                  if (selectedOpt.provider === 'openrouter') {
+                    return (
                       <button
                         onClick={onOpenSettings}
-                        className="flex-shrink-0 inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-foreground hover:bg-muted"
+                        className="mt-1 inline-flex items-center gap-1 text-[10px] text-warning hover:text-foreground"
                       >
                         <SettingsIcon className="w-3 h-3" />
-                        Settings
+                        This judge needs an OpenRouter key — add one in Settings.
                       </button>
-                    )}
-                  </div>
-                )}
+                    )
+                  }
+                  return (
+                    <p className="mt-1 text-[10px] text-muted-foreground">
+                      Routes direct to Anthropic. Add an OpenRouter key in Settings to also evaluate with GPT, Gemini, Llama.
+                    </p>
+                  )
+                })()}
               </div>
             </div>
 
@@ -465,6 +540,14 @@ export default function EvaluatePanel({
                         title="Which SKILL.md version this run evaluated against"
                       >
                         SKILL v{activeRun.skill_version_number}
+                      </span>
+                    )}
+                    {judgeLabel(activeRun.judge_model_used) && (
+                      <span
+                        className="font-mono text-[10px] uppercase px-1.5 py-0.5 bg-muted text-muted-foreground"
+                        title="Judge model used to grade this run"
+                      >
+                        JUDGE: {judgeLabel(activeRun.judge_model_used)}
                       </span>
                     )}
                   </div>
@@ -721,6 +804,14 @@ export default function EvaluatePanel({
                           {r.skill_version_number != null && (
                             <span className="font-mono text-[10px] uppercase px-1 bg-muted/40 text-muted-foreground">
                               SKILL v{r.skill_version_number}
+                            </span>
+                          )}
+                          {judgeLabel(r.judge_model_used) && (
+                            <span
+                              className="font-mono text-[10px] uppercase px-1 bg-muted/40 text-muted-foreground"
+                              title="Judge model used to grade this run"
+                            >
+                              JUDGE: {judgeLabel(r.judge_model_used)}
                             </span>
                           )}
                         </p>

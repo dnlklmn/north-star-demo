@@ -273,6 +273,57 @@ export async function setSessionMode(
   return res.json()
 }
 
+export interface PromptTargetInfo {
+  target: string
+  label: string
+  builder_name: string
+  description?: string
+  source_path?: string | null
+  /** Rendered prompt template with placeholder text marking the variable
+   *  parts. Used to pre-fill the prompt-eval modal so the user can review
+   *  and tweak before creating the session. */
+  prompt_text?: string
+}
+
+export async function listPromptTargets(): Promise<PromptTargetInfo[]> {
+  const res = await apiFetch(`${BASE}/prompt-targets`)
+  if (!res.ok) throw new Error(`Failed to list prompt targets: ${res.status}`)
+  return res.json()
+}
+
+export interface CreatePromptEvalResponse {
+  session_id: string
+  prompt_target: string
+  rows_sampled: number
+  rows_deduped: number
+  dataset_id: string
+  message: string
+}
+
+export async function createPromptEvalSession(input: {
+  prompt_target: string
+  name?: string
+  sample_size?: number
+  /** Optional override of the prompt body fed to the seed pass. None / empty
+   *  falls back to the registered prompt's rendered text. */
+  prompt_body?: string
+}): Promise<CreatePromptEvalResponse> {
+  const res = await apiFetch(`${BASE}/sessions/prompt-eval`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  if (!res.ok) {
+    let detail = `Failed to create prompt eval (${res.status})`
+    try {
+      const j = await res.json()
+      if (j?.detail) detail = j.detail
+    } catch { /* body wasn't JSON */ }
+    throw new Error(detail)
+  }
+  return res.json()
+}
+
 export async function seedFromSkill(
   sessionId: string,
   body: { skill_body: string; skill_name?: string; skill_description?: string }
@@ -604,6 +655,43 @@ export async function autoReviewExamples(datasetId: string): Promise<{ reviewed:
     method: 'POST',
   })
   if (!res.ok) throw new Error(`Failed to review: ${res.status}`)
+  return res.json()
+}
+
+export async function refreshDatasetFromTurns(
+  datasetId: string,
+): Promise<{ added: number; total: number; message: string }> {
+  const res = await apiFetch(`${BASE}/datasets/${datasetId}/refresh-from-turns`, {
+    method: 'POST',
+  })
+  if (!res.ok) {
+    let detail = `Failed to refresh from turns (${res.status})`
+    try {
+      const j = await res.json()
+      if (j?.detail) detail = j.detail
+    } catch { /* not json */ }
+    throw new Error(detail)
+  }
+  return res.json()
+}
+
+export async function retagExamplesAgainstCharter(
+  datasetId: string,
+): Promise<{
+  retagged: number
+  retags: Array<{ example_id: string; feature_area: string; coverage_tags: string[] }>
+}> {
+  const res = await apiFetch(`${BASE}/datasets/${datasetId}/retag-against-charter`, {
+    method: 'POST',
+  })
+  if (!res.ok) {
+    let detail = `Failed to retag (${res.status})`
+    try {
+      const j = await res.json()
+      if (j?.detail) detail = j.detail
+    } catch { /* not json */ }
+    throw new Error(detail)
+  }
   return res.json()
 }
 

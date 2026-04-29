@@ -20,6 +20,19 @@ interface Props {
   skillBody: string
   skillName: string | null
   skillDescription: string | null
+  /** When the parent session has kind='prompt' the body describes a North Star
+   *  internal prompt (e.g. build_generate_draft_prompt), not a user-authored
+   *  skill. Editing changes the seed/charter signal but does NOT change what
+   *  runs at eval time — the eval runner replays the prompt builder by
+   *  prompt_target. The panel surfaces this with a banner so the user
+   *  doesn't think they're editing the prompt under test. */
+  isPromptEval?: boolean
+  /** Repo-relative "path:line" of the prompt builder under test, e.g.
+   *  "backend/app/prompt.py:337". Shown in the prompt-eval banner so the
+   *  user can find the source instantly. */
+  promptSourcePath?: string | null
+  /** Internal name of the prompt builder, e.g. "build_generate_draft_prompt". */
+  promptBuilderName?: string | null
   onSkillBodyChange: (body: string) => void
   /** Called after a successful skill-seed (first Analyze). Parent refreshes
    *  session state to pick up extracted goals/users/stories and unlocks
@@ -50,6 +63,9 @@ export default function SkillPanel({
   skillBody,
   skillName,
   skillDescription,
+  isPromptEval = false,
+  promptSourcePath,
+  promptBuilderName,
   onSkillBodyChange,
   onSeeded,
   onStartFromScratch,
@@ -249,38 +265,40 @@ export default function SkillPanel({
   // version is persisted.
   const fieldsBlock = (
     <>
-      <section className="grid grid-cols-2 gap-3">
-        <div>
-          <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide block mb-1">
-            Skill name
-          </label>
-          <input
-            type="text"
-            placeholder="auto-detected from frontmatter"
-            value={nameDraft}
-            onChange={(e) => setNameDraft(e.target.value)}
-            className="w-full px-3 py-2 border border-border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-accent"
-            disabled={working}
-          />
-        </div>
-        <div>
-          <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide block mb-1">
-            Description
-          </label>
-          <input
-            type="text"
-            placeholder="the routing signal — auto-detected from frontmatter"
-            value={descriptionDraft}
-            onChange={(e) => setDescriptionDraft(e.target.value)}
-            className="w-full px-3 py-2 border border-border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-accent"
-            disabled={working}
-          />
-        </div>
-      </section>
+      {!isPromptEval && (
+        <section className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide block mb-1">
+              Skill name
+            </label>
+            <input
+              type="text"
+              placeholder="auto-detected from frontmatter"
+              value={nameDraft}
+              onChange={(e) => setNameDraft(e.target.value)}
+              className="w-full px-3 py-2 border border-border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-accent"
+              disabled={working}
+            />
+          </div>
+          <div>
+            <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide block mb-1">
+              Description
+            </label>
+            <input
+              type="text"
+              placeholder="the routing signal — auto-detected from frontmatter"
+              value={descriptionDraft}
+              onChange={(e) => setDescriptionDraft(e.target.value)}
+              className="w-full px-3 py-2 border border-border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-accent"
+              disabled={working}
+            />
+          </div>
+        </section>
+      )}
 
       <section>
         <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide block mb-1">
-          SKILL.md body (with or without frontmatter)
+          {isPromptEval ? "Prompt template" : "SKILL.md body (with or without frontmatter)"}
         </label>
         <textarea
           value={draft}
@@ -381,19 +399,43 @@ export default function SkillPanel({
 
   return (
     <PanelLayout
-      title="Skill"
+      title={isPromptEval ? "Prompt" : "Skill"}
       subtitle={
-        hasVersions
-          ? activeVersion
-            ? `Active v${activeVersion.version}. Edit to create a new version.`
-            : undefined
-          : 'Paste a SKILL.md or a GitHub link, then click Analyze.'
+        isPromptEval
+          ? "The actual prompt being evaluated, rendered with placeholders for the variable parts."
+          : hasVersions
+            ? activeVersion
+              ? `Active v${activeVersion.version}. Edit to create a new version.`
+              : undefined
+            : 'Paste a SKILL.md or a GitHub link, then click Analyze.'
       }
       footer={footer}
     >
       <div className="max-w-3xl space-y-6">
+        {isPromptEval && (promptSourcePath || promptBuilderName) && (
+          <div className="text-xs text-muted-foreground bg-fill-neutral/30 border border-border p-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 items-baseline">
+            {promptBuilderName && (
+              <>
+                <span className="text-foreground/80 font-medium">Builder</span>
+                <code className="font-mono break-all">{promptBuilderName}</code>
+              </>
+            )}
+            {promptSourcePath && (
+              <>
+                <span className="text-foreground/80 font-medium">Source</span>
+                <code className="font-mono break-all">{promptSourcePath}</code>
+              </>
+            )}
+            <span className="text-foreground/80 font-medium">To re-run</span>
+            <span>
+              Edit the file in your North Star checkout, restart the backend,
+              then click <em>Run evaluation</em> on the Evaluations tab. The
+              eval task replays this prompt against every approved row.
+            </span>
+          </div>
+        )}
         {/* Source tabs only before the first analyze. */}
-        {!hasVersions && (
+        {!isPromptEval && !hasVersions && (
           <section>
             <div className="flex items-stretch border-b border-border mb-3">
               <button

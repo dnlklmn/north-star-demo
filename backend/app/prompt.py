@@ -1912,3 +1912,67 @@ Rules:
 - Keep descriptions clear and in plain language"""
 
 
+
+
+def build_retag_examples_against_charter_prompt(charter: dict, examples: list[dict]) -> str:
+    """For each example, decide which alignment feature_area it most resembles
+    and which charter coverage criteria its input scenario hits.
+
+    Used by prompt-eval projects: the dataset arrives via sampled `turns` with
+    coarse `feature_area` buckets ("goals_only", "goals+stories", etc.) that
+    don't align with the charter's output-quality dimensions. After charter
+    generation we re-tag each row so the Coverage Map can show real gaps.
+    """
+    coverage = charter.get("coverage", {}).get("criteria", []) or []
+    alignment = charter.get("alignment", []) or []
+    feature_areas = [a.get("feature_area", "") for a in alignment if a.get("feature_area")]
+
+    alignment_block = ""
+    for a in alignment:
+        alignment_block += (
+            f"\n- **{a.get('feature_area', '')}**: "
+            f"good = {a.get('good', '')[:120]} | "
+            f"bad = {a.get('bad', '')[:120]}"
+        )
+
+    # Trim each example's input to keep the batched prompt bounded.
+    rows = []
+    for ex in examples:
+        inp = ex.get("input") or ""
+        if len(inp) > 800:
+            inp = inp[:800] + "…"
+        rows.append({"id": ex.get("id"), "input": inp})
+
+    return f"""Re-tag each dataset row against the charter so the coverage matrix is meaningful.
+
+For every row, decide:
+1. Which alignment feature_area best describes what the prompt is being asked to handle for that input. Pick exactly one from the list. If none fit cleanly, pick the closest.
+2. Which coverage criteria the input scenario hits. Multiple tags are fine; empty list is fine if nothing applies.
+
+## Charter coverage criteria
+{json.dumps(coverage, indent=2)}
+
+## Charter alignment feature areas
+{alignment_block if alignment_block else '(none defined)'}
+
+## Rows to retag
+{json.dumps(rows, indent=2)}
+
+## Output
+
+Return ONLY valid JSON, in row order:
+{{
+  "retags": [
+    {{
+      "example_id": "...",
+      "feature_area": "<one of the alignment feature_areas above, exactly>",
+      "coverage_tags": ["<criterion text or short slug>", "..."]
+    }}
+  ]
+}}
+
+Rules:
+- `feature_area` must match one of {json.dumps(feature_areas)} exactly. If alignment is empty, use "general".
+- `coverage_tags` should reference actual coverage criteria text (or a recognizable short form). Empty list is allowed.
+- Be conservative — don't add tags that aren't clearly supported by the input.
+- Output rows in the same order they came in."""

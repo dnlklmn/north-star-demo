@@ -249,6 +249,19 @@ export default function CharterPanel({
         ) : undefined
       }
     >
+      <div className="relative">
+        {/* Regenerate overlay — fires when the caller flags loading=true while
+            a non-empty charter is on screen. The user sees a "Regenerating…"
+            label over their existing charter so they know work is in flight
+            without us swapping out the panel. */}
+        {loading && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-bg-default/70 backdrop-blur-[1px]">
+            <div className="flex items-center gap-2 px-4 py-2 bg-surface-raised border border-border shadow-lg">
+              <Loader2 className="w-4 h-4 text-fg-dim animate-spin" />
+              <span className="text-sm text-fg-contrast">Regenerating…</span>
+            </div>
+          </div>
+        )}
       {(() => {
         // Tab definitions kept inline so labels, help copy, and readiness
         // scores are declared side-by-side. Safety stays hidden until the
@@ -450,6 +463,7 @@ export default function CharterPanel({
           </>
         );
       })()}
+      </div>
     </PanelLayout>
   );
 }

@@ -65,6 +65,8 @@ export interface SessionInput {
   story_groups?: StoryGroup[]
 }
 
+export type SessionKind = 'skill' | 'prompt'
+
 export interface ProjectSummary {
   id: string
   name: string
@@ -73,6 +75,8 @@ export interface ProjectSummary {
   agent_status: AgentStatus
   has_charter: boolean
   has_dataset: boolean
+  kind?: SessionKind
+  prompt_target?: string | null
 }
 
 export interface ScorerDef {
@@ -101,6 +105,15 @@ export interface SessionState {
   generated_at_skill_version?: Record<string, string>
   /** Full version history. Mirrors backend skill_versions. */
   skill_versions?: SkillVersion[]
+  /** Top-level discriminator: skill (default) or prompt (eval one of NS's own prompts). */
+  kind?: SessionKind
+  /** When kind=prompt: which prompt builder this project evaluates (e.g. "generate"). */
+  prompt_target?: string | null
+  /** When kind=prompt: repo-relative "path:line" of the prompt builder.
+   *  Surface this on the Prompt panel so the user knows where to edit. */
+  prompt_source_path?: string | null
+  /** When kind=prompt: builder function name, e.g. "build_generate_draft_prompt". */
+  prompt_builder_name?: string | null
 }
 
 export interface ExtractedStory {
@@ -318,6 +331,9 @@ export interface EvalRunSummary {
   finished_at: string | null
   skill_version_id?: string | null
   skill_version_number?: number | null
+  /** Judge model used to grade this run, e.g. "claude-opus-4-7" or
+   *  "openai/gpt-4o". Null on legacy runs created before persistence. */
+  judge_model_used?: string | null
   /** Full charter at the moment the run started. Null for older runs
    *  created before this column existed. */
   charter_snapshot?: Charter | null

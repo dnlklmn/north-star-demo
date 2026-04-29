@@ -52,6 +52,18 @@ class EvalMode(str, Enum):
     triggered = "triggered"
 
 
+class SessionKind(str, Enum):
+    """Top-level discriminator on what this North Star project evaluates.
+
+    - skill: the user's own SKILL.md / agent / feature (the default product flow).
+    - prompt: one of North Star's *internal* prompts (e.g. build_generate_draft_prompt).
+      Inputs are SessionState snapshots sampled from the `turns` table; the
+      task function rebuilds state and re-runs the prompt under test.
+    """
+    skill = "skill"
+    prompt = "prompt"
+
+
 # --- Charter models ---
 
 class TaskDefinition(BaseModel):
@@ -145,6 +157,22 @@ class SessionState(BaseModel):
     extracted_stories: list[dict] = Field(default_factory=list)
     scorers: list[dict] = Field(default_factory=list)
     eval_mode: EvalMode = EvalMode.standard
+    # SessionKind discriminates "skill" projects (the default product flow,
+    # paste a SKILL.md and eval it) from "prompt" projects (eval one of North
+    # Star's own prompts — e.g. build_generate_draft_prompt — against turn
+    # snapshots sampled from the turns table).
+    kind: SessionKind = SessionKind.skill
+    # For kind=prompt only: identifies which prompt builder is under test.
+    # Mirrors a turn_type value, e.g. "generate" for build_generate_draft_prompt.
+    prompt_target: Optional[str] = None
+    # Repo-relative "path:line" of the prompt builder under test. Stamped at
+    # session-create time so the Prompt panel can tell the user exactly where
+    # to edit to change what runs at eval time. Only set when kind=prompt.
+    prompt_source_path: Optional[str] = None
+    # Builder function name (e.g. "build_generate_draft_prompt"). Stamped at
+    # session-create time so the Prompt panel can show it without an extra
+    # API roundtrip. Only set when kind=prompt.
+    prompt_builder_name: Optional[str] = None
     # Every accepted SKILL.md edit creates a new SkillVersion. The current
     # active body always lives on charter.task.skill_body; this list is history.
     skill_versions: list[dict] = Field(default_factory=list)
@@ -180,6 +208,8 @@ class ProjectSummary(BaseModel):
     agent_status: str
     has_charter: bool = False
     has_dataset: bool = False
+    kind: str = "skill"
+    prompt_target: Optional[str] = None
 
 
 class UpdateInputRequest(BaseModel):
@@ -337,6 +367,59 @@ class SkillSeedResponse(BaseModel):
     message: str  # short human-readable summary of what was seeded
 
 
+# --- Prompt-eval (eval North Star's own prompts) ---
+
+class CreatePromptEvalRequest(BaseModel):
+    """Spin up a prompt-eval project from sampled `turns` rows.
+
+    Picks a `prompt_target` (e.g. "generate" for build_generate_draft_prompt),
+    samples turns of that type from the DB, builds a dataset of input snapshots,
+    and seeds default scorers tailored to the target.
+    """
+    prompt_target: str
+    # Bounded so a runaway client can't fill the sessions table with a 10MB
+    # name; matches the existing skill-eval session-name flow.
+    name: Optional[str] = Field(default=None, max_length=200)
+    # Pydantic clamps at validation time so the endpoint can rely on a sane
+    # value without re-clamping. Ceiling matches sample_turns_for_prompt_eval
+    # default; floor of 1 keeps the request meaningful.
+    sample_size: int = Field(default=30, ge=1, le=200)
+    # Optional override of the prompt body fed into the seed pass + Skill
+    # panel. Lets the user paste / edit the prompt text in the modal before
+    # creating the session. None = use the registered prompt's rendered text.
+    # Note: this affects seeding only — the eval task still replays the
+    # registered build_*_prompt builder by prompt_target. Capped at 40k
+    # chars so a runaway client can't burn unbounded LLM tokens via the
+    # seed pass; the rendered template for `generate` is ~2.2k for context.
+    prompt_body: Optional[str] = Field(default=None, max_length=40000)
+
+
+class CreatePromptEvalResponse(BaseModel):
+    session_id: str
+    prompt_target: str
+    rows_sampled: int
+    rows_deduped: int
+    dataset_id: str
+    message: str
+
+
+class PromptTargetInfo(BaseModel):
+    target: str
+    label: str
+    builder_name: str
+    description: Optional[str] = None
+    # Repo-relative "path:line" pointer to the prompt builder, computed via
+    # inspect.getsourcelines on the registered function. Lets the modal +
+    # Prompt panel show the user where to edit. None when the function isn't
+    # backed by a source file.
+    source_path: Optional[str] = None
+    # Rendered prompt template with placeholder text marking the variable
+    # parts. The modal pre-fills the textarea with this so the user can
+    # review or tweak before creating the session. ~3KB per target — well
+    # within HTTP response budget for the small registry we expect.
+    prompt_text: Optional[str] = None
+
+
 # --- Eval-run requests (Braintrust execution eval from UI) ---
 
 class RunEvalRequest(BaseModel):
@@ -366,6 +449,10 @@ class EvalRunSummary(BaseModel):
     # version and diff averages across versions.
     skill_version_id: Optional[str] = None
     skill_version_number: Optional[int] = None
+    # Judge model used to grade this run's outputs. Persisted at run-creation
+    # so history can show "ran with claude-opus-4-7" etc. without inferring
+    # from per_row metadata. NULL on legacy rows created before this column.
+    judge_model_used: Optional[str] = None
     # Full charter at the moment this run was started — so "View charter"
     # on an old run shows exactly what was evaluated, not the current live
     # charter (which may have been edited since).

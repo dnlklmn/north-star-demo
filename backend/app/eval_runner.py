@@ -22,7 +22,7 @@ import braintrust
 
 
 DEFAULT_MODEL = os.environ.get("EVAL_MODEL", "claude-opus-4-7")
-DEFAULT_JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "claude-sonnet-4-20250514")
+DEFAULT_JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "claude-sonnet-4-5-20250929")
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -258,6 +258,43 @@ def build_rows(examples: list[dict], include_triggering: bool) -> list[dict]:
     return out
 
 
+def build_rows_for_prompt_eval(examples: list[dict]) -> list[dict]:
+    """Shape rows for prompt-eval mode.
+
+    No triggering / off-target filtering — every approved row participates.
+    The `input` field on each example is already a JSON-serialized snapshot;
+    keep it as a string so the task fn can json.loads it.
+    """
+    import datetime as _dt
+
+    def _clean(value):
+        if isinstance(value, _dt.datetime):
+            return value.isoformat()
+        if isinstance(value, dict):
+            return {k: _clean(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_clean(v) for v in value]
+        return value
+
+    out: list[dict] = []
+    for row in examples:
+        if row.get("review_status") not in (None, "approved"):
+            continue
+        out.append(
+            {
+                "input": row.get("input") or "",
+                "expected": row.get("expected_output") or "",
+                "metadata": {
+                    "id": row.get("id"),
+                    "feature_area": row.get("feature_area"),
+                    "coverage_tags": _clean(row.get("coverage_tags") or []),
+                },
+                "tags": (row.get("coverage_tags") or [])[:5],
+            }
+        )
+    return out
+
+
 def make_task(
     client: anthropic.Anthropic,
     skill_body: str,
@@ -272,6 +309,56 @@ def make_task(
             max_tokens=2048,
             system=skill_body,
             messages=[{"role": "user", "content": user_input}],
+        )
+        return response.content[0].text if response.content else ""
+
+    return task
+
+
+def make_task_for_prompt(
+    client: anthropic.Anthropic,
+    prompt_target: str,
+    model: str,
+    body_template: str | None = None,
+) -> Callable[[dict], str]:
+    """Task function for prompt-eval.
+
+    Two paths:
+      - body_template provided (the in-app prompt body, possibly user-edited):
+        treat it as a template, substitute the row's snapshot values via
+        the registered substitute_placeholders, send to the LLM. This is what
+        runs in normal prompt-eval flow — letting the user iterate on prompt
+        text in-app and have those edits actually drive the eval.
+      - body_template not provided: fall back to calling the registered
+        Python builder against the row's reconstructed state. Useful for CLI
+        evals that don't have a session.
+    """
+    import json
+    from .prompt_eval import get_prompt_target
+
+    pt = get_prompt_target(prompt_target)
+    if pt is None:
+        raise ValueError(f"Unknown prompt_target: {prompt_target}")
+
+    def task(row: dict) -> str:
+        raw_input = row["input"] if isinstance(row, dict) else str(row)
+        try:
+            snapshot = json.loads(raw_input) if isinstance(raw_input, str) else (raw_input or {})
+        except json.JSONDecodeError:
+            snapshot = {}
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+
+        if body_template:
+            prompt = pt.substitute_placeholders(body_template, snapshot)
+        else:
+            state = pt.build_state_from_snapshot(snapshot)
+            prompt = pt.build_prompt(state)
+
+        response = client.messages.create(
+            model=model,
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
         )
         return response.content[0].text if response.content else ""
 
@@ -340,9 +427,21 @@ def run_eval_sync(
     judge_model: str = DEFAULT_JUDGE_MODEL,
     include_triggering: bool = False,
     limit: int | None = None,
+    prompt_target: str | None = None,
+    prompt_body_template: str | None = None,
 ) -> EvalResult:
-    """Synchronously run a Braintrust Eval. Blocks. Call via asyncio.to_thread."""
-    if not skill_body.strip():
+    """Synchronously run a Braintrust Eval. Blocks. Call via asyncio.to_thread.
+
+    Two task modes:
+      - skill mode (default): runs `skill_body` as system prompt against each
+        row's `input` user message. `prompt_target` must be None.
+      - prompt mode (`prompt_target` given): rebuilds a SessionState from each
+        row's JSON-serialized snapshot and re-invokes the named prompt builder.
+        `skill_body` is ignored in this mode.
+    """
+    is_prompt_mode = bool(prompt_target)
+
+    if not is_prompt_mode and not skill_body.strip():
         raise ValueError("skill_body is empty — can't run the skill with no instructions.")
     if not scorer_defs:
         raise ValueError("No scorers provided. Generate them in the Scorers tab first.")
@@ -367,7 +466,10 @@ def run_eval_sync(
     if not scorers:
         raise ValueError("No scorers compiled successfully. Check the Scorers tab.")
 
-    rows = build_rows(examples, include_triggering=include_triggering)
+    if is_prompt_mode:
+        rows = build_rows_for_prompt_eval(examples)
+    else:
+        rows = build_rows(examples, include_triggering=include_triggering)
     if limit:
         rows = rows[:limit]
     if not rows:
@@ -389,7 +491,15 @@ def run_eval_sync(
             detail += ". Approve at least one row in the Dataset tab before running the eval."
         raise ValueError(f"No eligible rows to evaluate — {detail}")
 
-    task = make_task(task_client, skill_body, model)
+    if is_prompt_mode:
+        task = make_task_for_prompt(
+            task_client,
+            prompt_target,  # type: ignore[arg-type]
+            model,
+            body_template=prompt_body_template,
+        )
+    else:
+        task = make_task(task_client, skill_body, model)
 
     handle = braintrust.Eval(
         name=project,

@@ -25,10 +25,14 @@ interface SettingsPanelProps {
 
 type Tab = 'agent' | 'app'
 
+// Valid Anthropic model IDs as of 4.X family. The "-20250514" snapshots used
+// to exist for 4.0 but were retired; the live IDs are the 4.5 / 4.6 / 4.7
+// successors below. Keep these in sync with what api.anthropic.com accepts —
+// otherwise the "Analyze run" / charter-gen calls will 404 at request time.
 const MODEL_OPTIONS = [
-  { value: 'claude-sonnet-4-20250514', label: 'Claude Sonnet 4' },
-  { value: 'claude-opus-4-20250514', label: 'Claude Opus 4' },
-  { value: 'claude-haiku-4-20250514', label: 'Claude Haiku 4' },
+  { value: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5' },
+  { value: 'claude-opus-4-7', label: 'Claude Opus 4.7' },
+  { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5' },
 ]
 
 const CREATIVITY_LABELS: Record<string, string> = {
