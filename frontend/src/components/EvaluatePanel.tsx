@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Check, Download, Eye, ExternalLink, FileText, History, KeyRound, Loader2, PlayCircle, RotateCcw, Settings as SettingsIcon, Sparkles, X } from 'lucide-react'
+import { Check, ChevronDown, ChevronUp, Download, Eye, ExternalLink, FileText, History, KeyRound, Loader2, PlayCircle, RotateCcw, Settings as SettingsIcon, Sparkles, X } from 'lucide-react'
 import type { Charter, Dataset, EvalRunSummary, ImprovementSuggestion, SkillVersion } from '../types'
 import CharterDocument from './CharterDocument'
 import DiffModal from './DiffModal'
@@ -320,6 +320,10 @@ export default function EvaluatePanel({
   // request and the user gets a clear failure if it 4xx's.
   const [candidateActionBusy, setCandidateActionBusy] = useState(false)
   const [candidateActionError, setCandidateActionError] = useState<string | null>(null)
+  // Toggles the older-versions list under the version stack at the top of
+  // the main column. Defaults to collapsed — most users only care about
+  // candidate + active.
+  const [showAllVersions, setShowAllVersions] = useState(false)
   // When set, opens the CharterDocument modal showing exactly what the
   // user clicked "View charter" for — either a run's snapshot or the live one.
   const [viewingCharter, setViewingCharter] = useState<{
@@ -1024,46 +1028,225 @@ export default function EvaluatePanel({
             </div>
           )}
 
-          {/* Pending-candidate banner — visible whenever a candidate
-              exists, regardless of run state. Tells the user "you have a
-              proposed change waiting; run an eval to test it, or discard
-              it now". The richer Promote/Discard banner with row-by-row
-              diff appears only after a run lands; this is the always-on
-              entry point that reminds the user the candidate exists. */}
+          {/* Compact version stack — candidate (if any) on top with
+              Discard/Promote, active below. Replaces the old "pending
+              candidate" banner. Shows +X/-Y row regression pills derived
+              from the most recent completed run on each version (vs the
+              previous active baseline), so the user can see at a glance
+              whether the candidate actually beats active before promoting.
+              "See all" toggles a flat list of older versions for context. */}
           {(() => {
-            if (!candidateVersionId) return null
-            const candidate = skillVersions.find((v) => v.id === candidateVersionId)
-            if (!candidate) return null
-            return (
-              <div className="mb-3 flex items-center justify-between gap-3 border border-warning/40 bg-warning/5 px-3 py-2">
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-foreground">
-                    Candidate v{candidate.version} pending — run an eval to compare it to the active version.
-                  </p>
-                  <p className="text-xs text-muted-foreground mt-0.5 truncate">
-                    {candidate.notes || 'New SKILL.md from accepted suggestions.'}
-                  </p>
-                </div>
-                <button
-                  onClick={async () => {
-                    setCandidateActionError(null)
-                    setCandidateActionBusy(true)
-                    try {
-                      await discardSkillVersion(sessionId, candidateVersionId)
-                      await refreshSkillVersions()
-                      await onCandidateChanged?.()
-                    } catch (err) {
-                      setCandidateActionError(err instanceof Error ? err.message : 'Failed to discard')
-                    } finally {
-                      setCandidateActionBusy(false)
-                    }
-                  }}
-                  disabled={candidateActionBusy}
-                  className="flex-shrink-0 px-3 py-1.5 text-xs font-medium border border-border bg-surface hover:bg-muted/30 disabled:opacity-50"
-                  title="Discard the candidate without running an eval. Reverts SKILL.md to the active version. The candidate stays in history."
+            if (skillVersions.length === 0) return null
+
+            // Find the candidate + currently-active records explicitly.
+            const candidateVer = candidateVersionId
+              ? skillVersions.find((v) => v.id === candidateVersionId)
+              : null
+            const activeVer = activeVersionId
+              ? skillVersions.find((v) => v.id === activeVersionId)
+              : skillVersions[0]
+            if (!candidateVer && !activeVer) return null
+
+            // Latest run per version for the +X/-Y pill computation.
+            const latestRunFor = (verId: string) =>
+              runs.find(
+                (r) =>
+                  r.skill_version_id === verId &&
+                  (r.status === 'done' || r.status === 'failed'),
+              ) || null
+
+            // Compute row-diff stats vs the previous-active baseline.
+            const PASS_THRESHOLD = 0.8
+            const meanScore = (scores: Record<string, number> | undefined): number | null => {
+              if (!scores) return null
+              const vals = Object.values(scores)
+              if (!vals.length) return null
+              return vals.reduce((a, b) => a + b, 0) / vals.length
+            }
+            const computeDiff = (run: EvalRunSummary | null, baseline: EvalRunSummary | null) => {
+              if (!run) return null
+              if (!baseline) return null
+              const baselineByRow = new Map<string, number>()
+              for (const r of baseline.per_row) {
+                const id = (r.metadata as Record<string, unknown> | undefined)?.id as string | undefined
+                const m = meanScore(r.scores)
+                if (id && m !== null) baselineByRow.set(id, m)
+              }
+              let improved = 0
+              let regressed = 0
+              for (const r of run.per_row) {
+                const id = (r.metadata as Record<string, unknown> | undefined)?.id as string | undefined
+                if (!id) continue
+                const after = meanScore(r.scores)
+                const before = baselineByRow.get(id)
+                if (before === undefined || after === null) continue
+                const wasPassing = before >= PASS_THRESHOLD
+                const isPassing = after >= PASS_THRESHOLD
+                if (wasPassing && !isPassing) regressed++
+                else if (!wasPassing && isPassing) improved++
+              }
+              return { improved, regressed }
+            }
+
+            const candidateRun = candidateVer ? latestRunFor(candidateVer.id) : null
+            const activeRunForVer = activeVer ? latestRunFor(activeVer.id) : null
+            const candidateDiff = computeDiff(candidateRun, activeRunForVer)
+
+            const onDiscardCandidate = async () => {
+              if (!candidateVersionId) return
+              setCandidateActionError(null)
+              setCandidateActionBusy(true)
+              try {
+                await discardSkillVersion(sessionId, candidateVersionId)
+                await refreshSkillVersions()
+                await onCandidateChanged?.()
+              } catch (err) {
+                setCandidateActionError(err instanceof Error ? err.message : 'Failed to discard')
+              } finally {
+                setCandidateActionBusy(false)
+              }
+            }
+            const onPromoteCandidate = async () => {
+              if (!candidateVersionId) return
+              setCandidateActionError(null)
+              setCandidateActionBusy(true)
+              try {
+                await promoteSkillVersion(sessionId, candidateVersionId)
+                await refreshSkillVersions()
+                await onCandidateChanged?.()
+              } catch (err) {
+                setCandidateActionError(err instanceof Error ? err.message : 'Failed to promote')
+              } finally {
+                setCandidateActionBusy(false)
+              }
+            }
+
+            const renderVersionRow = (
+              v: SkillVersion,
+              opts: {
+                badge: 'candidate' | 'active' | 'history'
+                actions?: React.ReactNode
+                diff?: { improved: number; regressed: number } | null
+              },
+            ) => {
+              const summaryText =
+                v.notes ||
+                (v.applied_suggestion_ids?.length
+                  ? `Applied ${v.applied_suggestion_ids.length} of ${v.applied_suggestion_ids.length} suggestions`
+                  : `Created from ${v.created_from}`)
+              const isCandidate = opts.badge === 'candidate'
+              const isHistory = opts.badge === 'history'
+              return (
+                <div
+                  className={`flex items-center gap-3 px-3 py-3 ${
+                    isCandidate
+                      ? 'border border-fill-primary/60 bg-bg-default'
+                      : isHistory
+                        ? 'bg-fill-neutral/20'
+                        : 'bg-fill-neutral/40'
+                  }`}
                 >
-                  Discard candidate
-                </button>
+                  <span className="text-base text-fg-contrast flex-shrink-0">v{v.version}</span>
+                  <span
+                    className={`font-mono text-[10px] uppercase px-1.5 py-0.5 flex-shrink-0 ${
+                      opts.badge === 'candidate'
+                        ? 'bg-fill-neutral text-fg-dim'
+                        : opts.badge === 'active'
+                          ? 'bg-bg-default text-fg-dim'
+                          : 'bg-fill-neutral/60 text-fg-dim'
+                    }`}
+                  >
+                    {opts.badge === 'candidate'
+                      ? 'Candidate'
+                      : opts.badge === 'active'
+                        ? 'Active'
+                        : v.created_from}
+                  </span>
+                  {opts.diff && (opts.diff.improved > 0 || opts.diff.regressed > 0) && (
+                    <div className="flex items-center gap-0.5 flex-shrink-0">
+                      <span className="font-mono text-xs px-1.5 py-0.5 bg-success/20 text-success">
+                        +{opts.diff.improved}
+                      </span>
+                      <span className="font-mono text-xs px-1.5 py-0.5 bg-danger/20 text-danger">
+                        -{opts.diff.regressed}
+                      </span>
+                    </div>
+                  )}
+                  <span className="text-xs text-fg-dim truncate flex-1 min-w-0">{summaryText}</span>
+                  {opts.actions && <div className="flex gap-1 flex-shrink-0">{opts.actions}</div>}
+                </div>
+              )
+            }
+
+            const olderVersions = skillVersions.filter(
+              (v) => v.id !== candidateVer?.id && v.id !== activeVer?.id,
+            )
+
+            return (
+              <div className="mb-6 space-y-0.5">
+                {candidateVer &&
+                  renderVersionRow(candidateVer, {
+                    badge: 'candidate',
+                    diff: candidateDiff,
+                    actions: (
+                      <>
+                        <button
+                          onClick={onDiscardCandidate}
+                          disabled={candidateActionBusy}
+                          className="px-2.5 py-1 text-xs font-medium border border-border-hint text-fg-contrast hover:bg-fill-neutral/30 disabled:opacity-50"
+                          title="Revert SKILL.md to active. The candidate stays in history."
+                        >
+                          Discard
+                        </button>
+                        <button
+                          onClick={onPromoteCandidate}
+                          disabled={candidateActionBusy}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-fill-primary text-bg-default hover:opacity-90 disabled:opacity-50"
+                          title="Promote candidate to active SKILL.md."
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                          Make active
+                        </button>
+                      </>
+                    ),
+                  })}
+                {activeVer && renderVersionRow(activeVer, { badge: 'active' })}
+                {showAllVersions &&
+                  olderVersions.map((v) =>
+                    renderVersionRow(v, {
+                      badge: 'history',
+                      actions: !candidateVersionId ? (
+                        <button
+                          onClick={() => handleRestore(v)}
+                          className="p-1 text-fg-dim hover:text-fg-contrast"
+                          title="Restore as active"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                        </button>
+                      ) : undefined,
+                    }),
+                  )}
+                {olderVersions.length > 0 && (
+                  <button
+                    onClick={() => setShowAllVersions((v) => !v)}
+                    className="flex items-center gap-1.5 px-3 py-2 text-xs text-fg-dim hover:text-fg-contrast"
+                  >
+                    {showAllVersions ? (
+                      <>
+                        <ChevronUp className="w-3.5 h-3.5" />
+                        Hide older versions
+                      </>
+                    ) : (
+                      <>
+                        <ChevronDown className="w-3.5 h-3.5" />
+                        See all ({olderVersions.length} older)
+                      </>
+                    )}
+                  </button>
+                )}
+                {candidateActionError && (
+                  <p className="text-xs text-danger px-3 py-1">{candidateActionError}</p>
+                )}
               </div>
             )
           })()}
@@ -1381,306 +1564,7 @@ export default function EvaluatePanel({
                     )}
                   </div>
 
-                  {/* Promote / Discard banner — visible only when the
-                      active run was evaluated against the candidate version.
-                      Lets the user commit (promote) or revert (discard)
-                      based on the run results, instead of the candidate
-                      silently becoming the new active. Also shows per-row
-                      regression diff vs the most recent active-version run. */}
-                  {candidateVersionId &&
-                    activeRun.skill_version_id === candidateVersionId &&
-                    (() => {
-                      // Find the latest active-version run as the baseline
-                      // for the row-by-row delta. Same project so scorer set
-                      // matches; same status so we have real numbers.
-                      const baseline = runs.find(
-                        (r) =>
-                          r.run_id !== activeRun.run_id &&
-                          r.project === activeRun.project &&
-                          r.skill_version_id === activeVersionId &&
-                          r.status === 'done',
-                      )
-                      // Per-row diff. Match by metadata.id; compute mean
-                      // score per row across scorers.
-                      const PASS_THRESHOLD = 0.8
-                      const meanScore = (
-                        scores: Record<string, number> | undefined,
-                      ): number | null => {
-                        if (!scores) return null
-                        const vals = Object.values(scores)
-                        if (!vals.length) return null
-                        return vals.reduce((a, b) => a + b, 0) / vals.length
-                      }
-                      const baselineByRow = new Map<string, number>()
-                      if (baseline) {
-                        for (const r of baseline.per_row) {
-                          const id = (r.metadata as Record<string, unknown> | undefined)?.id as string | undefined
-                          const m = meanScore(r.scores)
-                          if (id && m !== null) baselineByRow.set(id, m)
-                        }
-                      }
-                      const regressed: { id: string; before: number; after: number }[] = []
-                      const improved: { id: string; before: number; after: number }[] = []
-                      for (const r of activeRun.per_row) {
-                        const id = (r.metadata as Record<string, unknown> | undefined)?.id as string | undefined
-                        if (!id) continue
-                        const after = meanScore(r.scores)
-                        const before = baselineByRow.get(id)
-                        if (before === undefined || after === null) continue
-                        const wasPassing = before >= PASS_THRESHOLD
-                        const isPassing = after >= PASS_THRESHOLD
-                        if (wasPassing && !isPassing) regressed.push({ id, before, after })
-                        else if (!wasPassing && isPassing) improved.push({ id, before, after })
-                      }
-                      const onPromote = async () => {
-                        setCandidateActionError(null)
-                        setCandidateActionBusy(true)
-                        try {
-                          await promoteSkillVersion(sessionId, candidateVersionId)
-                          await refreshSkillVersions()
-                          await onCandidateChanged?.()
-                        } catch (err) {
-                          setCandidateActionError(err instanceof Error ? err.message : 'Failed to promote')
-                        } finally {
-                          setCandidateActionBusy(false)
-                        }
-                      }
-                      const onDiscard = async () => {
-                        setCandidateActionError(null)
-                        setCandidateActionBusy(true)
-                        try {
-                          await discardSkillVersion(sessionId, candidateVersionId)
-                          await refreshSkillVersions()
-                          await onCandidateChanged?.()
-                        } catch (err) {
-                          setCandidateActionError(err instanceof Error ? err.message : 'Failed to discard')
-                        } finally {
-                          setCandidateActionBusy(false)
-                        }
-                      }
-                      return (
-                        <div className="mb-4 border border-warning/40 bg-warning/5 p-3">
-                          <div className="flex items-start gap-3 flex-wrap">
-                            <div className="flex-1 min-w-0">
-                              <p className="text-sm font-medium text-foreground">
-                                This run evaluated a candidate version
-                                {activeRun.skill_version_number != null && (
-                                  <> (v{activeRun.skill_version_number})</>
-                                )}
-                                .
-                              </p>
-                              <p className="text-xs text-muted-foreground mt-0.5">
-                                {baseline
-                                  ? `Compared to v${baseline.skill_version_number ?? '?'} (the active version): ${improved.length} row${improved.length === 1 ? '' : 's'} improved, ${regressed.length} regressed.`
-                                  : 'No prior run on the active version to compare against — promote based on overall scores.'}
-                              </p>
-                            </div>
-                            <div className="flex gap-2 flex-shrink-0">
-                              <button
-                                onClick={onDiscard}
-                                disabled={candidateActionBusy}
-                                className="px-3 py-1.5 text-xs font-medium border border-border bg-surface hover:bg-muted/30 disabled:opacity-50"
-                                title="Revert to the previous active version. The candidate stays in history but isn't the body the next eval runs against."
-                              >
-                                Discard candidate
-                              </button>
-                              <button
-                                onClick={onPromote}
-                                disabled={candidateActionBusy}
-                                className="px-3 py-1.5 text-xs font-medium bg-accent text-accent-foreground hover:opacity-90 disabled:opacity-50"
-                                title="Make this candidate the new active SKILL.md."
-                              >
-                                Promote to active
-                              </button>
-                            </div>
-                          </div>
-                          {candidateActionError && (
-                            <p className="mt-2 text-xs text-danger">{candidateActionError}</p>
-                          )}
-                          {regressed.length > 0 && (
-                            <details className="mt-3">
-                              <summary className="text-[10px] font-medium text-danger uppercase tracking-wide cursor-pointer">
-                                {regressed.length} regressed row{regressed.length === 1 ? '' : 's'} (was passing, now failing)
-                              </summary>
-                              <ul className="mt-2 space-y-1">
-                                {regressed.slice(0, 20).map((r) => (
-                                  <li
-                                    key={r.id}
-                                    className="flex items-center gap-2 text-[11px] font-mono px-2 py-1 bg-danger/5"
-                                  >
-                                    <span className="text-foreground truncate flex-1">{r.id.slice(0, 16)}</span>
-                                    <span className="text-muted-foreground">{(r.before * 100).toFixed(0)}%</span>
-                                    <span className="text-danger">→</span>
-                                    <span className="text-danger">{(r.after * 100).toFixed(0)}%</span>
-                                  </li>
-                                ))}
-                              </ul>
-                            </details>
-                          )}
-                          {improved.length > 0 && (
-                            <details className="mt-2">
-                              <summary className="text-[10px] font-medium text-success uppercase tracking-wide cursor-pointer">
-                                {improved.length} improved row{improved.length === 1 ? '' : 's'} (was failing, now passing)
-                              </summary>
-                              <ul className="mt-2 space-y-1">
-                                {improved.slice(0, 20).map((r) => (
-                                  <li
-                                    key={r.id}
-                                    className="flex items-center gap-2 text-[11px] font-mono px-2 py-1 bg-success/5"
-                                  >
-                                    <span className="text-foreground truncate flex-1">{r.id.slice(0, 16)}</span>
-                                    <span className="text-muted-foreground">{(r.before * 100).toFixed(0)}%</span>
-                                    <span className="text-success">→</span>
-                                    <span className="text-success">{(r.after * 100).toFixed(0)}%</span>
-                                  </li>
-                                ))}
-                              </ul>
-                            </details>
-                          )}
-                        </div>
-                      )
-                    })()}
-
-                  {skillVersions.length > 0 && (() => {
-                    // Skill version timeline — one row per version, with the
-                    // best eval avg achieved on that version. Scoped to the
-                    // active run's project so a different scorer set on
-                    // another project doesn't pollute the comparison. Active
-                    // version (the one this run evaluated) is highlighted.
-                    const bestAvgFor = (versionId: string): number | null => {
-                      const versionRuns = runs.filter(
-                        (r) =>
-                          r.skill_version_id === versionId &&
-                          r.project === activeRun.project &&
-                          r.status === 'done',
-                      )
-                      const avgs = versionRuns
-                        .map((r) => {
-                          const vals = Object.values(r.scorer_averages)
-                          if (!vals.length) return null
-                          return vals.reduce((a, b) => a + b, 0) / vals.length
-                        })
-                        .filter((x): x is number => x !== null)
-                      if (!avgs.length) return null
-                      return Math.max(...avgs)
-                    }
-                    const sorted = [...skillVersions].sort((a, b) => a.version - b.version)
-                    return (
-                      <div className="mb-4">
-                        <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide mb-2">
-                          Skill version timeline
-                        </p>
-                        <ul className="space-y-1">
-                          {sorted.map((v) => {
-                            const avg = bestAvgFor(v.id)
-                            const isActiveVersion = v.id === activeRun.skill_version_id
-                            const isCandidate = v.id === candidateVersionId
-                            const isActive = v.id === activeVersionId
-                            return (
-                              <li
-                                key={v.id}
-                                className={`flex items-center gap-2 text-xs px-2 py-1 ${
-                                  isActiveVersion ? 'bg-accent/5 border-l-2 border-accent' : 'bg-muted/20'
-                                }`}
-                              >
-                                <span className="font-mono text-foreground flex-shrink-0">v{v.version}</span>
-                                {isActive && (
-                                  <span className="font-mono text-[10px] uppercase px-1 py-0.5 bg-accent/20 text-accent flex-shrink-0">
-                                    active
-                                  </span>
-                                )}
-                                {isCandidate && (
-                                  <span className="font-mono text-[10px] uppercase px-1 py-0.5 bg-warning/15 text-warning flex-shrink-0">
-                                    candidate
-                                  </span>
-                                )}
-                                <span
-                                  className={`font-mono text-[10px] uppercase px-1 py-0.5 flex-shrink-0 ${
-                                    v.created_from === 'restore'
-                                      ? 'bg-warning/15 text-warning'
-                                      : v.created_from === 'suggestion'
-                                        ? 'bg-accent/15 text-accent'
-                                        : v.created_from === 'seed'
-                                          ? 'bg-success/15 text-success'
-                                          : 'bg-muted/30 text-muted-foreground'
-                                  }`}
-                                >
-                                  {v.created_from}
-                                </span>
-                                <span className="text-muted-foreground truncate flex-1">
-                                  {v.notes || '—'}
-                                </span>
-                                <span className="font-mono flex-shrink-0">
-                                  {avg !== null ? (
-                                    <span className={scoreColor(avg)}>{(avg * 100).toFixed(0)}%</span>
-                                  ) : (
-                                    <span
-                                      className="text-muted-foreground"
-                                      title={
-                                        isCandidate
-                                          ? "No eval has run on this candidate yet — use the 'Run with Braintrust' panel above to test it."
-                                          : 'No completed run for this version in this project.'
-                                      }
-                                    >
-                                      no run
-                                    </span>
-                                  )}
-                                </span>
-                                {isCandidate && (
-                                  <div className="flex gap-1 flex-shrink-0">
-                                    <button
-                                      onClick={async () => {
-                                        setCandidateActionError(null)
-                                        setCandidateActionBusy(true)
-                                        try {
-                                          await discardSkillVersion(sessionId, v.id)
-                                          await refreshSkillVersions()
-                                          await onCandidateChanged?.()
-                                        } catch (err) {
-                                          setCandidateActionError(
-                                            err instanceof Error ? err.message : 'Failed to discard',
-                                          )
-                                        } finally {
-                                          setCandidateActionBusy(false)
-                                        }
-                                      }}
-                                      disabled={candidateActionBusy}
-                                      className="px-2 py-0.5 text-[10px] font-medium border border-border bg-surface hover:bg-muted/30 disabled:opacity-50"
-                                      title="Discard candidate without running an eval. Reverts SKILL.md to the active version."
-                                    >
-                                      Discard
-                                    </button>
-                                    <button
-                                      onClick={async () => {
-                                        setCandidateActionError(null)
-                                        setCandidateActionBusy(true)
-                                        try {
-                                          await promoteSkillVersion(sessionId, v.id)
-                                          await refreshSkillVersions()
-                                          await onCandidateChanged?.()
-                                        } catch (err) {
-                                          setCandidateActionError(
-                                            err instanceof Error ? err.message : 'Failed to promote',
-                                          )
-                                        } finally {
-                                          setCandidateActionBusy(false)
-                                        }
-                                      }}
-                                      disabled={candidateActionBusy}
-                                      className="px-2 py-0.5 text-[10px] font-medium bg-accent text-accent-foreground hover:opacity-90 disabled:opacity-50"
-                                      title="Promote this candidate to the active version (you can do this without running an eval, but the whole point of the candidate flow is to gate on a confirming run)."
-                                    >
-                                      Promote
-                                    </button>
-                                  </div>
-                                )}
-                              </li>
-                            )
-                          })}
-                        </ul>
-                      </div>
-                    )
-                  })()}
+                  {/* Promote/Discard banner + version timeline moved to the top of the column (see version stack above). Per-row regression details are still surfaced via the per-row results expander below when an active run is selected. */}
 
                   {Object.keys(activeRun.scorer_averages).length > 0 && (() => {
                     // Find both:
