@@ -105,14 +105,39 @@ function formatWhen(iso: string | null): string {
   return d.toLocaleString()
 }
 
+/** How an Accept resolved against the current SKILL.md body.
+ *  - exact: substring match, indent and whitespace preserved literally.
+ *  - normalized: whitespace-tolerant match, safe (unique, didn't cross a
+ *    paragraph break or fenced code block the find doesn't itself contain).
+ *  - appended: couldn't safely match, replacement appended to the end. UI
+ *    surfaces a chip so the user can move it manually.
+ *  - none: only used by `getMatchKind` before apply. `applySuggestion`
+ *    always upgrades none to appended. */
+type MatchKind = 'exact' | 'normalized' | 'appended' | 'none'
+
 interface ProposedEdit {
   suggestion: ImprovementSuggestion
-  appliedBody: string | null
+  appliedBody: string
+  mode: MatchKind
 }
 
-function findRange(body: string, find: string): [number, number] | null {
+/** Locate `find` in `body` tolerating LLM whitespace drift, but refusing
+ *  matches that would silently produce wrong replacements:
+ *  - multiple normalized hits with no exact hit → ambiguous, reject
+ *  - matched span crosses `\n\n` (paragraph break) when `find` doesn't →
+ *    reject (the LLM almost certainly meant a single paragraph)
+ *  - matched span crosses a triple-backtick fence when `find` doesn't →
+ *    reject (we'd be replacing across a code block boundary)
+ *
+ *  Returns [start, end, kind] on safe match, null otherwise. */
+function findRange(
+  body: string,
+  find: string,
+): { start: number; end: number; kind: 'exact' | 'normalized' } | null {
   const exact = body.indexOf(find)
-  if (exact !== -1) return [exact, exact + find.length]
+  if (exact !== -1) {
+    return { start: exact, end: exact + find.length, kind: 'exact' }
+  }
 
   const trimmed = find.trim()
   if (!trimmed) return null
@@ -139,43 +164,76 @@ function findRange(body: string, find: string): [number, number] | null {
   }
   const normIdx = normalizedBody.indexOf(needle)
   if (normIdx === -1) return null
+
+  // Ambiguous: same needle appears more than once. We don't know which one
+  // the LLM meant — refuse rather than first-occurrence-wins.
+  const secondIdx = normalizedBody.indexOf(needle, normIdx + 1)
+  if (secondIdx !== -1) return null
+
   const start = offsets[normIdx]
   const lastNormIdx = normIdx + needle.length - 1
   const lastChar = offsets[lastNormIdx]
   const endChar = body[lastChar]
   const end = /\s/.test(endChar) ? lastChar : lastChar + 1
-  return [start, end]
+  const matched = body.slice(start, end)
+
+  // Refuse to match across structural boundaries the LLM almost certainly
+  // didn't intend to span. The find string itself can contain them — that's
+  // legitimate; we only reject when the match crosses a boundary that
+  // *isn't* in the find string.
+  if (!find.includes('\n\n') && matched.includes('\n\n')) return null
+  if (!find.includes('```') && matched.includes('```')) return null
+
+  return { start, end, kind: 'normalized' }
 }
 
-function applySuggestion(body: string, s: ImprovementSuggestion): string {
+/** Apply a single suggestion. Always returns a new body — when no safe
+ *  match exists we append to the end rather than refuse. The `mode`
+ *  field tells the caller which path was taken so the UI can show
+ *  "applied as edit" vs "appended due to drift". */
+function applySuggestion(
+  body: string,
+  s: ImprovementSuggestion,
+): { body: string; mode: MatchKind } {
   if (!s.find) {
     const sep = body.endsWith('\n') ? '\n' : '\n\n'
-    return body + sep + s.replacement
+    return { body: body + sep + s.replacement, mode: 'appended' }
   }
-  const range = findRange(body, s.find)
-  if (range === null) {
+  const match = findRange(body, s.find)
+  if (match === null) {
     const sep = body.endsWith('\n') ? '\n' : '\n\n'
-    return body + sep + s.replacement
+    return { body: body + sep + s.replacement, mode: 'appended' }
   }
-  const [start, end] = range
-  return body.slice(0, start) + s.replacement + body.slice(end)
+  return {
+    body: body.slice(0, match.start) + s.replacement + body.slice(match.end),
+    mode: match.kind,
+  }
 }
 
-function findMatchedExact(body: string, s: ImprovementSuggestion): boolean {
-  if (!s.find) return true
-  return findRange(body, s.find) !== null
+/** Inspect (without applying) what would happen if `s` were accepted. Used
+ *  by the per-suggestion UI to decide whether to show the "will append"
+ *  drift chip. */
+function getMatchKind(body: string, s: ImprovementSuggestion): MatchKind {
+  if (!s.find) return 'appended'
+  const match = findRange(body, s.find)
+  return match === null ? 'appended' : match.kind
 }
 
+/** Apply a batch of accepted suggestions in order. Returns the final body
+ *  plus a per-suggestion map of how each one resolved (so the save card
+ *  can label "3 applied as edits, 2 appended due to drift"). */
 function applyBatch(
   body: string,
   suggestions: ImprovementSuggestion[],
-): { body: string; skipped: string[] } {
+): { body: string; modes: Record<string, MatchKind> } {
   let cur = body
-  const skipped: string[] = []
+  const modes: Record<string, MatchKind> = {}
   for (const s of suggestions) {
-    cur = applySuggestion(cur, s)
+    const { body: next, mode } = applySuggestion(cur, s)
+    cur = next
+    modes[s.id] = mode
   }
-  return { body: cur, skipped }
+  return { body: cur, modes }
 }
 
 function confidenceColor(c: ImprovementSuggestion['confidence']): string {
@@ -440,17 +498,19 @@ export default function EvaluatePanel({
     let cur = skillBody
     for (const s of suggestions) {
       if (!accepted.has(s.id)) continue
-      const next = applySuggestion(cur, s)
-      result.push({ suggestion: s, appliedBody: next })
-      if (next !== null) cur = next
+      const { body: next, mode } = applySuggestion(cur, s)
+      result.push({ suggestion: s, appliedBody: next, mode })
+      cur = next
     }
     return result
   }, [suggestions, accepted, skillBody])
 
-  const finalBody = useMemo(() => {
-    const { body } = applyBatch(skillBody, acceptedSuggestions)
-    return body
-  }, [skillBody, acceptedSuggestions])
+  // Final body + per-suggestion mode map. The mode map drives the save-card
+  // copy ("3 applied, 2 appended due to drift") and the per-row chip.
+  const { body: finalBody, modes: finalModes } = useMemo(
+    () => applyBatch(skillBody, acceptedSuggestions),
+    [skillBody, acceptedSuggestions],
+  )
 
   const finalChanged = finalBody !== skillBody
 
@@ -487,18 +547,21 @@ export default function EvaluatePanel({
     setSaving(true)
     setSaveError(null)
     try {
-      const { body, skipped } = applyBatch(skillBody, acceptedSuggestions)
-      const noteParts = [
-        `Applied ${acceptedSuggestions.length - skipped.length} of ${acceptedSuggestions.length} suggestions`,
-        savingNotes.trim(),
-      ].filter(Boolean)
+      const { body, modes } = applyBatch(skillBody, acceptedSuggestions)
+      const editedCount = acceptedSuggestions.filter(
+        (s) => modes[s.id] === 'exact' || modes[s.id] === 'normalized',
+      ).length
+      const appendedCount = acceptedSuggestions.length - editedCount
+      const summary =
+        appendedCount > 0
+          ? `Applied ${editedCount} as edits, appended ${appendedCount} due to snippet drift`
+          : `Applied ${acceptedSuggestions.length} suggestion${acceptedSuggestions.length === 1 ? '' : 's'}`
+      const noteParts = [summary, savingNotes.trim()].filter(Boolean)
       const newVersion = await createSkillVersion(sessionId, {
         body,
         notes: noteParts.join(' · ') || undefined,
         created_from: 'suggestion',
-        applied_suggestion_ids: acceptedSuggestions
-          .filter((s) => !skipped.includes(s.id))
-          .map((s) => s.id),
+        applied_suggestion_ids: acceptedSuggestions.map((s) => s.id),
       })
       onSkillBodyChange(body)
       setSkillVersions((prev) => [newVersion, ...prev])
@@ -1537,8 +1600,17 @@ export default function EvaluatePanel({
                           const isAccepted = accepted.has(s.id)
                           const isDismissed = dismissed.has(s.id)
                           const isCollapsed = isAccepted || isDismissed
-                          const applied = applySuggestion(skillBody, s)
-                          const findMatched = findMatchedExact(skillBody, s)
+                          // Show the per-suggestion preview against the
+                          // *current* body, independent of other accepts.
+                          // The save flow uses applyBatch for sequential
+                          // application, but here we just want to know
+                          // what this single suggestion would do.
+                          const { body: applied } = applySuggestion(skillBody, s)
+                          const matchKind = getMatchKind(skillBody, s)
+                          // 'exact' or 'normalized' means we found a real
+                          // edit point; 'appended' means the find drifted
+                          // and we'll tack the replacement onto the end.
+                          const findMatched = matchKind !== 'appended' || !s.find
 
                           if (isCollapsed) {
                             const shortFind = s.find.length > 40 ? s.find.slice(0, 40) + '…' : s.find

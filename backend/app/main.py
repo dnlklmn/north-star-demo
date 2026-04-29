@@ -95,6 +95,7 @@ from .prompt_eval import get_prompt_target, list_prompt_targets
 from .tools import (
     LLMAuthError,
     LLMBillingError,
+    LLMModelError,
     call_suggest_goals,
     call_evaluate_goals,
     call_suggest_stories,
@@ -148,16 +149,34 @@ async def _billing_error_handler(_request: Request, exc: LLMBillingError):
 
 @app.exception_handler(LLMAuthError)
 async def _auth_error_handler(_request: Request, exc: LLMAuthError):
-    """Translate provider auth/model-not-found failures into HTTP 401 with the
-    same shape as billing errors. Common cause: the user pasted an OpenRouter
-    key but the configured model id is the bare Anthropic form, or vice versa.
-    The frontend's apiFetch already maps 401 to a clear 'invalid key' message."""
+    """Translate provider auth failures into HTTP 401 with the same shape as
+    billing errors. Common cause: the user pasted an OpenRouter key but the
+    request hit the Anthropic-direct path (or vice versa). The frontend's
+    apiFetch maps 401 to a clear 'invalid key' message pointing at Settings."""
     from fastapi.responses import JSONResponse
     return JSONResponse(
         status_code=401,
         content={
             "detail": str(exc),
             "error": "llm_auth",
+            "provider": exc.provider,
+        },
+    )
+
+
+@app.exception_handler(LLMModelError)
+async def _model_error_handler(_request: Request, exc: LLMModelError):
+    """Translate 'model id not found / not entitled' failures into HTTP 422.
+    Distinct from 401 so the frontend can point the user at the model
+    selector rather than the API key — used to be conflated under llm_auth
+    and produced misleading 'Check your API key' copy when the key was fine
+    but the model name was a typo or a retired snapshot."""
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": str(exc),
+            "error": "llm_model",
             "provider": exc.provider,
         },
     )
@@ -2320,12 +2339,24 @@ async def create_skill_version(session_id: str, req: CreateSkillVersionRequest):
 
 @app.post("/sessions/{session_id}/skill-versions/{version_id}/promote", response_model=SkillVersion)
 async def promote_skill_version(session_id: str, version_id: str):
-    """Promote a candidate version to active. The skill_body is already this
-    version's body (was set when the candidate was created), so we only
-    flip the active pointer and clear the candidate pointer."""
+    """Promote a candidate version to active.
+
+    Strict pairing with discard: only the *current* candidate can be promoted.
+    Without this guard, a stale UI (or any caller hitting the URL) could flip
+    an arbitrary historical version to active, silently orphaning the real
+    candidate (its pointer would clear on promote even though the user never
+    confirmed it). To restore an older non-candidate version, use
+    /skill-versions/restore — that's the dedicated affordance."""
     state, conversation = await _load_state(session_id)
+    if state.candidate_skill_version_id != version_id:
+        raise HTTPException(
+            status_code=400,
+            detail="That version isn't the current candidate. Use /skill-versions/restore to revive an older version.",
+        )
     target = next((v for v in state.skill_versions if v.get("id") == version_id), None)
     if target is None:
+        # Belt-and-braces — pointer says it's the candidate but the version
+        # row is gone. Shouldn't happen, but don't 500 if it does.
         raise HTTPException(status_code=404, detail="Skill version not found")
     state.active_skill_version_id = version_id
     state.candidate_skill_version_id = None
@@ -2364,8 +2395,19 @@ async def restore_skill_version(session_id: str, req: RestoreSkillVersionRequest
     rather than silently flipping the active pointer (which left v3's edits
     looking lost). The new row's body is identical to the target's body, but
     its `notes` field carries the lineage so the UI can render an arrow back
-    to the source version."""
+    to the source version.
+
+    Refuses to run while a candidate is pending — restore would otherwise
+    silently clear the candidate (since `_append_skill_version` resets the
+    pointer when not as_candidate), making the user's in-flight edits
+    unreachable. The user has to explicitly promote or discard first.
+    """
     state, conversation = await _load_state(session_id)
+    if state.candidate_skill_version_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="A candidate version is pending. Promote or discard it before restoring an older version.",
+        )
     target = next((v for v in state.skill_versions if v.get("id") == req.version_id), None)
     if target is None:
         raise HTTPException(status_code=404, detail="Skill version not found")

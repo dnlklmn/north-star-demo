@@ -174,10 +174,22 @@ class LLMBillingError(Exception):
 
 
 class LLMAuthError(Exception):
-    """Raised when the provider rejects the API key (wrong key, key for the
-    wrong provider, or model id the provider doesn't recognize). Surfaces as
-    HTTP 401 so the frontend's existing 'invalid key' path catches it instead
-    of falling through to a generic 500."""
+    """Raised when the provider rejects the API key itself — wrong key, key
+    for the wrong provider, missing auth header. Surfaces as HTTP 401 with
+    "Check the API key in Settings" copy. Distinct from LLMModelError so the
+    frontend doesn't tell the user to check their key when the key is fine
+    but they typed an unrecognized model id."""
+
+    def __init__(self, message: str, provider: str = "anthropic"):
+        super().__init__(message)
+        self.provider = provider
+
+
+class LLMModelError(Exception):
+    """Raised when the provider accepts the auth but rejects the model id —
+    typo, retired snapshot, model not entitled on this account, etc.
+    Surfaces as HTTP 422 with copy that points the user at the model
+    selector rather than the API key field."""
 
     def __init__(self, message: str, provider: str = "anthropic"):
         super().__init__(message)
@@ -188,9 +200,27 @@ def _current_provider() -> str:
     return "openrouter" if _is_request_using_openrouter() else "anthropic"
 
 
+def _is_model_error(err: Exception) -> bool:
+    """Detect 'model id is wrong' style failures. Auth is fine; the model
+    name doesn't resolve on the provider side. Pattern-matched because no
+    SDK exposes a distinct error class for this."""
+    msg = str(err).lower()
+    needles = (
+        "model not found",
+        "model_not_found",
+        "no endpoints found",
+        "not a valid model",
+        "unknown model",
+        "model does not exist",
+    )
+    return any(n in msg for n in needles)
+
+
 def _is_auth_error(err: Exception) -> bool:
-    """Detect auth/model-id failures across providers. Anthropic and OpenRouter
-    both return 4xx with a textual body — no shared error class."""
+    """Detect auth-failure responses. Strict: only matches phrases that
+    actually indicate an auth problem. Model-not-found used to live here
+    too but mislabeled "wrong model id" as "check your API key" in the UI
+    — that case now goes through _is_model_error."""
     msg = str(err).lower()
     needles = (
         "authentication",
@@ -201,9 +231,6 @@ def _is_auth_error(err: Exception) -> bool:
         "unauthorized",
         "user_not_found",
         "no auth credentials",
-        "model not found",
-        "no endpoints found",
-        "not a valid model",
     )
     return any(n in msg for n in needles)
 
@@ -249,9 +276,14 @@ def _call_llm(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
     except Exception as e:
         logger.error(f"_call_llm FAILED: {type(e).__name__}: {e}")
         # Translate provider 4xx failures into typed exceptions so the API
-        # layer can return a friendly 402/401 instead of a generic 500.
+        # layer can return a friendly 402/401/422 instead of a generic 500.
+        # Order matters: model-not-found checks first (its phrasing has no
+        # overlap with auth/billing strings, but checking first keeps the
+        # intent obvious).
         if _is_billing_error(e):
             raise LLMBillingError(str(e), provider=_current_provider()) from e
+        if _is_model_error(e):
+            raise LLMModelError(str(e), provider=_current_provider()) from e
         if _is_auth_error(e):
             raise LLMAuthError(str(e), provider=_current_provider()) from e
         raise

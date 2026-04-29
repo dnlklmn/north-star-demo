@@ -115,11 +115,27 @@ async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
     if (body.error === 'llm_auth') {
       const provider = body.provider === 'openrouter' ? 'OpenRouter' : 'Anthropic'
       throw new Error(
-        `${provider} rejected the request: ${body.detail || 'auth or model id error'}. ` +
-        `Check the API key in Settings, and that the selected model is available on ${provider}.`,
+        `${provider} rejected the API key: ${body.detail || 'auth failed'}. ` +
+        `Check the API key in Settings.`,
       )
     }
     throw new Error('Invalid or missing API key. Please add your API key in Settings.')
+  }
+  if (res.status === 422) {
+    // 422 specifically for "model id not found / not entitled" — the auth
+    // is fine, the model name doesn't resolve. Distinct copy from 401 so
+    // the user looks at the model selector, not the key field.
+    let body: { detail?: string; provider?: string; error?: string } = {}
+    try { body = await res.clone().json() } catch { /* not JSON */ }
+    if (body.error === 'llm_model') {
+      const provider = body.provider === 'openrouter' ? 'OpenRouter' : 'Anthropic'
+      throw new Error(
+        `${provider} doesn't recognize the selected model: ${body.detail || 'model not found'}. ` +
+        `Pick a different model in Settings — your key is fine.`,
+      )
+    }
+    // Fall through to default Response handling for non-LLM 422s
+    // (validation errors etc.).
   }
   if (res.status === 402) {
     // Provider rejected the call for billing reasons. Read the body once,
