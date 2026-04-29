@@ -563,7 +563,9 @@ async def create_prompt_eval_session(req: CreatePromptEvalRequest):
                    f"Known: {[t['target'] for t in list_prompt_targets()]}",
         )
 
-    sample_size = max(1, min(200, req.sample_size or 30))
+    # CreatePromptEvalRequest constrains sample_size to [1, 200] at validation,
+    # so by the time we get here it's already a sane value.
+    sample_size = req.sample_size
     session_id = str(uuid.uuid4())
 
     # Initial state: marked as kind=prompt + triggered eval mode (so the Skill
@@ -817,13 +819,29 @@ async def delete_session(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
 
 
+# Session IDs with an in-flight auto-retag. Module-level set + check-then-add
+# under no async boundary is fine — Python's GIL serializes the membership
+# check and add. Cross-process locking would need Redis or a DB advisory lock,
+# but a single uvicorn worker is the deployment shape today.
+_RETAG_IN_FLIGHT: set[str] = set()
+
+
 async def _retag_dataset_after_charter(session_id: str, charter: dict) -> None:
     """Background: re-tag a prompt-eval dataset against a freshly-generated
     charter so the Coverage Map matrix lines up with the charter's axes.
 
     Safe to fire-and-forget — failures are logged but don't surface to the
     user. The user can also re-run manually via the dataset endpoint.
+
+    Concurrency-guarded: if a retag is already running for this session,
+    we skip rather than spawn a second one. Two simultaneous retags would
+    interleave per-batch updates against the same examples and produce
+    confusing results.
     """
+    if session_id in _RETAG_IN_FLIGHT:
+        logger.info("Skipping auto-retag for session %s — one already running", session_id)
+        return
+    _RETAG_IN_FLIGHT.add(session_id)
     try:
         dataset = await db.get_dataset_by_session(session_id)
         if dataset is None:
@@ -862,6 +880,8 @@ async def _retag_dataset_after_charter(session_id: str, charter: dict) -> None:
         await db.update_dataset_stats(dataset["id"])
     except Exception:  # noqa: BLE001
         logger.exception("Auto-retag after charter generation failed for session %s", session_id)
+    finally:
+        _RETAG_IN_FLIGHT.discard(session_id)
 
 
 @app.post("/sessions/{session_id}/message", response_model=SendMessageResponse)
@@ -1988,22 +2008,20 @@ async def _execute_eval_run(
             "scorer_averages": result.scorer_averages,
             "per_row": result.per_row,
         })
-        # Clear the "new" tag from any rows in this session's dataset that
-        # carried it. They've now been part of an eval run, so they're no
-        # longer fresh-since-last-refresh evidence.
+        # Clear the "new" tag from rows that participated in this run. Pull
+        # the row IDs straight from the eval result's per_row metadata so a
+        # concurrent /refresh-from-turns inserting fresh "new"-tagged rows
+        # mid-cleanup can't have its rows stripped — only rows we actually
+        # evaluated lose the tag. Done in a single SQL statement → atomic.
         try:
-            run_row = await db.get_eval_run(run_id)
-            if run_row:
-                dataset = await db.get_dataset_by_session(run_row["session_id"])
-                if dataset:
-                    examples = await db.get_examples(dataset["id"])
-                    for ex in examples:
-                        tags = ex.get("coverage_tags") or []
-                        if "new" in tags:
-                            await db.update_example(
-                                ex["id"],
-                                {"coverage_tags": [t for t in tags if t != "new"]},
-                            )
+            evaluated_ids: list[str] = []
+            for r in result.per_row:
+                meta = r.get("metadata") or {}
+                rid = meta.get("id")
+                if isinstance(rid, str):
+                    evaluated_ids.append(rid)
+            if evaluated_ids:
+                await db.clear_new_tag_from_examples(evaluated_ids)
         except Exception:  # noqa: BLE001
             logger.exception("Failed to clear 'new' tags after eval run %s", run_id)
     except Exception as e:  # noqa: BLE001

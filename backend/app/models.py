@@ -377,14 +377,21 @@ class CreatePromptEvalRequest(BaseModel):
     and seeds default scorers tailored to the target.
     """
     prompt_target: str
-    name: Optional[str] = None
-    sample_size: int = 30
+    # Bounded so a runaway client can't fill the sessions table with a 10MB
+    # name; matches the existing skill-eval session-name flow.
+    name: Optional[str] = Field(default=None, max_length=200)
+    # Pydantic clamps at validation time so the endpoint can rely on a sane
+    # value without re-clamping. Ceiling matches sample_turns_for_prompt_eval
+    # default; floor of 1 keeps the request meaningful.
+    sample_size: int = Field(default=30, ge=1, le=200)
     # Optional override of the prompt body fed into the seed pass + Skill
     # panel. Lets the user paste / edit the prompt text in the modal before
     # creating the session. None = use the registered prompt's rendered text.
     # Note: this affects seeding only — the eval task still replays the
-    # registered build_*_prompt builder by prompt_target.
-    prompt_body: Optional[str] = None
+    # registered build_*_prompt builder by prompt_target. Capped at 40k
+    # chars so a runaway client can't burn unbounded LLM tokens via the
+    # seed pass; the rendered template for `generate` is ~2.2k for context.
+    prompt_body: Optional[str] = Field(default=None, max_length=40000)
 
 
 class CreatePromptEvalResponse(BaseModel):
@@ -400,6 +407,17 @@ class PromptTargetInfo(BaseModel):
     target: str
     label: str
     builder_name: str
+    description: Optional[str] = None
+    # Repo-relative "path:line" pointer to the prompt builder, computed via
+    # inspect.getsourcelines on the registered function. Lets the modal +
+    # Prompt panel show the user where to edit. None when the function isn't
+    # backed by a source file.
+    source_path: Optional[str] = None
+    # Rendered prompt template with placeholder text marking the variable
+    # parts. The modal pre-fills the textarea with this so the user can
+    # review or tweak before creating the session. ~3KB per target — well
+    # within HTTP response budget for the small registry we expect.
+    prompt_text: Optional[str] = None
 
 
 # --- Eval-run requests (Braintrust execution eval from UI) ---

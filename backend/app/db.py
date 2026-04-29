@@ -722,6 +722,36 @@ async def create_dataset_version(dataset_id: str, charter_snapshot: dict) -> dic
         return _parse_dataset_row(row)
 
 
+async def clear_new_tag_from_examples(example_ids: list[str]) -> int:
+    """Atomically strip the "new" coverage tag from a specific set of example
+    rows. Used after an eval run completes to mark its inputs as no longer
+    fresh — scoped by id so a concurrent /refresh-from-turns can't have its
+    just-inserted rows untagged out from under it.
+
+    Returns the number of rows updated (rows that actually carried "new").
+    """
+    if not example_ids:
+        return 0
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # `coverage_tags - 'new'` strips the value from the JSONB array (no-op
+        # if absent). The @> filter avoids touching rows that never carried
+        # the tag. Single statement → atomic vs concurrent inserts.
+        result = await conn.execute(
+            """
+            UPDATE examples
+            SET coverage_tags = coverage_tags - 'new'
+            WHERE id = ANY($1::text[]) AND coverage_tags @> '["new"]'::jsonb
+            """,
+            example_ids,
+        )
+        # asyncpg returns "UPDATE n"; parse the count.
+        try:
+            return int(result.split()[-1])
+        except (ValueError, IndexError):
+            return 0
+
+
 async def update_dataset_charter_snapshot(dataset_id: str, charter: dict) -> None:
     """Refresh the dataset's stored charter snapshot — used when the live
     charter has changed and gap analysis / scorers should compare against
