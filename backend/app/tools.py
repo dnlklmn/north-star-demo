@@ -12,8 +12,11 @@ import logging
 import os
 import re
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 import anthropic
+import braintrust
 
 from .models import (
     AlignmentEntry,
@@ -77,27 +80,164 @@ def set_request_api_key(key: str | None) -> None:
     _request_api_key.set(key)
 
 
+# --- Braintrust production monitoring ---
+#
+# When BRAINTRUST_PROD_API_KEY is set, every Anthropic call out of get_client()
+# is wrapped with braintrust.wrap_anthropic and logged to the project named by
+# BRAINTRUST_PROD_PROJECT (default: "north-star-prod"). When the env var is
+# unset, all monitoring code is a near-zero-overhead no-op.
+#
+# Metadata flow:
+#   1. set_trace_meta(session_id=..., phase=..., turn_number=...) is opened by
+#      agent.py / main.py at the request/handler boundary.
+#   2. trace_call(turn_type) is opened inside each call_* tool. It pulls the
+#      ContextVar metadata, attaches turn_type + model_name, and starts a
+#      Braintrust span. The wrap_anthropic SDK call inside lands as a child
+#      span and inherits trace-level filterability.
+
+# _braintrust_inited: None=not tried, "active"=ready, "disabled"/"failed"=skip.
+_braintrust_inited: str | None = None
+_trace_meta: ContextVar[dict | None] = ContextVar("_trace_meta", default=None)
+
+
+def _braintrust_prod_enabled() -> bool:
+    return bool(os.environ.get("BRAINTRUST_PROD_API_KEY"))
+
+
+def _ensure_braintrust_inited() -> bool:
+    """Lazy-init the Braintrust prod logger. Idempotent. Returns True iff active.
+
+    Failure is logged once and remembered — we never want a Braintrust outage
+    or misconfig to break production LLM traffic.
+    """
+    global _braintrust_inited
+    if _braintrust_inited is not None:
+        return _braintrust_inited == "active"
+    if not _braintrust_prod_enabled():
+        _braintrust_inited = "disabled"
+        return False
+    try:
+        api_key = os.environ["BRAINTRUST_PROD_API_KEY"]
+        project = os.environ.get("BRAINTRUST_PROD_PROJECT", "north-star-prod")
+        braintrust.login(api_key=api_key)
+        braintrust.init_logger(project=project)
+        _braintrust_inited = "active"
+        logger.info(f"Braintrust prod monitoring enabled — project={project}")
+        return True
+    except Exception as e:
+        logger.warning(f"Braintrust init failed; production tracing disabled: {e}")
+        _braintrust_inited = "failed"
+        return False
+
+
+def _maybe_wrap(client: anthropic.Anthropic) -> anthropic.Anthropic:
+    """Wrap with braintrust.wrap_anthropic when prod monitoring is on; else passthrough."""
+    if not _ensure_braintrust_inited():
+        return client
+    try:
+        return braintrust.wrap_anthropic(client)
+    except Exception as e:
+        logger.warning(f"Braintrust wrap_anthropic failed; returning unwrapped client: {e}")
+        return client
+
+
+@contextmanager
+def set_trace_meta(**kwargs):
+    """Set/extend trace metadata for any LLM calls inside this block.
+
+    Composes with metadata set by an outer block — None values are filtered so
+    they don't override existing keys. Cheap when monitoring is off (just a
+    contextvar push/pop), so it's safe to leave wrapping handlers unconditionally.
+    """
+    current = _trace_meta.get() or {}
+    merged = {**current, **{k: v for k, v in kwargs.items() if v is not None}}
+    token = _trace_meta.set(merged)
+    try:
+        yield
+    finally:
+        _trace_meta.reset(token)
+
+
+def traced(turn_type: str):
+    """Decorator: wrap an async ``call_*`` tool in a Braintrust trace span.
+
+    Every Anthropic call inside the wrapped function lands as a child span of
+    this one, with the contextvar trace metadata (session_id, phase, etc.)
+    attached. No-op when monitoring is off.
+    """
+    from functools import wraps
+
+    def decorator(fn):
+        @wraps(fn)
+        async def wrapper(*args, **kwargs):
+            with trace_call(turn_type):
+                return await fn(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+@contextmanager
+def trace_call(turn_type: str, **extra):
+    """Open a Braintrust span around an LLM call. No-op when monitoring is off.
+
+    Metadata = contextvar-set trace meta + ``extra`` kwargs + {turn_type, model_name}.
+    Inside the block, wrap_anthropic API calls are recorded as child spans of
+    this one, so trace-level filters in Braintrust (e.g. ``phase = "charter"``)
+    match every leaf span underneath.
+    """
+    if not _ensure_braintrust_inited():
+        yield None
+        return
+    base = _trace_meta.get() or {}
+    metadata = {
+        **base,
+        **{k: v for k, v in extra.items() if v is not None},
+        "turn_type": turn_type,
+        "model_name": get_model(),
+    }
+    try:
+        span_cm = braintrust.start_span(name=turn_type, type="task")
+    except Exception as e:
+        logger.warning(f"Braintrust start_span failed: {e}")
+        yield None
+        return
+    try:
+        with span_cm as span:
+            try:
+                span.log(metadata=metadata)
+            except Exception as e:
+                logger.warning(f"Braintrust span.log failed: {e}")
+            yield span
+    except Exception:
+        # Re-raise — span context manager already captured the exception in
+        # the trace, but we don't want to swallow real errors.
+        raise
+
+
 def get_client() -> anthropic.Anthropic:
     """Get an Anthropic client — uses per-request key if provided, else env var.
 
     Supports OpenRouter keys (prefix ``sk-or-``).  When an OpenRouter key is
     detected the client is configured with OpenRouter's base URL.  Priority for
     env-var keys: ANTHROPIC_API_KEY > OPENROUTER_API_KEY.
+
+    When ``BRAINTRUST_PROD_API_KEY`` is set, the returned client is wrapped
+    with braintrust.wrap_anthropic so every call is captured as a span.
     """
     global _client
     request_key = _request_api_key.get(None)
     if request_key:
         # Per-request key: create a fresh client (not cached)
         if _is_openrouter_key(request_key):
-            return anthropic.Anthropic(api_key=request_key, base_url=OPENROUTER_BASE_URL)
-        return anthropic.Anthropic(api_key=request_key)
+            return _maybe_wrap(anthropic.Anthropic(api_key=request_key, base_url=OPENROUTER_BASE_URL))
+        return _maybe_wrap(anthropic.Anthropic(api_key=request_key))
     # Default: use env var (cached singleton)
     if _client is None:
         or_key = os.environ.get("OPENROUTER_API_KEY")
         if not os.environ.get("ANTHROPIC_API_KEY") and or_key:
-            _client = anthropic.Anthropic(api_key=or_key, base_url=OPENROUTER_BASE_URL)
+            _client = _maybe_wrap(anthropic.Anthropic(api_key=or_key, base_url=OPENROUTER_BASE_URL))
         else:
-            _client = anthropic.Anthropic()
+            _client = _maybe_wrap(anthropic.Anthropic())
     return _client
 
 
@@ -384,6 +524,7 @@ def _call_llm_cached(prefix: str, suffix: str, max_tokens: int = 4096) -> tuple[
 
 # --- LLM call wrappers ---
 
+@traced("discovery")
 async def call_discovery_turn(state: SessionState, user_message: str | None) -> tuple[str, dict | None, list[dict]]:
     """Run a discovery turn. Returns (conversational_text, extraction_data, call metadata list).
 
@@ -410,6 +551,7 @@ async def call_discovery_turn(state: SessionState, user_message: str | None) -> 
     return clean_text, extraction, [meta]
 
 
+@traced("generate_draft")
 async def call_generate_draft(state: SessionState) -> tuple[Charter, list[dict]]:
     """Generate a charter draft. Returns (parsed Charter, call metadata list)."""
     await _refresh_settings()
@@ -462,6 +604,7 @@ async def call_generate_draft(state: SessionState) -> tuple[Charter, list[dict]]
     return charter, [meta]
 
 
+@traced("validate_charter")
 async def call_validate_charter(state: SessionState) -> tuple[Validation, list[dict]]:
     """Validate the current charter. Returns (parsed Validation, call metadata list)."""
     await _refresh_settings()
@@ -488,6 +631,7 @@ async def call_validate_charter(state: SessionState) -> tuple[Validation, list[d
     return validation, [meta]
 
 
+@traced("conversational")
 async def call_conversational_turn(state: SessionState, user_message: str) -> tuple[str, list[dict]]:
     """Send a conversational turn. Returns (raw text, call metadata list)."""
     await _refresh_settings()
@@ -496,6 +640,7 @@ async def call_conversational_turn(state: SessionState, user_message: str) -> tu
     return text, [meta]
 
 
+@traced("suggestions")
 async def call_generate_suggestions(state: SessionState) -> tuple[tuple[list[Suggestion], list[SuggestedStory]], list[dict]]:
     """Generate suggestions for weak/empty sections. Returns ((suggestions, stories), call metadata list)."""
     await _refresh_settings()
@@ -524,6 +669,7 @@ async def call_generate_suggestions(state: SessionState) -> tuple[tuple[list[Sug
     return (_dedupe_suggestions(suggestions), _dedupe_stories(suggested_stories)), [meta]
 
 
+@traced("suggest_goals")
 async def call_suggest_goals(goals: list[str]) -> tuple[list[str], list[dict]]:
     """Suggest additional business goals. Returns (suggestions, call metadata list)."""
     from .prompt import build_suggest_goals_prompt
@@ -534,6 +680,7 @@ async def call_suggest_goals(goals: list[str]) -> tuple[list[str], list[dict]]:
     return data.get("suggestions", []), [meta]
 
 
+@traced("evaluate_goals")
 async def call_evaluate_goals(goals: list[str]) -> tuple[list[dict], list[dict]]:
     """Evaluate business goal quality. Returns (feedback list, call metadata list)."""
     from .prompt import build_evaluate_goals_prompt
@@ -544,6 +691,7 @@ async def call_evaluate_goals(goals: list[str]) -> tuple[list[dict], list[dict]]
     return data.get("feedback", []), [meta]
 
 
+@traced("suggest_stories")
 async def call_suggest_stories(goals: list[str], stories: list[dict]) -> tuple[list[dict], list[dict]]:
     """Suggest additional user stories. Returns (suggestions, call metadata list)."""
     from .prompt import build_suggest_stories_prompt
@@ -606,6 +754,7 @@ async def _synth_one_cell(
     return data.get("examples", []), meta
 
 
+@traced("synthesize_examples")
 async def call_synthesize_examples(
     charter: dict,
     feature_areas: list[str] | None = None,
@@ -679,6 +828,7 @@ async def call_synthesize_examples(
     return examples, metas
 
 
+@traced("review_examples")
 async def call_review_examples(charter: dict, examples: list[dict]) -> tuple[list[dict], list[dict]]:
     """Auto-review examples against charter. Returns (reviews, call metadata list)."""
     await _refresh_settings()
@@ -688,6 +838,7 @@ async def call_review_examples(charter: dict, examples: list[dict]) -> tuple[lis
     return data.get("reviews", []), [meta]
 
 
+@traced("retag_examples")
 async def call_retag_examples_against_charter(
     charter: dict, examples: list[dict],
 ) -> tuple[list[dict], list[dict]]:
@@ -705,6 +856,7 @@ async def call_retag_examples_against_charter(
     return data.get("retags", []), [meta]
 
 
+@traced("dataset_chat")
 async def call_dataset_chat(
     charter: dict,
     dataset_stats: dict,
@@ -718,6 +870,7 @@ async def call_dataset_chat(
     return text, [meta]
 
 
+@traced("gap_analysis")
 async def call_gap_analysis(charter: dict, dataset_stats: dict, examples: list[dict]) -> tuple[dict, list[dict]]:
     """Analyze dataset gaps against charter. Returns (gap analysis, call metadata list).
 
@@ -737,6 +890,7 @@ async def call_gap_analysis(charter: dict, dataset_stats: dict, examples: list[d
 
 # --- Scorer generation tools ---
 
+@traced("generate_scorers")
 async def call_generate_scorers(charter: dict) -> tuple[list[dict], list[dict]]:
     """Generate evaluation scorers from charter. Returns (scorers, call metadata list)."""
     await _refresh_settings()
@@ -748,6 +902,7 @@ async def call_generate_scorers(charter: dict) -> tuple[list[dict], list[dict]]:
 
 # --- Revision suggestion tools ---
 
+@traced("revise_examples")
 async def call_revise_examples(charter: dict, examples_with_verdicts: list[dict]) -> tuple[list[dict], list[dict]]:
     """Suggest revisions for examples that failed review. Returns (revisions, call metadata list)."""
     await _refresh_settings()
@@ -759,6 +914,7 @@ async def call_revise_examples(charter: dict, examples_with_verdicts: list[dict]
 
 # --- Schema detection tools ---
 
+@traced("detect_schema")
 async def call_detect_schema(content: str, content_type: str = "auto") -> tuple[dict, list[dict]]:
     """Detect schema from pasted content. Returns (schema data, call metadata list)."""
     await _refresh_settings()
@@ -768,6 +924,7 @@ async def call_detect_schema(content: str, content_type: str = "auto") -> tuple[
     return data, [meta]
 
 
+@traced("infer_schema")
 async def call_infer_schema(examples: list[dict], charter: dict) -> tuple[dict, list[dict]]:
     """Infer schema from existing examples. Returns (inferred schema, call metadata list)."""
     await _refresh_settings()
@@ -777,6 +934,7 @@ async def call_infer_schema(examples: list[dict], charter: dict) -> tuple[dict, 
     return data, [meta]
 
 
+@traced("import_from_url")
 async def call_import_from_url(content: str, url: str, detected_type: str) -> tuple[dict, list[dict]]:
     """Extract schema from URL content. Returns (schema data, call metadata list)."""
     await _refresh_settings()
@@ -786,6 +944,7 @@ async def call_import_from_url(content: str, url: str, detected_type: str) -> tu
     return data, [meta]
 
 
+@traced("suggest_improvements")
 async def call_suggest_improvements(
     skill_body: str,
     eval_run: dict,
@@ -803,6 +962,7 @@ async def call_suggest_improvements(
     return data, [meta]
 
 
+@traced("skill_seed")
 async def call_skill_seed(
     skill_body: str,
     skill_name: str | None,

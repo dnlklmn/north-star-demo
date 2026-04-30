@@ -38,6 +38,7 @@ from .tools import (
     get_max_rounds,
     parse_charter_update,
     parse_suggestions,
+    set_trace_meta,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,17 +95,24 @@ async def run_agent_turn(
         })
 
     has_charter = bool(state.charter.coverage.criteria or state.charter.alignment)
+    phase = "charter" if has_charter else (state.discovery_phase.value if state.discovery_phase else None)
+    turn_number = state.rounds_of_questions if has_charter else state.discovery_rounds
 
-    # --- Explicit regenerate (force charter generation, even if empty) ---
-    if regenerate:
-        return await _generate_and_validate(state)
+    with set_trace_meta(
+        session_id=state.session_id,
+        phase=phase,
+        turn_number=turn_number,
+    ):
+        # --- Explicit regenerate (force charter generation, even if empty) ---
+        if regenerate:
+            return await _generate_and_validate(state)
 
-    # --- Charter exists → chat turn ---
-    if has_charter and user_message:
-        return await _chat_turn(state, user_message)
+        # --- Charter exists → chat turn ---
+        if has_charter and user_message:
+            return await _chat_turn(state, user_message)
 
-    # --- No charter → discovery (goals or stories phase) ---
-    return await _discovery_turn(state, user_message)
+        # --- No charter → discovery (goals or stories phase) ---
+        return await _discovery_turn(state, user_message)
 
 
 async def _discovery_turn(state: SessionState, user_message: str | None) -> AgentResult:
@@ -192,17 +200,20 @@ async def advance_phase(state: SessionState) -> AgentResult:
     if state.discovery_phase == DiscoveryPhase.goals:
         # Move to users phase
         state.discovery_phase = DiscoveryPhase.users
-        return await _discovery_turn(state, None)
+        with set_trace_meta(session_id=state.session_id, phase="users", turn_number=state.discovery_rounds):
+            return await _discovery_turn(state, None)
 
     elif state.discovery_phase == DiscoveryPhase.users:
         # Move to stories phase
         state.discovery_phase = DiscoveryPhase.stories
-        return await _discovery_turn(state, None)
+        with set_trace_meta(session_id=state.session_id, phase="stories", turn_number=state.discovery_rounds):
+            return await _discovery_turn(state, None)
 
     elif state.discovery_phase == DiscoveryPhase.stories:
         # Move to charter generation
         _build_input_from_extractions(state)
-        result = await _generate_and_validate(state)
+        with set_trace_meta(session_id=state.session_id, phase="charter", turn_number=state.rounds_of_questions):
+            result = await _generate_and_validate(state)
         state.input.conversation_history.append({"role": "assistant", "content": result.message})
         return result
 
@@ -412,9 +423,10 @@ async def run_dataset_chat(
     })
 
     charter = state.charter.model_dump()
-    raw_text, chat_calls = await call_dataset_chat(
-        charter, dataset_stats, user_message, state.input.conversation_history,
-    )
+    with set_trace_meta(session_id=state.session_id, phase="dataset"):
+        raw_text, chat_calls = await call_dataset_chat(
+            charter, dataset_stats, user_message, state.input.conversation_history,
+        )
 
     # Check for dataset-action blocks (can have multiple)
     actions = []

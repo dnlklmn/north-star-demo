@@ -181,6 +181,47 @@ async def _model_error_handler(_request: Request, exc: LLMModelError):
         },
     )
 
+
+@app.middleware("http")
+async def _braintrust_trace_meta_middleware(request: Request, call_next):
+    """Populate the trace metadata contextvar with session_id (and a coarse
+    phase) for the duration of the request.
+
+    Every ``call_*`` tool inside the request — whether invoked through the
+    agent or directly by a handler — picks this up when opening its
+    Braintrust span. Agent-level wrappers in agent.py refine ``phase`` with
+    something more specific (goals/users/stories/charter/dataset) when known.
+
+    Cheap when prod monitoring is off — set_trace_meta is a contextvar push.
+    """
+    import re
+    from .tools import set_trace_meta
+
+    path = request.url.path
+    match = re.search(r"/sessions/([a-zA-Z0-9_-]+)", path)
+    session_id = match.group(1) if match else None
+
+    # Coarse phase inference from URL — the agent layer overrides this with
+    # more specific values when it has them.
+    phase: str | None = None
+    if any(seg in path for seg in (
+        "/synthesize", "/review", "/revise", "/gap-analysis",
+        "/dataset", "/import", "/detect-schema", "/infer-schema",
+    )):
+        phase = "dataset"
+    elif "/generate-scorers" in path or "/scorers" in path:
+        phase = "scorers"
+    elif "/skill-seed" in path:
+        phase = "charter"
+    elif "/suggest-improvements" in path or "/eval" in path:
+        phase = "eval_feedback"
+
+    if session_id or phase:
+        with set_trace_meta(session_id=session_id, phase=phase):
+            return await call_next(request)
+    return await call_next(request)
+
+
 app.add_middleware(
     CORSMiddleware,
     # Wildcard origin + credentials is forbidden by the CORS spec: every
