@@ -1247,17 +1247,23 @@ export default function EvaluatePanel({
               )
             }
 
-            // Sort newest-first. Pinned set is intentionally tight:
-            // latest version (top of the stack — what the user is iterating
-            // on) + selected version (what they're inspecting). Active
-            // folds into the gap expander when it isn't one of those two —
-            // when active and latest are the same, the stack stays at one
-            // row + a "see more" button.
+            // Sort newest-first. Pinned set is selected ± 1 — selected
+            // plus its immediate neighbours, so the user can hop one step
+            // either way without expanding. Everything else folds into the
+            // see-more expanders before/after. When selected sits at the
+            // ends, the pinned set shrinks to 2 (selected + one neighbour).
+            // When nothing is selected yet, fall back to "latest" as the
+            // anchor so the stack still shows something useful.
             const sortedDesc = [...skillVersions].sort((a, b) => b.version - a.version)
-            const latestVer = sortedDesc[0] ?? null
+            const anchorIdx = selectedSkillVersionId
+              ? sortedDesc.findIndex((v) => v.id === selectedSkillVersionId)
+              : 0
             const pinnedIds = new Set<string>()
-            if (latestVer) pinnedIds.add(latestVer.id)
-            if (selectedSkillVersionId) pinnedIds.add(selectedSkillVersionId)
+            if (anchorIdx >= 0) {
+              pinnedIds.add(sortedDesc[anchorIdx].id)
+              if (anchorIdx - 1 >= 0) pinnedIds.add(sortedDesc[anchorIdx - 1].id)
+              if (anchorIdx + 1 < sortedDesc.length) pinnedIds.add(sortedDesc[anchorIdx + 1].id)
+            }
 
             const renderRow = (v: SkillVersion) => {
               const isCandidate = v.id === candidateVer?.id
