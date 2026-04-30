@@ -324,6 +324,14 @@ export default function EvaluatePanel({
   // the main column. Defaults to collapsed — most users only care about
   // candidate + active.
   const [showAllVersions, setShowAllVersions] = useState(false)
+  // Skill version filter — clicking a card in the version stack pins the
+  // run history below to that version's runs only, and auto-opens the
+  // latest run for it. Null means "show all versions" (the default before
+  // the user clicks). When candidate exists, we pre-select it so the user
+  // immediately sees the runs that gate promotion.
+  const [selectedSkillVersionId, setSelectedSkillVersionId] = useState<
+    string | null
+  >(null)
   // When set, opens the CharterDocument modal showing exactly what the
   // user clicked "View charter" for — either a run's snapshot or the live one.
   const [viewingCharter, setViewingCharter] = useState<{
@@ -383,6 +391,30 @@ export default function EvaluatePanel({
   useEffect(() => {
     refreshSkillVersions()
   }, [refreshSkillVersions])
+
+  // Seed the version filter once skill versions load. Pre-pick the candidate
+  // when one exists (the user's most likely focus); otherwise the active
+  // version. Only runs when the user hasn't picked something yet.
+  useEffect(() => {
+    if (selectedSkillVersionId !== null) return
+    if (skillVersions.length === 0) return
+    setSelectedSkillVersionId(candidateVersionId || activeVersionId || null)
+  }, [skillVersions, candidateVersionId, activeVersionId, selectedSkillVersionId])
+
+  // When the version filter changes (or runs load), auto-open the most
+  // recent terminal run on the selected version. If the active run still
+  // matches the new filter, keep it; otherwise switch to the latest run on
+  // this version. Picking null shows all runs and keeps the active run as-is.
+  useEffect(() => {
+    if (!selectedSkillVersionId) return
+    if (runs.length === 0) return
+    const filtered = runs.filter((r) => r.skill_version_id === selectedSkillVersionId)
+    if (filtered.length === 0) return
+    if (activeRun && filtered.some((r) => r.run_id === activeRun.run_id)) return
+    // runs come back newest-first from the API, so filtered[0] is latest.
+    setActiveRun(filtered[0])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSkillVersionId, runs])
 
   // Poll the active run until it reaches a terminal state.
   useEffect(() => {
@@ -464,9 +496,18 @@ export default function EvaluatePanel({
   }
 
   // --- Improvement handlers (merged from ImprovePanel) ---
-  const handleSuggest = async () => {
-    const doneRun = runs.find((r) => r.status === 'done')
-    if (!doneRun) return
+  // Caller can pin a specific run id; otherwise we analyze the currently-open
+  // run, or fall back to the latest done/failed run. The in-context "Analyze
+  // this run" button at the bottom of the active-run section passes the
+  // active run's id explicitly so the analysis targets what the user is
+  // looking at, not the most recent run globally.
+  const handleSuggest = async (runId?: string) => {
+    const targetRunId =
+      runId ||
+      (activeRun && (activeRun.status === 'done' || activeRun.status === 'failed')
+        ? activeRun.run_id
+        : runs.find((r) => r.status === 'done' || r.status === 'failed')?.run_id)
+    if (!targetRunId) return
     setSuggesting(true)
     setSuggestError(null)
     setSummary('')
@@ -475,7 +516,7 @@ export default function EvaluatePanel({
     setDismissed(new Set())
     setJustSaved(null)
     try {
-      const res = await suggestImprovements(sessionId, doneRun.run_id)
+      const res = await suggestImprovements(sessionId, targetRunId)
       setSuggestions(res.suggestions)
       setSummary(res.summary || '')
       if (res.suggestions.length === 0) {
@@ -700,23 +741,15 @@ export default function EvaluatePanel({
 
       {!doneRunForImprove && (
         <p className="text-xs text-fg-dim">
-          Run an evaluation first. Improve uses the latest run's failures to propose targeted SKILL.md edits.
+          Run an evaluation first. The "Analyze this run" button below the
+          run details proposes targeted SKILL.md edits from the run's failures.
         </p>
       )}
 
       {doneRunForImprove && !suggestions.length && !suggesting && !suggestError && !summary && (
-        <div className="space-y-2">
-          <p className="text-xs text-fg-dim">
-            Analyzes failures in the latest run and proposes targeted edits to your SKILL.md.
-          </p>
-          <button
-            onClick={handleSuggest}
-            className="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium bg-fill-primary text-bg-default hover:opacity-90"
-          >
-            <Sparkles className="w-4 h-4" />
-            Analyze this run
-          </button>
-        </div>
+        <p className="text-xs text-fg-dim">
+          Use "Analyze this run" at the bottom of the run details to propose targeted SKILL.md edits.
+        </p>
       )}
 
       {suggesting && !suggestions.length && (
@@ -1136,15 +1169,30 @@ export default function EvaluatePanel({
                   : `Created from ${v.created_from}`)
               const isCandidate = opts.badge === 'candidate'
               const isHistory = opts.badge === 'history'
+              const isSelected = selectedSkillVersionId === v.id
               return (
                 <div
-                  className={`flex items-center gap-3 px-3 py-3 ${
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setSelectedSkillVersionId(v.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      setSelectedSkillVersionId(v.id)
+                    }
+                  }}
+                  className={`flex items-center gap-3 px-3 py-3 transition-colors ${
                     isCandidate
                       ? 'border border-fill-primary/60 bg-bg-default'
                       : isHistory
                         ? 'bg-fill-neutral/20'
                         : 'bg-fill-neutral/40'
+                  } ${
+                    isSelected
+                      ? 'ring-1 ring-fill-primary/60'
+                      : 'hover:bg-fill-neutral/30 cursor-pointer'
                   }`}
+                  aria-pressed={isSelected}
                 >
                   <span className="text-base text-fg-contrast flex-shrink-0">v{v.version}</span>
                   <span
@@ -1696,6 +1744,37 @@ export default function EvaluatePanel({
                   {/* Suggestions list, save block, post-save CTA all moved
                       to the right rail (improveRight). */}
 
+                  {/* In-context Analyze CTA — sits at the end of the open
+                      run section so the user can trigger improvement
+                      analysis right from the results they're looking at,
+                      without scrolling up to the right rail. The right rail
+                      still renders the resulting summary + suggestions; this
+                      is just the trigger. Only enabled for terminal runs
+                      with rows to analyze. */}
+                  {(activeRun.status === 'done' || activeRun.status === 'failed') && (
+                    <div className="mt-4 pt-4 border-t border-border-hint flex items-center justify-between gap-3">
+                      <p className="text-xs text-fg-dim">
+                        Analyze the failures from this run to get proposed SKILL.md edits.
+                      </p>
+                      <button
+                        onClick={() => handleSuggest(activeRun.run_id)}
+                        disabled={suggesting}
+                        className={`inline-flex items-center gap-2 px-3 py-1.5 text-sm font-semibold ${
+                          suggesting
+                            ? 'bg-fill-neutral text-fg-dim cursor-not-allowed'
+                            : 'bg-fill-primary text-bg-default hover:opacity-90'
+                        }`}
+                      >
+                        {suggesting ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Sparkles className="w-4 h-4" />
+                        )}
+                        Analyze this run
+                      </button>
+                    </div>
+                  )}
+
                   {activeRun.per_row.length > 0 && (
                     <details className="mt-2">
                       <summary className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide cursor-pointer mb-2">
@@ -1763,29 +1842,62 @@ export default function EvaluatePanel({
                its per-scorer table inline (the active-run details section
                above renders against activeRun). */}
           <section>
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-[10px] font-semibold text-fg-dim uppercase tracking-wider">
-                Run history
-              </h3>
-              <button
-                onClick={() => refreshRuns()}
-                className="text-[10px] uppercase tracking-wide text-fg-dim hover:text-fg-contrast"
-                title="Refresh history from the server"
-              >
-                Refresh
-              </button>
-            </div>
-            {runsError && (
-              <div className="px-3 py-2 mb-2 bg-danger/10 border border-danger/30 text-xs text-danger">
-                {runsError}
-              </div>
-            )}
-            {runs.length === 0 && !runsError && (
-              <p className="text-xs text-fg-dim italic">No runs yet — start one above.</p>
-            )}
-            {runs.length > 0 && (
-              <ul className="space-y-0.5">
-                {runs.map((r) => {
+            {(() => {
+              // Filter run history to runs that match the selected version
+              // card. When the user hasn't picked one (selectedSkillVersionId
+              // is null), show all runs. The selected-version label below
+              // tells the user what they're looking at.
+              const filteredRuns = selectedSkillVersionId
+                ? runs.filter((r) => r.skill_version_id === selectedSkillVersionId)
+                : runs
+              const selectedVer =
+                selectedSkillVersionId &&
+                skillVersions.find((v) => v.id === selectedSkillVersionId)
+              return (
+                <>
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-[10px] font-semibold text-fg-dim uppercase tracking-wider">
+                      Run history
+                      {selectedVer && (
+                        <span className="ml-2 normal-case text-fg-contrast">
+                          v{selectedVer.version}
+                        </span>
+                      )}
+                    </h3>
+                    <div className="flex items-center gap-3">
+                      {selectedSkillVersionId && (
+                        <button
+                          onClick={() => setSelectedSkillVersionId(null)}
+                          className="text-[10px] uppercase tracking-wide text-fg-dim hover:text-fg-contrast"
+                          title="Show runs from every skill version"
+                        >
+                          Show all versions
+                        </button>
+                      )}
+                      <button
+                        onClick={() => refreshRuns()}
+                        className="text-[10px] uppercase tracking-wide text-fg-dim hover:text-fg-contrast"
+                        title="Refresh history from the server"
+                      >
+                        Refresh
+                      </button>
+                    </div>
+                  </div>
+                  {runsError && (
+                    <div className="px-3 py-2 mb-2 bg-danger/10 border border-danger/30 text-xs text-danger">
+                      {runsError}
+                    </div>
+                  )}
+                  {filteredRuns.length === 0 && !runsError && (
+                    <p className="text-xs text-fg-dim italic">
+                      {selectedSkillVersionId
+                        ? `No runs on v${selectedVer?.version ?? '?'} yet — run an evaluation above to see it here.`
+                        : 'No runs yet — start one above.'}
+                    </p>
+                  )}
+                  {filteredRuns.length > 0 && (
+                    <ul className="space-y-0.5">
+                      {filteredRuns.map((r) => {
                   const isActive = activeRun?.run_id === r.run_id
                   // Status dot color — green dot for healthy runs, red for
                   // any errored/cancelled state, yellow while running.
@@ -1907,8 +2019,11 @@ export default function EvaluatePanel({
                     </li>
                   )
                 })}
-              </ul>
-            )}
+                    </ul>
+                  )}
+                </>
+              )
+            })()}
           </section>
 
           {/* --- Direct download (kept from before) --- */}
