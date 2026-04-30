@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Check, ChevronDown, ChevronUp, Eye, ExternalLink, FileText, History, KeyRound, Loader2, PlayCircle, RotateCcw, Settings as SettingsIcon, Sparkles, X } from 'lucide-react'
+import { Check, ChevronDown, ChevronUp, Eye, ExternalLink, FileText, KeyRound, Loader2, RotateCcw, Settings as SettingsIcon, Sparkles, X } from 'lucide-react'
 import type { Charter, Dataset, EvalRunSummary, ImprovementSuggestion, SkillVersion } from '../types'
 import CharterDocument from './CharterDocument'
 import DiffModal from './DiffModal'
@@ -33,7 +33,6 @@ interface Props {
   /** True for kind=prompt projects. Skips skill_body precondition + reframes
    *  copy ("the chosen prompt builder" instead of "your SKILL.md"). */
   isPromptEval?: boolean
-  onExport: () => void
   skillBody: string
   onSkillBodyChange: (body: string) => void
   /** Trigger a new eval run from the post-save CTA. Called with optional
@@ -97,12 +96,6 @@ function judgeLabel(modelId: string | null | undefined): string | null {
   const opt = JUDGE_MODEL_OPTIONS.find((o) => o.value === modelId)
   if (opt) return opt.label.replace(' (OpenRouter)', '').replace('Default (', '').replace(')', '')
   return modelId
-}
-
-function formatWhen(iso: string | null): string {
-  if (!iso) return ''
-  const d = new Date(iso)
-  return d.toLocaleString()
 }
 
 /** How an Accept resolved against the current SKILL.md body.
@@ -242,18 +235,12 @@ function confidenceColor(c: ImprovementSuggestion['confidence']): string {
   return 'bg-muted text-muted-foreground'
 }
 
-function whenLabel(iso: string | null | undefined): string {
-  if (!iso) return ''
-  return new Date(iso).toLocaleString()
-}
-
 export default function EvaluatePanel({
   sessionId,
   dataset,
   scorerCount,
   hasSkillBody,
   isPromptEval = false,
-  onExport,
   skillBody,
   onSkillBodyChange,
   onRunEval,
@@ -398,14 +385,19 @@ export default function EvaluatePanel({
     refreshSkillVersions()
   }, [refreshSkillVersions])
 
-  // Seed the version filter once skill versions load. Pre-pick the candidate
-  // when one exists (the user's most likely focus); otherwise the active
-  // version. Only runs when the user hasn't picked something yet.
+  // Seed the version filter exactly once on first load. Pre-pick the
+  // candidate (user's most likely focus); otherwise the active version.
+  // The ref guard is critical: without it, the effect re-fires every time
+  // selectedSkillVersionId becomes null — including the user clicking
+  // "Show all versions" — and instantly snaps the filter back. With the
+  // ref, a user-initiated null is sticky.
+  const versionSeededRef = useRef(false)
   useEffect(() => {
-    if (selectedSkillVersionId !== null) return
+    if (versionSeededRef.current) return
     if (skillVersions.length === 0) return
+    versionSeededRef.current = true
     setSelectedSkillVersionId(candidateVersionId || activeVersionId || null)
-  }, [skillVersions, candidateVersionId, activeVersionId, selectedSkillVersionId])
+  }, [skillVersions, candidateVersionId, activeVersionId])
 
   // When the version filter changes (or runs load), auto-open the most
   // recent terminal run on the selected version. If the active run still
@@ -963,86 +955,6 @@ export default function EvaluatePanel({
     </div>
   )
 
-  const versionHistoryRight = skillVersions.length > 0 ? (
-    <div>
-      <div className="flex items-center gap-2 mb-3">
-        <History className="w-4 h-4 text-muted-foreground" />
-        <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-          Version history
-        </h3>
-        <span className="text-xs text-muted-foreground">
-          ({skillVersions.length} version{skillVersions.length === 1 ? '' : 's'})
-        </span>
-      </div>
-      <ul className="space-y-1">
-        {skillVersions.map((v, i) => {
-          const isActive = v.id === (activeVersionId || skillVersions[0]?.id)
-          const olderVersions = skillVersions.slice(i + 1)
-          return (
-            <li
-              key={v.id}
-              className={`flex items-center gap-3 px-3 py-2 text-xs border border-border ${
-                isActive ? 'bg-accent/5 border-accent' : 'bg-muted/10'
-              }`}
-            >
-              <span className="font-mono text-foreground">v{v.version}</span>
-              {isActive && (
-                <span className="font-mono text-[10px] uppercase px-1.5 py-0.5 bg-accent/20 text-accent">
-                  active
-                </span>
-              )}
-              <span className="font-mono text-[10px] text-muted-foreground uppercase">
-                {v.created_from}
-              </span>
-              <span className="text-muted-foreground truncate flex-1">
-                {v.notes || '—'}
-              </span>
-              <span className="text-muted-foreground flex-shrink-0">
-                {whenLabel(v.created_at)}
-              </span>
-              <div className="flex gap-1 flex-shrink-0">
-                {olderVersions.length > 0 && (
-                  <select
-                    className="text-[10px] bg-background border border-border px-1 py-0.5 focus:outline-none"
-                    value=""
-                    onChange={(e) => {
-                      if (!e.target.value) return
-                      const oldV = skillVersions.find((x) => x.id === e.target.value)
-                      if (!oldV) return
-                      setDiffVs({
-                        title: `v${oldV.version} → v${v.version}`,
-                        subtitle: v.notes || undefined,
-                        oldLabel: `v${oldV.version}`,
-                        newLabel: `v${v.version}`,
-                        oldText: oldV.body,
-                        newText: v.body,
-                      })
-                    }}
-                    title="Diff against a previous version"
-                  >
-                    <option value="" disabled>Diff vs…</option>
-                    {olderVersions.map((o) => (
-                      <option key={o.id} value={o.id}>v{o.version}</option>
-                    ))}
-                  </select>
-                )}
-                {!isActive && (
-                  <button
-                    onClick={() => handleRestore(v)}
-                    className="p-1 text-muted-foreground hover:text-foreground"
-                    title="Restore as active"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </div>
-            </li>
-          )
-        })}
-      </ul>
-    </div>
-  ) : null
-
   return (
     <PanelLayout
       title="Evaluations"
@@ -1249,21 +1161,35 @@ export default function EvaluatePanel({
 
             // Sort newest-first. Pinned set is selected ± 1 — selected
             // plus its immediate neighbours, so the user can hop one step
-            // either way without expanding. Everything else folds into the
-            // see-more expanders before/after. When selected sits at the
-            // ends, the pinned set shrinks to 2 (selected + one neighbour).
-            // When nothing is selected yet, fall back to "latest" as the
-            // anchor so the stack still shows something useful.
+            // either way without expanding — PLUS candidate and active
+            // whenever they exist. Always pinning candidate + active means
+            // the Discard / Make active / Restore buttons never disappear
+            // behind a "see more" expander, even when the user is poking
+            // through unrelated history rows. When selected sits at the
+            // ends or shares a slot with candidate/active, the pinned set
+            // collapses naturally (Set dedupes).
+            //
+            // Defensive fallback: if selectedSkillVersionId references a
+            // version that no longer exists (got discarded from another
+            // tab, etc.), findIndex returns -1; treat that as anchor=0
+            // (latest) so we don't render a lone "+ N older versions"
+            // expander with nothing above it.
             const sortedDesc = [...skillVersions].sort((a, b) => b.version - a.version)
-            const anchorIdx = selectedSkillVersionId
+            const rawAnchor = selectedSkillVersionId
               ? sortedDesc.findIndex((v) => v.id === selectedSkillVersionId)
               : 0
+            const anchorIdx = rawAnchor === -1 ? 0 : rawAnchor
             const pinnedIds = new Set<string>()
-            if (anchorIdx >= 0) {
+            if (sortedDesc.length > 0) {
               pinnedIds.add(sortedDesc[anchorIdx].id)
               if (anchorIdx - 1 >= 0) pinnedIds.add(sortedDesc[anchorIdx - 1].id)
               if (anchorIdx + 1 < sortedDesc.length) pinnedIds.add(sortedDesc[anchorIdx + 1].id)
             }
+            // Candidate + active stay pinned regardless of selection so
+            // their action buttons (Discard/Make active/Restore) are
+            // always reachable without expanding.
+            if (candidateVersionId) pinnedIds.add(candidateVersionId)
+            if (activeVersionId) pinnedIds.add(activeVersionId)
 
             const renderRow = (v: SkillVersion) => {
               const isCandidate = v.id === candidateVer?.id

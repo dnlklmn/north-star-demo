@@ -2207,7 +2207,6 @@ export default function ProjectWorkspace() {
               scorerCount={scorers.length}
               hasSkillBody={!!state.charter.task.skill_body}
               isPromptEval={isPromptEval}
-              onExport={handleExport}
               skillBody={state.charter.task.skill_body || ""}
               onSkillBodyChange={(body) =>
                 setState((prev) => ({
