@@ -311,6 +311,10 @@ export default function EvaluatePanel({
   // version's best eval avg, so the user sees iteration progress without
   // hopping back to the Skill tab.
   const [skillVersions, setSkillVersions] = useState<SkillVersion[]>([])
+  // Initial-load gate for the version stack. We start true so the panel
+  // doesn't flash an empty stack on mount; the first refreshSkillVersions
+  // flips it to false. The fetch usually takes ~1-2s.
+  const [versionsLoading, setVersionsLoading] = useState(true)
   const [startError, setStartError] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
   const pollTimerRef = useRef<number | null>(null)
@@ -385,6 +389,8 @@ export default function EvaluatePanel({
       setSkillVersions(list)
     } catch {
       /* non-fatal */
+    } finally {
+      setVersionsLoading(false)
     }
   }, [sessionId])
 
@@ -1068,6 +1074,25 @@ export default function EvaluatePanel({
               previous active baseline), so the user can see at a glance
               whether the candidate actually beats active before promoting.
               "See all" toggles a flat list of older versions for context. */}
+          {versionsLoading && skillVersions.length === 0 && (
+            <div className="mb-6 space-y-0.5" aria-busy="true" aria-live="polite">
+              {/* Skeleton preloader — matches the row shape so the layout
+                  doesn't shift when real data lands. The first version
+                  list fetch usually takes ~1-2s; an empty area looked like
+                  "no versions" instead of "loading". */}
+              {[0, 1].map((i) => (
+                <div
+                  key={i}
+                  className="flex items-center gap-3 px-3 py-3 bg-fill-neutral/40 animate-pulse"
+                >
+                  <span className="w-8 h-4 bg-fill-neutral/60" />
+                  <span className="w-20 h-4 bg-fill-neutral/60" />
+                  <span className="flex-1" />
+                  <span className="w-24 h-6 bg-fill-neutral/60" />
+                </div>
+              ))}
+            </div>
+          )}
           {(() => {
             if (skillVersions.length === 0) return null
 
@@ -1181,16 +1206,12 @@ export default function EvaluatePanel({
                       setSelectedSkillVersionId(v.id)
                     }
                   }}
-                  className={`flex items-center gap-3 px-3 py-3 transition-colors ${
-                    isCandidate
-                      ? 'border border-fill-primary/60 bg-bg-default'
-                      : isHistory
-                        ? 'bg-fill-neutral/20'
-                        : 'bg-fill-neutral/40'
-                  } ${
+                  className={`flex items-center gap-3 px-3 py-3 transition-colors cursor-pointer ${
                     isSelected
-                      ? 'ring-1 ring-fill-primary/60'
-                      : 'hover:bg-fill-neutral/30 cursor-pointer'
+                      ? 'border-2 border-fill-primary bg-transparent'
+                      : `border-2 border-transparent hover:bg-fill-neutral/50 ${
+                          isHistory ? 'bg-fill-neutral/20' : 'bg-fill-neutral/40'
+                        }`
                   }`}
                   aria-pressed={isSelected}
                 >
@@ -1226,72 +1247,132 @@ export default function EvaluatePanel({
               )
             }
 
-            const olderVersions = skillVersions.filter(
-              (v) => v.id !== candidateVer?.id && v.id !== activeVer?.id,
-            )
+            // Sort newest-first. We always show the latest version (newest
+            // by version number, which is what the user is currently
+            // iterating on — usually the candidate but could be the active
+            // when no candidate exists), the active version (what's
+            // shipped), and the selected version (what the user is
+            // inspecting). Older versions between pinned rows collapse to
+            // a "+ N more" expander so the stack stays scannable. "See all"
+            // overrides everything and shows the full list.
+            const sortedDesc = [...skillVersions].sort((a, b) => b.version - a.version)
+            const latestVer = sortedDesc[0] ?? null
+            const pinnedIds = new Set<string>()
+            if (latestVer) pinnedIds.add(latestVer.id)
+            if (activeVer) pinnedIds.add(activeVer.id)
+            if (selectedSkillVersionId) pinnedIds.add(selectedSkillVersionId)
+
+            const renderRow = (v: SkillVersion) => {
+              const isCandidate = v.id === candidateVer?.id
+              const isActive = v.id === activeVer?.id
+              const badge: 'candidate' | 'active' | 'history' = isCandidate
+                ? 'candidate'
+                : isActive
+                  ? 'active'
+                  : 'history'
+              const diff = isCandidate ? candidateDiff : null
+              let actions: React.ReactNode = null
+              if (isCandidate) {
+                actions = (
+                  <>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onDiscardCandidate()
+                      }}
+                      disabled={candidateActionBusy}
+                      className="px-2.5 py-1 text-xs font-medium border border-border-hint text-fg-contrast hover:bg-fill-neutral/30 disabled:opacity-50"
+                      title="Revert SKILL.md to active. The candidate stays in history."
+                    >
+                      Discard
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onPromoteCandidate()
+                      }}
+                      disabled={candidateActionBusy}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-fill-primary text-bg-default hover:opacity-90 disabled:opacity-50"
+                      title="Promote candidate to active SKILL.md."
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                      Make active
+                    </button>
+                  </>
+                )
+              } else if (!isActive && !candidateVersionId) {
+                actions = (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      handleRestore(v)
+                    }}
+                    className="p-1 text-fg-dim hover:text-fg-contrast"
+                    title="Restore as active"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                  </button>
+                )
+              }
+              return (
+                <div key={v.id}>{renderVersionRow(v, { badge, diff, actions })}</div>
+              )
+            }
+
+            // Build the visible list by walking the sorted list and either
+            // emitting the row (when pinned or showAllVersions) or counting
+            // it as "skipped" until we hit the next pinned row. The trailing
+            // skipped count is rendered after the loop.
+            const items: React.ReactNode[] = []
+            let skipped = 0
+            sortedDesc.forEach((v, idx) => {
+              const include = showAllVersions || pinnedIds.has(v.id)
+              if (include) {
+                if (skipped > 0) {
+                  items.push(
+                    <button
+                      key={`gap-${idx}`}
+                      onClick={() => setShowAllVersions(true)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-fg-dim hover:text-fg-contrast"
+                    >
+                      <ChevronDown className="w-3.5 h-3.5" />
+                      {skipped} more version{skipped === 1 ? '' : 's'}
+                    </button>,
+                  )
+                  skipped = 0
+                }
+                items.push(renderRow(v))
+              } else {
+                skipped++
+              }
+            })
+            if (skipped > 0) {
+              items.push(
+                <button
+                  key="gap-end"
+                  onClick={() => setShowAllVersions(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-fg-dim hover:text-fg-contrast"
+                >
+                  <ChevronDown className="w-3.5 h-3.5" />
+                  {skipped} older version{skipped === 1 ? '' : 's'}
+                </button>,
+              )
+            }
+            // Hide-toggle visible whenever we're in expanded mode.
+            const expandToggle = showAllVersions ? (
+              <button
+                onClick={() => setShowAllVersions(false)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-fg-dim hover:text-fg-contrast"
+              >
+                <ChevronUp className="w-3.5 h-3.5" />
+                Show less
+              </button>
+            ) : null
 
             return (
               <div className="mb-6 space-y-0.5">
-                {candidateVer &&
-                  renderVersionRow(candidateVer, {
-                    badge: 'candidate',
-                    diff: candidateDiff,
-                    actions: (
-                      <>
-                        <button
-                          onClick={onDiscardCandidate}
-                          disabled={candidateActionBusy}
-                          className="px-2.5 py-1 text-xs font-medium border border-border-hint text-fg-contrast hover:bg-fill-neutral/30 disabled:opacity-50"
-                          title="Revert SKILL.md to active. The candidate stays in history."
-                        >
-                          Discard
-                        </button>
-                        <button
-                          onClick={onPromoteCandidate}
-                          disabled={candidateActionBusy}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium bg-fill-primary text-bg-default hover:opacity-90 disabled:opacity-50"
-                          title="Promote candidate to active SKILL.md."
-                        >
-                          <Check className="w-3.5 h-3.5" />
-                          Make active
-                        </button>
-                      </>
-                    ),
-                  })}
-                {activeVer && renderVersionRow(activeVer, { badge: 'active' })}
-                {showAllVersions &&
-                  olderVersions.map((v) =>
-                    renderVersionRow(v, {
-                      badge: 'history',
-                      actions: !candidateVersionId ? (
-                        <button
-                          onClick={() => handleRestore(v)}
-                          className="p-1 text-fg-dim hover:text-fg-contrast"
-                          title="Restore as active"
-                        >
-                          <RotateCcw className="w-3.5 h-3.5" />
-                        </button>
-                      ) : undefined,
-                    }),
-                  )}
-                {olderVersions.length > 0 && (
-                  <button
-                    onClick={() => setShowAllVersions((v) => !v)}
-                    className="flex items-center gap-1.5 px-3 py-2 text-xs text-fg-dim hover:text-fg-contrast"
-                  >
-                    {showAllVersions ? (
-                      <>
-                        <ChevronUp className="w-3.5 h-3.5" />
-                        Hide older versions
-                      </>
-                    ) : (
-                      <>
-                        <ChevronDown className="w-3.5 h-3.5" />
-                        See all ({olderVersions.length} older)
-                      </>
-                    )}
-                  </button>
-                )}
+                {items}
+                {expandToggle}
                 {candidateActionError && (
                   <p className="text-xs text-danger px-3 py-1">{candidateActionError}</p>
                 )}
