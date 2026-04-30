@@ -1053,7 +1053,7 @@ export default function EvaluatePanel({
       }
       right={improveRight}
     >
-        <div className="max-w-2xl space-y-8">
+        <div className="space-y-8">
           {isPromptEval && newSinceRefresh > 0 && (
             <div className="flex items-start gap-3 px-3 py-2 bg-accent/10 border border-accent/30 text-xs">
               <Sparkles className="w-4 h-4 text-accent flex-shrink-0 mt-0.5" />
@@ -1071,7 +1071,7 @@ export default function EvaluatePanel({
               Older + active fold into "+ N more" expanders so the section
               stays small unless the user explicitly opens it. Shows +X/-Y
               row-regression pills on the candidate vs active baseline. */}
-          <h3 className="text-[10px] font-semibold text-fg-dim uppercase tracking-wider mb-3">
+          <h3 className="text-base font-semibold text-fg-contrast mb-3">
             Skill versions
           </h3>
           {versionsLoading && skillVersions.length === 0 && (
@@ -1388,7 +1388,7 @@ export default function EvaluatePanel({
               big purple Run button on the right. PROJECT/EXPERIMENT moved
               to "More options" since they have sensible defaults the user
               rarely touches. */}
-          <h3 className="text-[10px] font-semibold text-fg-dim uppercase tracking-wider mb-3">
+          <h3 className="text-base font-semibold text-fg-contrast mb-3">
             Run settings
           </h3>
           <section className="space-y-3 mb-8">
@@ -1942,10 +1942,10 @@ export default function EvaluatePanel({
               return (
                 <>
                   <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-[10px] font-semibold text-fg-dim uppercase tracking-wider">
+                    <h3 className="text-base font-semibold text-fg-contrast">
                       Run history
                       {selectedVer && (
-                        <span className="ml-2 normal-case text-fg-contrast">
+                        <span className="ml-2 text-fg-dim font-normal">
                           v{selectedVer.version}
                         </span>
                       )}
