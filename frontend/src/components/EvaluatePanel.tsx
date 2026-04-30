@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Check, ChevronDown, ChevronUp, Download, Eye, ExternalLink, FileText, History, KeyRound, Loader2, PlayCircle, RotateCcw, Settings as SettingsIcon, Sparkles, X } from 'lucide-react'
+import { Check, ChevronDown, ChevronUp, Eye, ExternalLink, FileText, History, KeyRound, Loader2, PlayCircle, RotateCcw, Settings as SettingsIcon, Sparkles, X } from 'lucide-react'
 import type { Charter, Dataset, EvalRunSummary, ImprovementSuggestion, SkillVersion } from '../types'
 import CharterDocument from './CharterDocument'
 import DiffModal from './DiffModal'
@@ -1067,13 +1067,13 @@ export default function EvaluatePanel({
             </div>
           )}
 
-          {/* Compact version stack — candidate (if any) on top with
-              Discard/Promote, active below. Replaces the old "pending
-              candidate" banner. Shows +X/-Y row regression pills derived
-              from the most recent completed run on each version (vs the
-              previous active baseline), so the user can see at a glance
-              whether the candidate actually beats active before promoting.
-              "See all" toggles a flat list of older versions for context. */}
+          {/* Compact version stack — pinned set is {selected, latest}.
+              Older + active fold into "+ N more" expanders so the section
+              stays small unless the user explicitly opens it. Shows +X/-Y
+              row-regression pills on the candidate vs active baseline. */}
+          <h3 className="text-[10px] font-semibold text-fg-dim uppercase tracking-wider mb-3">
+            Skill versions
+          </h3>
           {versionsLoading && skillVersions.length === 0 && (
             <div className="mb-6 space-y-0.5" aria-busy="true" aria-live="polite">
               {/* Skeleton preloader — matches the row shape so the layout
@@ -1247,19 +1247,16 @@ export default function EvaluatePanel({
               )
             }
 
-            // Sort newest-first. We always show the latest version (newest
-            // by version number, which is what the user is currently
-            // iterating on — usually the candidate but could be the active
-            // when no candidate exists), the active version (what's
-            // shipped), and the selected version (what the user is
-            // inspecting). Older versions between pinned rows collapse to
-            // a "+ N more" expander so the stack stays scannable. "See all"
-            // overrides everything and shows the full list.
+            // Sort newest-first. Pinned set is intentionally tight:
+            // latest version (top of the stack — what the user is iterating
+            // on) + selected version (what they're inspecting). Active
+            // folds into the gap expander when it isn't one of those two —
+            // when active and latest are the same, the stack stays at one
+            // row + a "see more" button.
             const sortedDesc = [...skillVersions].sort((a, b) => b.version - a.version)
             const latestVer = sortedDesc[0] ?? null
             const pinnedIds = new Set<string>()
             if (latestVer) pinnedIds.add(latestVer.id)
-            if (activeVer) pinnedIds.add(activeVer.id)
             if (selectedSkillVersionId) pinnedIds.add(selectedSkillVersionId)
 
             const renderRow = (v: SkillVersion) => {
@@ -1380,12 +1377,14 @@ export default function EvaluatePanel({
             )
           })()}
 
-          {/* --- Run config row — single horizontal strip with the three
+          {/* --- Run settings — single horizontal strip with the three
               fields the user actually changes (limit, judge, off-target),
               big purple Run button on the right. PROJECT/EXPERIMENT moved
               to "More options" since they have sensible defaults the user
-              rarely touches. The page title + description above replaces
-              the old "Run with Braintrust" section header. */}
+              rarely touches. */}
+          <h3 className="text-[10px] font-semibold text-fg-dim uppercase tracking-wider mb-3">
+            Run settings
+          </h3>
           <section className="space-y-3 mb-8">
             {/* Readiness — list of missing preconditions with fix-it buttons */}
             {blockers.length > 0 && (
@@ -2107,29 +2106,8 @@ export default function EvaluatePanel({
             })()}
           </section>
 
-          {/* --- Direct download (kept from before) --- */}
-          <section>
-            <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">
-              Download
-            </h3>
-            <button
-              onClick={onExport}
-              disabled={!dataset}
-              className={`w-full flex items-center gap-3 p-4 border border-border transition-colors ${
-                dataset ? 'hover:bg-muted/50 cursor-pointer' : 'opacity-50 cursor-not-allowed'
-              }`}
-            >
-              <div className="w-10 h-10 bg-accent/10 flex items-center justify-center flex-shrink-0">
-                <Download className="w-5 h-5 text-accent" />
-              </div>
-              <div className="text-left">
-                <p className="text-sm font-medium text-foreground">Download JSON</p>
-                <p className="text-xs text-muted-foreground">
-                  Raw dataset — {exampleCount} examples — for use outside Braintrust
-                </p>
-              </div>
-            </button>
-          </section>
+          {/* Download moved to the Dataset page — that's where the user
+              builds the dataset, so they can download from there. */}
 
           {viewingCharter && (
             <CharterDocument
