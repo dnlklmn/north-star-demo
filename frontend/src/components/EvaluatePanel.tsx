@@ -281,6 +281,9 @@ export default function EvaluatePanel({
   // --- Run config — seeded from per-user Settings defaults ---
   const [project, setProject] = useState(() => getDefaultBraintrustProject())
   const [experiment, setExperiment] = useState('')
+  // "Advanced" modal — project + experiment overrides. Defaults are sensible
+  // enough that the modal stays closed >99% of the time.
+  const [showAdvanced, setShowAdvanced] = useState(false)
   const [limit, setLimit] = useState<string>('') // empty = no limit
   const [includeTriggering, setIncludeTriggering] = useState(false)
   // Empty string in state means "use server default" (no judge_model override).
@@ -1314,9 +1317,18 @@ export default function EvaluatePanel({
               big purple Run button on the right. PROJECT/EXPERIMENT moved
               to "More options" since they have sensible defaults the user
               rarely touches. */}
-          <h3 className="text-base font-semibold text-fg-contrast mb-3">
-            Run settings
-          </h3>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-base font-semibold text-fg-contrast">
+              Run settings
+            </h3>
+            <button
+              onClick={() => setShowAdvanced(true)}
+              className="inline-flex items-center gap-1.5 text-xs text-fg-dim hover:text-fg-contrast"
+            >
+              <SettingsIcon className="w-3.5 h-3.5" />
+              Advanced
+            </button>
+          </div>
           <section className="space-y-3 mb-8">
             {/* Readiness — list of missing preconditions with fix-it buttons */}
             {blockers.length > 0 && (
@@ -1454,19 +1466,14 @@ export default function EvaluatePanel({
               </button>
             </div>
 
-            {/* Judge routing hint sits under the row so it doesn't widen any column */}
+            {/* Judge routing hint — only surfaced when the user picked a non-Anthropic
+                judge but hasn't added an OpenRouter key. Otherwise silent: a green-path
+                hint added clutter without adding information. */}
             {(() => {
               const selectedOpt =
                 JUDGE_MODEL_OPTIONS.find((o) => (o.value ?? '') === judgeModel) ||
                 JUDGE_MODEL_OPTIONS[0]
-              if (hasOpenRouterKey) {
-                return (
-                  <p className="text-[10px] text-fg-dim">
-                    Routes via OpenRouter (your stored API key is sk-or-…).
-                  </p>
-                )
-              }
-              if (selectedOpt.provider === 'openrouter') {
+              if (selectedOpt.provider === 'openrouter' && !hasOpenRouterKey) {
                 return (
                   <button
                     onClick={onOpenSettings}
@@ -1477,46 +1484,8 @@ export default function EvaluatePanel({
                   </button>
                 )
               }
-              return (
-                <p className="text-[10px] text-fg-dim">
-                  Routes direct to Anthropic. Add an OpenRouter key in Settings to also evaluate with GPT, Gemini, Llama.
-                </p>
-              )
+              return null
             })()}
-
-            {/* Project + experiment overrides — collapsed by default */}
-            <details className="text-xs">
-              <summary className="cursor-pointer text-fg-dim hover:text-fg-contrast inline-flex items-center gap-1.5">
-                <ChevronDown className="w-3.5 h-3.5" />
-                More options (project, experiment name)
-              </summary>
-              <div className="grid grid-cols-2 gap-3 mt-3">
-                <div>
-                  <label className="text-[10px] font-semibold text-fg-dim uppercase tracking-wide block mb-1">
-                    Project
-                  </label>
-                  <input
-                    type="text"
-                    value={project}
-                    onChange={(e) => setProject(e.target.value)}
-                    placeholder="northstar-eval"
-                    className="w-full text-sm bg-fill-dip border border-border-hint px-3 py-2 focus:outline-none focus:ring-1 focus:ring-fill-primary"
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] font-semibold text-fg-dim uppercase tracking-wide block mb-1">
-                    Experiment (optional)
-                  </label>
-                  <input
-                    type="text"
-                    value={experiment}
-                    onChange={(e) => setExperiment(e.target.value)}
-                    placeholder="auto"
-                    className="w-full text-sm bg-fill-dip border border-border-hint px-3 py-2 focus:outline-none focus:ring-1 focus:ring-fill-primary"
-                  />
-                </div>
-              </div>
-            </details>
 
             {startError && <p className="text-xs text-danger">{startError}</p>}
           </section>
@@ -2060,6 +2029,65 @@ export default function EvaluatePanel({
               newText={diffVs.newText}
               onClose={() => setDiffVs(null)}
             />
+          )}
+
+          {showAdvanced && (
+            <div
+              className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+              onClick={() => setShowAdvanced(false)}
+            >
+              <div
+                className="bg-surface-raised border border-border p-6 max-w-lg w-full mx-4 shadow-lg"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold text-foreground">Advanced</h3>
+                  <button
+                    onClick={() => setShowAdvanced(false)}
+                    className="text-fg-dim hover:text-fg-contrast"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+                <p className="text-xs text-muted-foreground mb-5">
+                  Override the Braintrust project and experiment name. Defaults are usually fine.
+                </p>
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-[10px] font-semibold text-fg-dim uppercase tracking-wide block mb-1">
+                      Project
+                    </label>
+                    <input
+                      type="text"
+                      value={project}
+                      onChange={(e) => setProject(e.target.value)}
+                      placeholder="northstar-eval"
+                      className="w-full text-sm bg-fill-dip border border-border-hint px-3 py-2 focus:outline-none focus:ring-1 focus:ring-fill-primary"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-semibold text-fg-dim uppercase tracking-wide block mb-1">
+                      Experiment (optional)
+                    </label>
+                    <input
+                      type="text"
+                      value={experiment}
+                      onChange={(e) => setExperiment(e.target.value)}
+                      placeholder="auto"
+                      className="w-full text-sm bg-fill-dip border border-border-hint px-3 py-2 focus:outline-none focus:ring-1 focus:ring-fill-primary"
+                    />
+                  </div>
+                </div>
+                <div className="flex justify-end mt-6">
+                  <button
+                    onClick={() => setShowAdvanced(false)}
+                    className="inline-flex items-center px-4 py-2 text-sm font-medium bg-fill-primary text-bg-default hover:opacity-90"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            </div>
           )}
         </div>
     </PanelLayout>

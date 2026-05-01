@@ -587,24 +587,26 @@ export async function suggestForCharter(
 }
 
 export async function evaluateGoals(
-  goals: string[]
+  goals: string[],
+  sessionId?: string | null,
 ): Promise<{ feedback: Array<{ goal: string; issue: string | null; suggestion: string | null }> }> {
   const res = await apiFetch(`${BASE}/evaluate-goals`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ goals }),
+    body: JSON.stringify({ goals, session_id: sessionId ?? null }),
   })
   if (!res.ok) throw new Error(`Failed to evaluate goals: ${res.status}`)
   return res.json()
 }
 
 export async function suggestGoals(
-  goals: string[]
+  goals: string[],
+  sessionId?: string | null,
 ): Promise<{ suggestions: string[] }> {
   const res = await apiFetch(`${BASE}/suggest-goals`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ goals }),
+    body: JSON.stringify({ goals, session_id: sessionId ?? null }),
   })
   if (!res.ok) throw new Error(`Failed to suggest goals: ${res.status}`)
   return res.json()
@@ -612,12 +614,13 @@ export async function suggestGoals(
 
 export async function suggestStories(
   goals: string[],
-  stories: Array<{ who: string; what: string; why: string }>
+  stories: Array<{ who: string; what: string; why: string }>,
+  sessionId?: string | null,
 ): Promise<{ suggestions: Array<{ who: string; what: string; why: string }> }> {
   const res = await apiFetch(`${BASE}/suggest-stories`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ goals, stories }),
+    body: JSON.stringify({ goals, stories, session_id: sessionId ?? null }),
   })
   if (!res.ok) throw new Error(`Failed to suggest stories: ${res.status}`)
   return res.json()

@@ -368,13 +368,29 @@ async def health_check():
 
 @app.post("/suggest-goals", response_model=SuggestGoalsResponse)
 async def suggest_goals(req: SuggestGoalsRequest):
-    """Suggest additional business goals based on current goals (stateless, no session)."""
+    """Suggest additional business goals based on current goals.
+
+    If ``session_id`` is provided the call is persisted as a turn so
+    prompt-eval can later sample it. Without it the call still works,
+    just isn't recorded as a dataset row.
+    """
     non_empty = [g for g in req.goals if g.strip()]
     if not non_empty:
         return SuggestGoalsResponse(suggestions=[])
 
     try:
-        suggestions, _ = await call_suggest_goals(non_empty)
+        suggestions, call_meta = await call_suggest_goals(non_empty)
+        if req.session_id:
+            try:
+                await db.create_turn(
+                    session_id=req.session_id,
+                    turn_type="suggest_goals",
+                    input_snapshot={"goals": non_empty},
+                    llm_calls=call_meta,
+                    parsed_output={"suggestions": suggestions},
+                )
+            except Exception:
+                logger.warning("suggest_goals turn-log failed", exc_info=True)
         return SuggestGoalsResponse(suggestions=suggestions)
     except Exception as e:
         logger.exception("Failed to suggest goals")
@@ -383,13 +399,16 @@ async def suggest_goals(req: SuggestGoalsRequest):
 
 @app.post("/evaluate-goals", response_model=EvaluateGoalsResponse)
 async def evaluate_goals(req: EvaluateGoalsRequest):
-    """Evaluate business goal quality — check if goals are specific, measurable, independent."""
+    """Evaluate business goal quality — check if goals are specific, measurable, independent.
+
+    Persists a turn when ``session_id`` is provided (see suggest_goals).
+    """
     non_empty = [g for g in req.goals if g.strip()]
     if not non_empty:
         return EvaluateGoalsResponse(feedback=[])
 
     try:
-        feedback_raw, _ = await call_evaluate_goals(non_empty)
+        feedback_raw, call_meta = await call_evaluate_goals(non_empty)
         feedback = [
             GoalFeedback(
                 goal=f.get("goal", ""),
@@ -398,6 +417,17 @@ async def evaluate_goals(req: EvaluateGoalsRequest):
             )
             for f in feedback_raw
         ]
+        if req.session_id:
+            try:
+                await db.create_turn(
+                    session_id=req.session_id,
+                    turn_type="evaluate_goals",
+                    input_snapshot={"goals": non_empty},
+                    llm_calls=call_meta,
+                    parsed_output={"feedback": feedback_raw},
+                )
+            except Exception:
+                logger.warning("evaluate_goals turn-log failed", exc_info=True)
         return EvaluateGoalsResponse(feedback=feedback)
     except Exception as e:
         logger.exception("Failed to evaluate goals")
@@ -406,14 +436,28 @@ async def evaluate_goals(req: EvaluateGoalsRequest):
 
 @app.post("/suggest-stories", response_model=SuggestStoriesResponse)
 async def suggest_stories(req: SuggestStoriesRequest):
-    """Suggest additional user stories based on goals and existing stories (stateless, no session)."""
+    """Suggest additional user stories based on goals and existing stories.
+
+    Persists a turn when ``session_id`` is provided (see suggest_goals).
+    """
     non_empty_goals = [g for g in req.goals if g.strip()]
     non_empty_stories = [s for s in req.stories if s.get("who", "").strip() or s.get("what", "").strip()]
     if not non_empty_goals:
         return SuggestStoriesResponse(suggestions=[])
 
     try:
-        suggestions, _ = await call_suggest_stories(non_empty_goals, non_empty_stories)
+        suggestions, call_meta = await call_suggest_stories(non_empty_goals, non_empty_stories)
+        if req.session_id:
+            try:
+                await db.create_turn(
+                    session_id=req.session_id,
+                    turn_type="suggest_stories",
+                    input_snapshot={"goals": non_empty_goals, "stories": non_empty_stories},
+                    llm_calls=call_meta,
+                    parsed_output={"suggestions": suggestions},
+                )
+            except Exception:
+                logger.warning("suggest_stories turn-log failed", exc_info=True)
         return SuggestStoriesResponse(suggestions=suggestions)
     except Exception as e:
         logger.exception("Failed to suggest stories")
@@ -615,7 +659,14 @@ async def seed_from_skill(session_id: str, req: SkillSeedRequest):
     await db.create_turn(
         session_id=session_id,
         turn_type="skill_seed",
-        input_snapshot={"skill_name": req.skill_name, "skill_body_len": len(req.skill_body)},
+        # Keep the full SKILL.md body so prompt-eval can replay this turn.
+        # Storing only `_len` (the prior shape) saved bytes but made the turn
+        # unsamplable as a dataset row — the body is the input.
+        input_snapshot={
+            "skill_name": req.skill_name,
+            "skill_description": req.skill_description,
+            "skill_body": req.skill_body,
+        },
         llm_calls=call_meta,
         parsed_output=data,
     )
@@ -777,9 +828,11 @@ async def create_prompt_eval_session(req: CreatePromptEvalRequest):
         await db.create_turn(
             session_id=session_id,
             turn_type="skill_seed",
+            # Persist the full prompt body, not just length — prompt-eval
+            # samples this snapshot as a dataset row and needs to replay it.
             input_snapshot={
                 "prompt_target": req.prompt_target,
-                "prompt_text_len": len(seed_body),
+                "skill_body": seed_body,
             },
             llm_calls=seed_calls,
             parsed_output=seed_data,

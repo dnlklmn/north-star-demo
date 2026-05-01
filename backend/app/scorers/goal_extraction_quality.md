@@ -12,7 +12,19 @@ You are evaluating how well a discovery agent extracted business goals from a us
 
 You are not evaluating whether the goals themselves are good business goals. You are evaluating whether the *extraction* faithfully reflects what the user said.
 
-The conversation is in `{{input}}`. The agent's response (which contains an `extraction` block with a `goals` array) is in `{{output}}`.
+## Inputs
+
+The conversation history (with a leading `[Current discovery phase: …]` tag and one line per `role: content` turn):
+```
+{{input}}
+```
+
+The agent's response — its conversational text, followed by a fenced ```extraction block with a `goals` array (when the agent extracted anything this turn):
+```
+{{output}}
+```
+
+If either block above is empty, blank, or contains only schema/instruction text (no actual conversation turns or extraction block), state explicitly: "scorer payload missing — span input/output not populated", and pick `none_pass`. Do NOT try to evaluate from instructions alone.
 
 ---
 
@@ -43,18 +55,21 @@ Hallucinated goals are a critical failure: they pollute downstream charter gener
 
 ## Scoring
 
-Evaluate each dimension and return an overall verdict.
-
-- **Overall GOOD:** all three dimensions pass
-- **Overall BAD:** any dimension fails
+Evaluate each of the three dimensions independently and decide PASS or FAIL for each.
 
 Be especially conservative on faithfulness — false positives (calling a hallucination faithful) silently corrupt the rest of the eval pipeline.
 
+If the agent's response contains no extraction block at all (the conversational turn that just happened did not produce any goals), this is NOT automatically a failure: judge whether goals SHOULD have been extracted given what the user just said. If the user clearly stated a goal that was missed, mark Completeness FAIL. If the user said nothing extractable yet, all three dimensions can still PASS (vacuously — nothing was misrepresented).
+
 ---
 
-## Output format
+## How to respond
 
-Return your reasoning (1-2 sentences per dimension), then on a NEW FINAL LINE write:
-SCORE: <number between 0.0 and 1.0>
+Give 1-2 sentences of reasoning per dimension (Completeness, Specificity, Faithfulness), explicitly stating PASS or FAIL for each, then choose ONE of these labels based on the total number of passing dimensions:
 
-Where the score is the fraction of dimensions that pass — 3/3 = 1.0, 2/3 ≈ 0.67, 1/3 ≈ 0.33, 0/3 = 0.0. The SCORE: line must be the last line of your response.
+- `all_pass` — 3 of 3 dimensions pass
+- `two_pass` — 2 of 3 dimensions pass
+- `one_pass` — 1 of 3 dimensions pass
+- `none_pass` — 0 of 3 dimensions pass (or scorer payload was missing)
+
+The harness will record your choice as the score — there is no separate numeric output to write.

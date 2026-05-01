@@ -11,7 +11,19 @@ returns: per-dimension score (specificity, non-repetition, phase-appropriateness
 
 You are evaluating a single question the discovery agent just asked the user. The agent's job is to elicit information in one turn — one good question per turn, building on what's already known, appropriate to the current phase.
 
-The conversation history (everything the user has said and the agent has previously asked) is in `{{input}}`. The agent's latest message — the question being evaluated — is in `{{output}}`. The metadata field tells you which phase the agent was in: `goals`, `users`, or `stories`.
+## Inputs
+
+The conversation history. Starts with a `[Current discovery phase: …]` tag (one of `goals`, `users`, `stories`) — that tells you which phase to evaluate phase-appropriateness against — followed by one line per turn (`user: …` / `assistant: …`):
+```
+{{input}}
+```
+
+The agent's latest message — its conversational question text, possibly followed by a fenced ```extraction block (ignore the extraction block when judging the question itself):
+```
+{{output}}
+```
+
+If either block above is empty, blank, or contains only schema/instruction text (no actual conversation turns or agent question), state explicitly: "scorer payload missing — span input/output not populated", and pick `none_pass`. Do NOT try to evaluate from instructions alone.
 
 ---
 
@@ -43,18 +55,19 @@ Look at the conversation history. The user's prior answers should change the age
 
 ## Scoring
 
-Evaluate each dimension and return an overall verdict.
-
-- **Overall GOOD:** all three dimensions pass
-- **Overall BAD:** any dimension fails
+Evaluate each of the three dimensions independently and decide PASS or FAIL for each.
 
 This scorer is sampled — it does not run on every turn. Be conservative; a noisy scorer in production produces noise alerts.
 
 ---
 
-## Output format
+## How to respond
 
-Return your reasoning (1-2 sentences per dimension), then on a NEW FINAL LINE write:
-SCORE: <number between 0.0 and 1.0>
+Give 1-2 sentences of reasoning per dimension (Specificity, Non-repetition, Phase appropriateness), explicitly stating PASS or FAIL for each, then choose ONE of these labels based on the total number of passing dimensions:
 
-Where the score is the fraction of dimensions that pass — 3/3 = 1.0, 2/3 ≈ 0.67, 1/3 ≈ 0.33, 0/3 = 0.0. The SCORE: line must be the last line of your response.
+- `all_pass` — 3 of 3 dimensions pass
+- `two_pass` — 2 of 3 dimensions pass
+- `one_pass` — 1 of 3 dimensions pass
+- `none_pass` — 0 of 3 dimensions pass (or scorer payload was missing)
+
+The harness will record your choice as the score — there is no separate numeric output to write.

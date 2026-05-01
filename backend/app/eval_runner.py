@@ -465,8 +465,14 @@ def run_eval_sync(
     if not braintrust_api_key:
         raise ValueError("braintrust_api_key is required.")
 
-    # Log into Braintrust for this process. Safe to call multiple times.
-    braintrust.login(api_key=braintrust_api_key)
+    # Log into Braintrust for this process. ``force_login=True`` is needed
+    # because the prod-monitoring path (tools._ensure_braintrust_inited) has
+    # already logged in with BRAINTRUST_PROD_API_KEY. Without force_login the
+    # SDK warns and silently keeps the original auth, so the eval would write
+    # to the wrong account/project. We restore the prod auth + logger in a
+    # finally block below so background production tracing keeps flowing to
+    # north-star-prod after the eval completes.
+    braintrust.login(api_key=braintrust_api_key, force_login=True)
 
     # Task client runs the skill under test. Always Claude — but the user may
     # have given us an OpenRouter key (`sk-or-...`), in which case we route
@@ -544,21 +550,36 @@ def run_eval_sync(
     else:
         task = make_task(task_client, skill_body, task_model)
 
-    handle = braintrust.Eval(
-        name=project,
-        experiment_name=experiment_name,
-        data=lambda: rows,
-        task=task,
-        scores=scorers,
-    )
+    try:
+        handle = braintrust.Eval(
+            name=project,
+            experiment_name=experiment_name,
+            data=lambda: rows,
+            task=task,
+            scores=scorers,
+        )
 
-    url, name, averages, per_row = _extract_summary(handle)
-    return EvalResult(
-        experiment_url=url,
-        experiment_name=name or experiment_name,
-        rows_total=len(examples),
-        rows_evaluated=len(rows),
-        scorer_averages=averages,
-        scorer_names=[s.__name__ for s in scorers],
-        per_row=per_row,
-    )
+        url, name, averages, per_row = _extract_summary(handle)
+        return EvalResult(
+            experiment_url=url,
+            experiment_name=name or experiment_name,
+            rows_total=len(examples),
+            rows_evaluated=len(rows),
+            scorer_averages=averages,
+            scorer_names=[s.__name__ for s in scorers],
+            per_row=per_row,
+        )
+    finally:
+        # Restore prod-monitoring auth + logger so production traces continue
+        # writing to north-star-prod after the eval. Without this, every LLM
+        # call after an eval would silently log to whichever Braintrust
+        # project the user's eval key writes to.
+        prod_key = os.environ.get("BRAINTRUST_PROD_API_KEY")
+        if prod_key:
+            try:
+                braintrust.login(api_key=prod_key, force_login=True)
+                braintrust.init_logger(
+                    project=os.environ.get("BRAINTRUST_PROD_PROJECT", "north-star-prod"),
+                )
+            except Exception:
+                pass  # never let restoration failure mask the eval result

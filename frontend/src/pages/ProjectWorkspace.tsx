@@ -528,14 +528,14 @@ export default function ProjectWorkspace() {
 
     setGoalSuggestionsLoading(true);
     try {
-      const res = await suggestGoals(nonEmpty);
+      const res = await suggestGoals(nonEmpty, urlSessionId ?? null);
       setGoalSuggestions(res.suggestions);
     } catch (err) {
       console.error("Failed to get goal suggestions:", err);
     } finally {
       setGoalSuggestionsLoading(false);
     }
-  }, []);
+  }, [urlSessionId]);
 
   const fetchGoalFeedback = useCallback(
     async (currentGoals: string[]) => {
@@ -561,7 +561,7 @@ export default function ProjectWorkspace() {
 
       setGoalFeedbackLoading(true);
       try {
-        const res = await evaluateGoals(userAdded);
+        const res = await evaluateGoals(userAdded, urlSessionId ?? null);
         setGoalFeedback(res.feedback);
       } catch (err) {
         console.error("Failed to evaluate goals:", err);
@@ -569,7 +569,7 @@ export default function ProjectWorkspace() {
         setGoalFeedbackLoading(false);
       }
     },
-    [state.extracted_goals],
+    [state.extracted_goals, urlSessionId],
   );
 
   // Called by GoalsPanel when user presses Enter on a non-empty goal
@@ -637,7 +637,7 @@ export default function ProjectWorkspace() {
 
       setStorySuggestionsLoading(true);
       try {
-        const res = await suggestStories(nonEmpty, existingStories);
+        const res = await suggestStories(nonEmpty, existingStories, urlSessionId ?? null);
         setSuggestedStories(
           res.suggestions.map((s) => ({
             who: s.who,
@@ -651,7 +651,7 @@ export default function ProjectWorkspace() {
         setStorySuggestionsLoading(false);
       }
     },
-    [],
+    [urlSessionId],
   );
 
   const handleStoryCommit = useCallback(() => {

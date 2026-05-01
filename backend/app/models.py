@@ -546,6 +546,10 @@ class SuggestResponse(BaseModel):
 
 class SuggestGoalsRequest(BaseModel):
     goals: list[str]
+    # Optional — when provided, the call is logged to the `turns` table under
+    # this session so prompt-eval can later sample it as a dataset row. Stays
+    # stateless when None (suggestions are still returned, just not persisted).
+    session_id: Optional[str] = None
 
 
 class SuggestGoalsResponse(BaseModel):
@@ -561,6 +565,7 @@ class GoalFeedback(BaseModel):
 
 class EvaluateGoalsRequest(BaseModel):
     goals: list[str]
+    session_id: Optional[str] = None
 
 
 class EvaluateGoalsResponse(BaseModel):
@@ -570,6 +575,7 @@ class EvaluateGoalsResponse(BaseModel):
 class SuggestStoriesRequest(BaseModel):
     goals: list[str]
     stories: list[dict]  # each dict has who, what, why
+    session_id: Optional[str] = None
 
 
 class SuggestStoriesResponse(BaseModel):

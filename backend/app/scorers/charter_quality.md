@@ -11,7 +11,19 @@ You are evaluating the quality of a charter produced by a charter generation age
 
 You are not evaluating the AI feature itself — only the charter that defines what good looks like for that feature.
 
-The charter you should evaluate is in `{{output}}`. The conversation that produced it is in `{{input}}`.
+## Inputs
+
+The charter to evaluate (parsed JSON):
+```json
+{{output}}
+```
+
+The conversation that produced it (distilled goals, users, stories):
+```
+{{input}}
+```
+
+If either block above looks empty, blank, or contains only schema/instruction text (no actual goals, users, stories, or charter dimensions), state explicitly: "scorer payload missing — span input/output not populated", and pick `none_pass`. Do NOT try to evaluate from instructions alone.
 
 ---
 
@@ -70,20 +82,22 @@ A rot section says when examples in the dataset should be reviewed or replaced.
 
 ## Scoring
 
-Evaluate each dimension and return an overall verdict.
-
-- **Overall GOOD:** all four dimensions pass
-- **Overall BAD:** any dimension fails
+Evaluate each of the four dimensions independently and decide PASS or FAIL for each.
 
 If a dimension is partially passing — some criteria pass, some fail — mark it as FAIL and note which criteria are the problem.
 
-Be conservative: if you are unsure whether a criterion passes, mark it as fail. A false positive (calling a weak charter good) is worse than a false negative (calling a good charter weak) — a weak charter produces a bad dataset, and a bad dataset produces misleading evals.
+Be conservative: if you are unsure whether a criterion passes, mark it as FAIL. A false positive (calling a weak charter good) is worse than a false negative (calling a good charter weak) — a weak charter produces a bad dataset, and a bad dataset produces misleading evals.
 
 ---
 
-## Output format
+## How to respond
 
-Return your reasoning (1-2 sentences per dimension), then on a NEW FINAL LINE write:
-SCORE: <number between 0.0 and 1.0>
+Give 1-2 sentences of reasoning per dimension (Coverage, Balance, Alignment, Rot), explicitly stating PASS or FAIL for each, then choose ONE of these labels based on the total number of passing dimensions:
 
-Where the score is the fraction of dimensions that pass — 4/4 = 1.0, 3/4 = 0.75, 2/4 = 0.5, 1/4 = 0.25, 0/4 = 0.0. The SCORE: line must be the last line of your response.
+- `all_pass` — 4 of 4 dimensions pass
+- `three_pass` — 3 of 4 dimensions pass
+- `two_pass` — 2 of 4 dimensions pass
+- `one_pass` — 1 of 4 dimensions pass
+- `none_pass` — 0 of 4 dimensions pass (or scorer payload was missing)
+
+The harness will record your choice as the score — there is no separate numeric output to write.
