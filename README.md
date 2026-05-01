@@ -401,12 +401,72 @@ createdb northstar
 | `ANTHROPIC_API_KEY` | one of | Claude API key |
 | `OPENROUTER_API_KEY` | one of | OpenRouter key — auto-detected by `sk-or-` prefix. Ignored when `ANTHROPIC_API_KEY` is set. |
 | `BRAINTRUST_API_KEY` | for UI evals | Can also be entered in the Evaluations tab and stored in localStorage |
+| `BRAINTRUST_PROD_API_KEY` | for prod monitoring | Project-scoped key for `north-star-prod` — every Anthropic call is wrapped with `braintrust.wrap_anthropic` and traced when this is set. No-op when unset. |
+| `BRAINTRUST_PROD_PROJECT` | no | Braintrust project name for production traces. Default: `north-star-prod` |
+| `CHARTER_QUALITY_MODEL` | no | Online scorer model. Default: `claude-sonnet-4-5-20250929` |
+| `GOAL_EXTRACTION_QUALITY_MODEL` | no | Online scorer model. Default: `claude-haiku-4-5-20251001` |
+| `CONVERSATION_QUALITY_MODEL` | no | Online scorer model. Default: `claude-haiku-4-5-20251001` |
 | `MODEL_NAME` | no | Default: `claude-sonnet-4-20250514` |
 | `EVAL_MODEL` | no | Model for the task function in eval runs. Default: `claude-opus-4-7` |
 | `JUDGE_MODEL` | no | Model for LLM-as-judge scorers. Default: `claude-sonnet-4-20250514` |
 | `MAX_QUESTION_ROUNDS` | no | Scratch-mode refinement rounds. Default: 3 |
 
 Per-request keys: the frontend sends `X-Anthropic-Key` / `X-Braintrust-Key` headers pulled from localStorage — users can run without a server-side key by pasting their own.
+
+---
+
+## Production monitoring (Braintrust)
+
+We use Braintrust to monitor North Star itself in production — same harness as our offline evals, separate project. When `BRAINTRUST_PROD_API_KEY` is set, every Anthropic call goes through `braintrust.wrap_anthropic` and lands in the `north-star-prod` project as a trace span with metadata: `session_id`, `phase` (goals / users / stories / charter / dataset / scorers / eval_feedback), `turn_type` (the specific tool — `discovery`, `generate_draft`, `validate_charter`, `synthesize_examples`, etc.), `turn_number`, `model_name`.
+
+Code seams:
+
+| File | Role |
+|---|---|
+| [backend/app/tools.py](backend/app/tools.py) | `_ensure_braintrust_inited`, `_maybe_wrap`, `set_trace_meta`, `trace_call`, `@traced` decorator. Every `call_*` tool is decorated. |
+| [backend/app/agent.py](backend/app/agent.py) | Sets `phase` + `session_id` + `turn_number` at each handler entry. |
+| [backend/app/main.py](backend/app/main.py) | Middleware sets coarse `phase` + `session_id` for direct-from-handler tool calls. |
+| [backend/app/scorers/](backend/app/scorers) | LLM-as-judge prompts, versioned with code. Each `.md` has YAML frontmatter declaring `name`, `turn_type` / `phase` filter, and (optional) `sample_rate`. |
+| [backend/app/online_scorers.py](backend/app/online_scorers.py) | CLI: `list`, `show <name>`, `test <name>` (dry-run a scorer prompt against a JSON payload on stdin). |
+
+### One-time setup in the Braintrust UI
+
+1. **Create the project.** New project named `north-star-prod` (or whatever you set `BRAINTRUST_PROD_PROJECT` to). Generate a project-scoped API key → set as `BRAINTRUST_PROD_API_KEY` in your prod env.
+2. **Configure online scorers.** For each prompt under `backend/app/scorers/*.md`:
+   - In the project's **Online scorers** view, create a new scorer.
+   - Copy the prompt body from `python -m backend.app.online_scorers show <name>`.
+   - Set the trigger filter to the value `online_scorers.py list` prints (e.g. `metadata.turn_type = "generate_draft"`).
+   - Set the model per the table below (or per the env var override).
+   - Apply the sample rate from the prompt's frontmatter (`sample_rate: 0.2` for `conversation_quality`).
+3. **Build dashboards.** Suggested charts:
+   - Charter overall score + per-dimension trend (Coverage / Balance / Alignment / Rot)
+   - Cost per session (group by `metadata.session_id`, sum tokens × price)
+   - Latency per phase (p50 / p95 / p99 by `metadata.phase`)
+   - Error rate per phase
+   - Funnel: how many sessions reach each phase
+4. **Alerts.** Defer threshold setting until after one week of baseline data. Recommended starting alerts: charter score < 70% in any 24h, p95 latency > 30s any 1h, error rate > 5% any 1h.
+
+| Scorer | Default model | Filter | Sample |
+|---|---|---|---|
+| `charter_quality` | Sonnet | `turn_type = "generate_draft"` | every trace |
+| `goal_extraction_quality` | Haiku | `turn_type = "discovery"` AND `phase = "goals"` | every trace |
+| `conversation_quality` | Haiku | `turn_type = "discovery"` AND `phase IN ("goals","users","stories")` | 1 in 5 |
+
+### Iterating on a scorer
+
+```bash
+# inspect what's there
+python -m backend.app.online_scorers list
+
+# pull the prompt body
+python -m backend.app.online_scorers show charter_quality
+
+# dry-run against a real Braintrust trace's I/O before pushing
+echo '{"input": "...", "output": "..."}' | \
+    python -m backend.app.online_scorers test charter_quality
+```
+
+The prompts live in code so changes go through normal review. The Braintrust UI references these prompts manually for now — the [doc on automated push](backend/app/online_scorers.py) is a future hook once Braintrust's online-scorer API stabilises.
 
 ---
 

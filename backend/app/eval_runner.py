@@ -12,6 +12,7 @@ don't block the event loop.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import types
 from dataclasses import dataclass, field
@@ -24,7 +25,23 @@ import braintrust
 DEFAULT_MODEL = os.environ.get("EVAL_MODEL", "claude-opus-4-7")
 DEFAULT_JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "claude-sonnet-4-5-20250929")
 
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+# See tools.OPENROUTER_BASE_URL — the SDK appends `/v1/messages`, so the base
+# URL must end at `/api`, not `/api/v1`.
+OPENROUTER_BASE_URL = "https://openrouter.ai/api"
+
+_DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
+
+
+def _resolve_model_for_openrouter(name: str) -> str:
+    """Map an Anthropic-native model id to its OpenRouter form.
+
+    Mirrors tools._resolve_model. OpenRouter expects `anthropic/claude-sonnet-4-5`,
+    not the bare dated id. Already-namespaced ids (containing `/`) are returned
+    unchanged so non-Claude judges like `openai/gpt-4o` pass through.
+    """
+    if "/" in name:
+        return name
+    return f"anthropic/{_DATE_SUFFIX_RE.sub('', name)}"
 
 
 def _build_judge_client(
@@ -448,20 +465,52 @@ def run_eval_sync(
     if not braintrust_api_key:
         raise ValueError("braintrust_api_key is required.")
 
-    # Log into Braintrust for this process. Safe to call multiple times.
-    braintrust.login(api_key=braintrust_api_key)
+    # Log into Braintrust for this process. ``force_login=True`` is needed
+    # because the prod-monitoring path (tools._ensure_braintrust_inited) has
+    # already logged in with BRAINTRUST_PROD_API_KEY. Without force_login the
+    # SDK warns and silently keeps the original auth, so the eval would write
+    # to the wrong account/project. We restore the prod auth + logger in a
+    # finally block below so background production tracing keeps flowing to
+    # north-star-prod after the eval completes.
+    braintrust.login(api_key=braintrust_api_key, force_login=True)
 
-    # Task client is always Anthropic-native — the skill under test runs on
-    # Claude regardless of what judge model the user picked.
-    task_client = braintrust.wrap_anthropic(
-        anthropic.Anthropic(api_key=anthropic_api_key) if anthropic_api_key else anthropic.Anthropic()
-    )
+    # Task client runs the skill under test. Always Claude — but the user may
+    # have given us an OpenRouter key (`sk-or-...`), in which case we route
+    # through OpenRouter's Anthropic-compatible endpoint. Without this branch
+    # the SDK silently sends the OpenRouter key as `x-api-key` to
+    # api.anthropic.com → 401 on every row.
+    task_model = model
+    if anthropic_api_key and anthropic_api_key.startswith("sk-or-"):
+        task_client = braintrust.wrap_anthropic(
+            anthropic.Anthropic(api_key=anthropic_api_key, base_url=OPENROUTER_BASE_URL)
+        )
+        task_model = _resolve_model_for_openrouter(model)
+    elif not anthropic_api_key and not os.environ.get("ANTHROPIC_API_KEY") and os.environ.get("OPENROUTER_API_KEY"):
+        # Env-var fallback to OpenRouter (matches tools.get_client behavior).
+        task_client = braintrust.wrap_anthropic(
+            anthropic.Anthropic(api_key=os.environ["OPENROUTER_API_KEY"], base_url=OPENROUTER_BASE_URL)
+        )
+        task_model = _resolve_model_for_openrouter(model)
+    else:
+        task_client = braintrust.wrap_anthropic(
+            anthropic.Anthropic(api_key=anthropic_api_key) if anthropic_api_key else anthropic.Anthropic()
+        )
 
     # Judge client may point at OpenRouter when the user picked a non-Claude
     # judge — the Anthropic SDK is wire-compatible with OpenRouter so the
-    # scorer code doesn't need to change.
+    # scorer code doesn't need to change. When the user's key is OpenRouter
+    # AND the judge is a Claude model, remap the bare Anthropic id to the
+    # OpenRouter form so the judge call doesn't 404.
     judge_client = _build_judge_client(judge_model, anthropic_api_key)
-    call_judge = make_judge(judge_client, judge_model)
+    judge_model_resolved = judge_model
+    routed_via_openrouter = (
+        ("/" in judge_model)
+        or (anthropic_api_key and anthropic_api_key.startswith("sk-or-"))
+        or (not anthropic_api_key and not os.environ.get("ANTHROPIC_API_KEY") and os.environ.get("OPENROUTER_API_KEY"))
+    )
+    if routed_via_openrouter:
+        judge_model_resolved = _resolve_model_for_openrouter(judge_model)
+    call_judge = make_judge(judge_client, judge_model_resolved)
     scorers = compile_scorers(scorer_defs, call_judge)
     if not scorers:
         raise ValueError("No scorers compiled successfully. Check the Scorers tab.")
@@ -495,27 +544,42 @@ def run_eval_sync(
         task = make_task_for_prompt(
             task_client,
             prompt_target,  # type: ignore[arg-type]
-            model,
+            task_model,
             body_template=prompt_body_template,
         )
     else:
-        task = make_task(task_client, skill_body, model)
+        task = make_task(task_client, skill_body, task_model)
 
-    handle = braintrust.Eval(
-        name=project,
-        experiment_name=experiment_name,
-        data=lambda: rows,
-        task=task,
-        scores=scorers,
-    )
+    try:
+        handle = braintrust.Eval(
+            name=project,
+            experiment_name=experiment_name,
+            data=lambda: rows,
+            task=task,
+            scores=scorers,
+        )
 
-    url, name, averages, per_row = _extract_summary(handle)
-    return EvalResult(
-        experiment_url=url,
-        experiment_name=name or experiment_name,
-        rows_total=len(examples),
-        rows_evaluated=len(rows),
-        scorer_averages=averages,
-        scorer_names=[s.__name__ for s in scorers],
-        per_row=per_row,
-    )
+        url, name, averages, per_row = _extract_summary(handle)
+        return EvalResult(
+            experiment_url=url,
+            experiment_name=name or experiment_name,
+            rows_total=len(examples),
+            rows_evaluated=len(rows),
+            scorer_averages=averages,
+            scorer_names=[s.__name__ for s in scorers],
+            per_row=per_row,
+        )
+    finally:
+        # Restore prod-monitoring auth + logger so production traces continue
+        # writing to north-star-prod after the eval. Without this, every LLM
+        # call after an eval would silently log to whichever Braintrust
+        # project the user's eval key writes to.
+        prod_key = os.environ.get("BRAINTRUST_PROD_API_KEY")
+        if prod_key:
+            try:
+                braintrust.login(api_key=prod_key, force_login=True)
+                braintrust.init_logger(
+                    project=os.environ.get("BRAINTRUST_PROD_PROJECT", "north-star-prod"),
+                )
+            except Exception:
+                pass  # never let restoration failure mask the eval result

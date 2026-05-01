@@ -63,7 +63,6 @@ import UsersPanel from "../components/UsersPanel";
 import CharterPanel from "../components/CharterPanel";
 import ScorersPanel from "../components/ScorersPanel";
 import EvaluatePanel from "../components/EvaluatePanel";
-import ImprovePanel from "../components/ImprovePanel";
 import SkillPanel from "../components/SkillPanel";
 import ConversationPanel from "../components/ConversationPanel";
 import ExampleReview from "../components/ExampleReview";
@@ -78,8 +77,7 @@ type ActiveTab =
   | "charter"
   | "dataset"
   | "scorers"
-  | "evaluate"
-  | "improve";
+  | "evaluate";
 
 const EMPTY_STATE: SessionState = {
   session_id: "",
@@ -295,7 +293,7 @@ export default function ProjectWorkspace() {
 
          // Check for ?tab= query param (e.g. ?tab=goals from Home modal)
          const tabParam = searchParams.get("tab");
-         const validTabs: ActiveTab[] = ["skill", "goals", "users", "charter", "dataset", "scorers", "evaluate", "improve"];
+          const validTabs: ActiveTab[] = ["skill", "goals", "users", "charter", "dataset", "scorers", "evaluate"];
          const tabFromUrl = validTabs.includes(tabParam as ActiveTab) ? tabParam as ActiveTab : null;
 
          // Try to load dataset. For skill-mode sessions that haven't built a
@@ -399,13 +397,7 @@ export default function ProjectWorkspace() {
   const scorersAvailable = skillReady && hasCharter;
   const evaluateAvailable = skillReady && !!dataset;
 
-  // When the user clicks "Run evaluations" on the Improve tab, we switch to
-  // the Evaluations tab AND kick off a run immediately using the previous
-  // run's config. EvaluatePanel consumes this signal + calls the reset cb.
   const [evalAutoRun, setEvalAutoRun] = useState(false);
-  // Inverse direction: "Improve skill" on Evaluations switches to Improve AND
-  // fires Analyze on the latest completed run.
-  const [improveAutoAnalyze, setImproveAutoAnalyze] = useState(false);
   // Generation shortcuts on the Users tab. Independent spinners so the
   // "both" button reflects its own parallel run, not a false positive from
   // clicking the single-action ones while that's in flight.
@@ -536,29 +528,49 @@ export default function ProjectWorkspace() {
 
     setGoalSuggestionsLoading(true);
     try {
-      const res = await suggestGoals(nonEmpty);
+      const res = await suggestGoals(nonEmpty, urlSessionId ?? null);
       setGoalSuggestions(res.suggestions);
     } catch (err) {
       console.error("Failed to get goal suggestions:", err);
     } finally {
       setGoalSuggestionsLoading(false);
     }
-  }, []);
+  }, [urlSessionId]);
 
-  const fetchGoalFeedback = useCallback(async (currentGoals: string[]) => {
-    const nonEmpty = currentGoals.filter((g) => g.trim());
-    if (nonEmpty.length < 1) return;
+  const fetchGoalFeedback = useCallback(
+    async (currentGoals: string[]) => {
+      // Only critique goals the user typed. Goals the agent extracted (or
+      // previously suggested and the user accepted as-is) shouldn't get
+      // "here's a better phrasing" chips — feels schizophrenic to propose
+      // text and then immediately critique it. We compare against
+      // `extracted_goals` using the same first-40-char case-insensitive
+      // match the backend's dedupe uses, so an agent-extracted goal the
+      // user lightly edited (text differs) is still eligible for critique.
+      const nonEmpty = currentGoals.filter((g) => g.trim());
+      if (nonEmpty.length < 1) return;
+      const extracted = (state.extracted_goals || []).map((g) =>
+        g.trim().toLowerCase().slice(0, 40),
+      );
+      const isAgentExtracted = (g: string) =>
+        extracted.includes(g.trim().toLowerCase().slice(0, 40));
+      const userAdded = nonEmpty.filter((g) => !isAgentExtracted(g));
+      if (userAdded.length < 1) {
+        setGoalFeedback([]);
+        return;
+      }
 
-    setGoalFeedbackLoading(true);
-    try {
-      const res = await evaluateGoals(nonEmpty);
-      setGoalFeedback(res.feedback);
-    } catch (err) {
-      console.error("Failed to evaluate goals:", err);
-    } finally {
-      setGoalFeedbackLoading(false);
-    }
-  }, []);
+      setGoalFeedbackLoading(true);
+      try {
+        const res = await evaluateGoals(userAdded, urlSessionId ?? null);
+        setGoalFeedback(res.feedback);
+      } catch (err) {
+        console.error("Failed to evaluate goals:", err);
+      } finally {
+        setGoalFeedbackLoading(false);
+      }
+    },
+    [state.extracted_goals, urlSessionId],
+  );
 
   // Called by GoalsPanel when user presses Enter on a non-empty goal
   const handleGoalCommit = useCallback(() => {
@@ -625,7 +637,7 @@ export default function ProjectWorkspace() {
 
       setStorySuggestionsLoading(true);
       try {
-        const res = await suggestStories(nonEmpty, existingStories);
+        const res = await suggestStories(nonEmpty, existingStories, urlSessionId ?? null);
         setSuggestedStories(
           res.suggestions.map((s) => ({
             who: s.who,
@@ -639,7 +651,7 @@ export default function ProjectWorkspace() {
         setStorySuggestionsLoading(false);
       }
     },
-    [],
+    [urlSessionId],
   );
 
   const handleStoryCommit = useCallback(() => {
@@ -1781,7 +1793,7 @@ export default function ProjectWorkspace() {
 
           {/* Nav groups */}
           {(state.eval_mode === "triggered" || state.charter.task.skill_body) && (
-            <SidebarGroup label={isPromptEval ? "PROMPT" : "SKILL"}>
+            <SidebarGroup hideTopDivider>
               <SidebarItem
                 label={isPromptEval ? "Prompt" : "Skill"}
                 icon={<GoalsIcon width={24} height={24} />}
@@ -1791,7 +1803,11 @@ export default function ProjectWorkspace() {
             </SidebarGroup>
           )}
 
-          <SidebarGroup label="INPUT">
+          <SidebarGroup
+            hideTopDivider={
+              !(state.eval_mode === "triggered" || state.charter.task.skill_body)
+            }
+          >
             <SidebarItem
               label="Business Goals"
               icon={<GoalsIcon width={24} height={24} />}
@@ -1812,7 +1828,7 @@ export default function ProjectWorkspace() {
             />
           </SidebarGroup>
 
-          <SidebarGroup label="GENERATE">
+          <SidebarGroup>
             <SidebarItem
               label="Charter"
               icon={<CharterIcon width={24} height={24} />}
@@ -1836,20 +1852,13 @@ export default function ProjectWorkspace() {
             />
           </SidebarGroup>
 
-          <SidebarGroup label="OUTPUT">
+          <SidebarGroup>
             <SidebarItem
               label="Evaluations"
               icon={<StarIcon width={24} height={24} />}
               active={activeTab === "evaluate"}
               onClick={() => setActiveTab("evaluate")}
               disabled={!evaluateAvailable}
-            />
-            <SidebarItem
-              label="Improve"
-              icon={<StarIcon width={24} height={24} />}
-              active={activeTab === "improve"}
-              onClick={() => setActiveTab("improve")}
-              disabled={!evaluateAvailable || !state.charter.task.skill_body}
             />
           </SidebarGroup>
         </nav>
@@ -1878,6 +1887,13 @@ export default function ProjectWorkspace() {
                     task: { ...prev.charter.task, skill_body: body },
                   },
                 }));
+              }}
+              activeVersionId={state.active_skill_version_id ?? null}
+              candidateVersionId={state.candidate_skill_version_id ?? null}
+              onCandidateChanged={async () => {
+                if (!urlSessionId) return;
+                const s = await getSession(urlSessionId);
+                setState(s.state as SessionState);
               }}
               onSeeded={async () => {
                 // Re-hydrate session state so extracted goals/users/stories
@@ -2191,41 +2207,7 @@ export default function ProjectWorkspace() {
               scorerCount={scorers.length}
               hasSkillBody={!!state.charter.task.skill_body}
               isPromptEval={isPromptEval}
-              onExport={handleExport}
-              onRequestImprove={() => {
-                setImproveAutoAnalyze(true);
-                setActiveTab("improve");
-              }}
-              autoRun={evalAutoRun}
-              onAutoRunConsumed={() => setEvalAutoRun(false)}
-              onGoToSkill={() => setActiveTab("skill")}
-              onGoToDataset={() => setActiveTab("dataset")}
-              onGoToScorers={() => setActiveTab("scorers")}
-              onGenerateScorersInline={async () => {
-                if (!urlSessionId) return;
-                const res = await generateScorers(urlSessionId);
-                setScorers(res.scorers);
-                setScorersStale(false);
-                const s = await getSession(urlSessionId);
-                setState(s.state as SessionState);
-              }}
-              onOpenSettings={() => setShowSettings(true)}
-              onRunTerminal={async () => {
-                if (!urlSessionId) return;
-                try {
-                  const fresh = await getDataset(urlSessionId);
-                  setDataset(fresh);
-                } catch (err) {
-                  console.warn("dataset refetch after run-terminal failed:", err);
-                }
-              }}
-            />
-          )}
-
-          {activeTab === "improve" && urlSessionId && state.charter.task.skill_body && (
-            <ImprovePanel
-              sessionId={urlSessionId}
-              skillBody={state.charter.task.skill_body}
+              skillBody={state.charter.task.skill_body || ""}
               onSkillBodyChange={(body) =>
                 setState((prev) => ({
                   ...prev,
@@ -2235,14 +2217,63 @@ export default function ProjectWorkspace() {
                   },
                 }))
               }
-              onRequestEvaluate={() => {
-                setEvalAutoRun(true);
-                setActiveTab("evaluate");
+              onRunEval={async (overrides) => {
+                if (!urlSessionId) return null
+                // RunEvalRequest.project is required — bail rather than send
+                // an empty string the backend would create a malformed run for.
+                if (!overrides?.project) return null
+                try {
+                  const { runEval } = await import("../api")
+                  const run = await runEval(urlSessionId, {
+                    project: overrides.project,
+                    experiment_name: overrides?.experiment_name,
+                    limit: overrides?.limit,
+                    include_triggering: overrides?.include_triggering,
+                  })
+                  return run
+                } catch (err) {
+                  console.error("Failed to start eval:", err)
+                  return null
+                }
               }}
-              autoAnalyze={improveAutoAnalyze}
-              onAutoAnalyzeConsumed={() => setImproveAutoAnalyze(false)}
+              autoRun={evalAutoRun}
+              onAutoRunConsumed={() => setEvalAutoRun(false)}
+              onGoToSkill={() => setActiveTab("skill")}
+              onGoToDataset={() => setActiveTab("dataset")}
+              onGoToScorers={() => setActiveTab("scorers")}
+              onGenerateScorersInline={async () => {
+                if (!urlSessionId) return
+                const res = await generateScorers(urlSessionId)
+                setScorers(res.scorers)
+                setScorersStale(false)
+                const s = await getSession(urlSessionId)
+                setState(s.state as SessionState)
+              }}
+              onOpenSettings={() => setShowSettings(true)}
+              onRunTerminal={async () => {
+                if (!urlSessionId) return
+                try {
+                  const fresh = await getDataset(urlSessionId)
+                  setDataset(fresh)
+                } catch (err) {
+                  console.warn("dataset refetch after run-terminal failed:", err)
+                }
+              }}
+              candidateVersionId={state.candidate_skill_version_id ?? null}
+              activeVersionId={state.active_skill_version_id ?? null}
+              onCandidateChanged={async () => {
+                if (!urlSessionId) return
+                const s = await getSession(urlSessionId)
+                setState(s.state as SessionState)
+              }}
+              onSessionChanged={async () => {
+                if (!urlSessionId) return
+                const s = await getSession(urlSessionId)
+                setState(s.state as SessionState)
+              }}
             />
           )}
+
         </div>
 
       </div>
@@ -2292,7 +2323,7 @@ function buildCoverageGenerateModalProps(req: CoverageGenerateRequestExt): {
 } {
   if (req.kind === "cell") {
     // Per-cell: 2 examples per scenario, one scenario (this intersection).
-    const suggestedCount = 2;
+    const suggestedCount: number = 2;
     const isEmpty = req.currentCount === 0;
     const reason = isEmpty
       ? `${suggestedCount} more example${suggestedCount === 1 ? "" : "s"} will cover "${req.criterion}" × "${req.featureArea}".`
@@ -2318,20 +2349,25 @@ function buildCoverageGenerateModalProps(req: CoverageGenerateRequestExt): {
   };
 }
 
+/**
+ * SidebarGroup — visually a thin divider above the group's items.
+ * The original "INPUT/GENERATE/OUTPUT" labels were noise in the new design;
+ * the grouping is communicated by the divider lines instead.
+ */
 function SidebarGroup({
-  label,
+  label: _label,
   children,
+  hideTopDivider,
 }: {
-  label: string;
+  label?: string;
   children: React.ReactNode;
+  hideTopDivider?: boolean;
 }) {
   return (
-    <div className="mb-6">
-      <div className="text-[10px] font-medium uppercase tracking-wider text-fg-dim px-2 mb-1">
-        {label}
-      </div>
+    <>
+      {!hideTopDivider && <div className="border-t border-border-hint mx-2 my-2" />}
       <div className="flex flex-col">{children}</div>
-    </div>
+    </>
   );
 }
 
@@ -2354,18 +2390,22 @@ function SidebarItem({
     <button
       onClick={onClick}
       disabled={disabled}
-      className={`flex gap-2 items-center justify-between px-2 h-8 text-sm text-left transition-colors ${
+      className={`flex gap-2.5 items-center justify-between px-2 py-2 text-base text-left transition-colors ${
         active
-          ? "bg-fill-neutral text-fg-contrast"
+          ? "bg-fill-primary/10 text-fg-primary font-bold [&_svg]:text-fg-primary"
           : disabled
             ? "text-fg-dim/50 cursor-not-allowed"
-            : "text-fg-contrast hover:bg-fill-neutral/50"
+            : "text-fg-contrast hover:bg-fill-neutral/50 font-medium"
       }`}
     >
       {icon ?? <StarIcon />}
       <span className="truncate w-full">{label}</span>
       {badge && (
-        <span className="font-mono text-[10px] text-fg-dim bg-fill-neutral px-1.5 py-0.5 ml-2">
+        <span
+          className={`font-mono text-[10px] px-1.5 py-0.5 ml-2 ${
+            active ? "bg-fill-primary/20 text-fg-primary" : "bg-fill-neutral text-fg-dim"
+          }`}
+        >
           {badge}
         </span>
       )}

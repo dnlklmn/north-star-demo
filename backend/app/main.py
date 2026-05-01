@@ -93,7 +93,9 @@ from .models import (
 )
 from .prompt_eval import get_prompt_target, list_prompt_targets
 from .tools import (
+    LLMAuthError,
     LLMBillingError,
+    LLMModelError,
     call_suggest_goals,
     call_evaluate_goals,
     call_suggest_stories,
@@ -143,6 +145,82 @@ async def _billing_error_handler(_request: Request, exc: LLMBillingError):
             "provider": exc.provider,
         },
     )
+
+
+@app.exception_handler(LLMAuthError)
+async def _auth_error_handler(_request: Request, exc: LLMAuthError):
+    """Translate provider auth failures into HTTP 401 with the same shape as
+    billing errors. Common cause: the user pasted an OpenRouter key but the
+    request hit the Anthropic-direct path (or vice versa). The frontend's
+    apiFetch maps 401 to a clear 'invalid key' message pointing at Settings."""
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=401,
+        content={
+            "detail": str(exc),
+            "error": "llm_auth",
+            "provider": exc.provider,
+        },
+    )
+
+
+@app.exception_handler(LLMModelError)
+async def _model_error_handler(_request: Request, exc: LLMModelError):
+    """Translate 'model id not found / not entitled' failures into HTTP 422.
+    Distinct from 401 so the frontend can point the user at the model
+    selector rather than the API key — used to be conflated under llm_auth
+    and produced misleading 'Check your API key' copy when the key was fine
+    but the model name was a typo or a retired snapshot."""
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": str(exc),
+            "error": "llm_model",
+            "provider": exc.provider,
+        },
+    )
+
+
+@app.middleware("http")
+async def _braintrust_trace_meta_middleware(request: Request, call_next):
+    """Populate the trace metadata contextvar with session_id (and a coarse
+    phase) for the duration of the request.
+
+    Every ``call_*`` tool inside the request — whether invoked through the
+    agent or directly by a handler — picks this up when opening its
+    Braintrust span. Agent-level wrappers in agent.py refine ``phase`` with
+    something more specific (goals/users/stories/charter/dataset) when known.
+
+    Cheap when prod monitoring is off — set_trace_meta is a contextvar push.
+    """
+    import re
+    from .tools import set_trace_meta
+
+    path = request.url.path
+    match = re.search(r"/sessions/([a-zA-Z0-9_-]+)", path)
+    session_id = match.group(1) if match else None
+
+    # Coarse phase inference from URL — the agent layer overrides this with
+    # more specific values when it has them.
+    phase: str | None = None
+    if any(seg in path for seg in (
+        "/synthesize", "/review", "/revise", "/gap-analysis",
+        "/dataset", "/import", "/detect-schema", "/infer-schema",
+    )):
+        phase = "dataset"
+    elif "/generate-scorers" in path or "/scorers" in path:
+        phase = "scorers"
+    elif "/skill-seed" in path:
+        phase = "charter"
+    elif "/suggest-improvements" in path or "/eval" in path:
+        phase = "eval_feedback"
+
+    if session_id or phase:
+        with set_trace_meta(session_id=session_id, phase=phase):
+            return await call_next(request)
+    return await call_next(request)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -244,11 +322,18 @@ def _append_skill_version(
     created_from: str,
     notes: Optional[str] = None,
     applied_suggestion_ids: Optional[list[str]] = None,
+    as_candidate: bool = False,
 ) -> dict:
-    """Create a new SkillVersion entry, set it active, and return the record.
+    """Create a new SkillVersion entry and return the record.
+
+    By default the new version becomes active. Pass `as_candidate=True` to
+    create a candidate instead — the version goes into history but isn't
+    promoted, and `candidate_skill_version_id` is set to point at it. The
+    candidate flow lets the user run an eval on the proposed body before
+    committing, so a regressing change doesn't quietly become the new active.
 
     Caller is responsible for also updating charter.task.skill_body if this
-    version should become the live one.
+    version should become the live body the next eval runs against.
     """
     from datetime import datetime, timezone
 
@@ -262,7 +347,13 @@ def _append_skill_version(
     )
     record = version.model_dump(mode="json")
     state.skill_versions.append(record)
-    state.active_skill_version_id = version.id
+    if as_candidate:
+        state.candidate_skill_version_id = version.id
+    else:
+        state.active_skill_version_id = version.id
+        # Promoting (or first-time creation) supersedes any pending candidate
+        # from a previous flow.
+        state.candidate_skill_version_id = None
     return record
 
 
@@ -277,13 +368,29 @@ async def health_check():
 
 @app.post("/suggest-goals", response_model=SuggestGoalsResponse)
 async def suggest_goals(req: SuggestGoalsRequest):
-    """Suggest additional business goals based on current goals (stateless, no session)."""
+    """Suggest additional business goals based on current goals.
+
+    If ``session_id`` is provided the call is persisted as a turn so
+    prompt-eval can later sample it. Without it the call still works,
+    just isn't recorded as a dataset row.
+    """
     non_empty = [g for g in req.goals if g.strip()]
     if not non_empty:
         return SuggestGoalsResponse(suggestions=[])
 
     try:
-        suggestions, _ = await call_suggest_goals(non_empty)
+        suggestions, call_meta = await call_suggest_goals(non_empty)
+        if req.session_id:
+            try:
+                await db.create_turn(
+                    session_id=req.session_id,
+                    turn_type="suggest_goals",
+                    input_snapshot={"goals": non_empty},
+                    llm_calls=call_meta,
+                    parsed_output={"suggestions": suggestions},
+                )
+            except Exception:
+                logger.warning("suggest_goals turn-log failed", exc_info=True)
         return SuggestGoalsResponse(suggestions=suggestions)
     except Exception as e:
         logger.exception("Failed to suggest goals")
@@ -292,13 +399,16 @@ async def suggest_goals(req: SuggestGoalsRequest):
 
 @app.post("/evaluate-goals", response_model=EvaluateGoalsResponse)
 async def evaluate_goals(req: EvaluateGoalsRequest):
-    """Evaluate business goal quality — check if goals are specific, measurable, independent."""
+    """Evaluate business goal quality — check if goals are specific, measurable, independent.
+
+    Persists a turn when ``session_id`` is provided (see suggest_goals).
+    """
     non_empty = [g for g in req.goals if g.strip()]
     if not non_empty:
         return EvaluateGoalsResponse(feedback=[])
 
     try:
-        feedback_raw, _ = await call_evaluate_goals(non_empty)
+        feedback_raw, call_meta = await call_evaluate_goals(non_empty)
         feedback = [
             GoalFeedback(
                 goal=f.get("goal", ""),
@@ -307,6 +417,17 @@ async def evaluate_goals(req: EvaluateGoalsRequest):
             )
             for f in feedback_raw
         ]
+        if req.session_id:
+            try:
+                await db.create_turn(
+                    session_id=req.session_id,
+                    turn_type="evaluate_goals",
+                    input_snapshot={"goals": non_empty},
+                    llm_calls=call_meta,
+                    parsed_output={"feedback": feedback_raw},
+                )
+            except Exception:
+                logger.warning("evaluate_goals turn-log failed", exc_info=True)
         return EvaluateGoalsResponse(feedback=feedback)
     except Exception as e:
         logger.exception("Failed to evaluate goals")
@@ -315,14 +436,28 @@ async def evaluate_goals(req: EvaluateGoalsRequest):
 
 @app.post("/suggest-stories", response_model=SuggestStoriesResponse)
 async def suggest_stories(req: SuggestStoriesRequest):
-    """Suggest additional user stories based on goals and existing stories (stateless, no session)."""
+    """Suggest additional user stories based on goals and existing stories.
+
+    Persists a turn when ``session_id`` is provided (see suggest_goals).
+    """
     non_empty_goals = [g for g in req.goals if g.strip()]
     non_empty_stories = [s for s in req.stories if s.get("who", "").strip() or s.get("what", "").strip()]
     if not non_empty_goals:
         return SuggestStoriesResponse(suggestions=[])
 
     try:
-        suggestions, _ = await call_suggest_stories(non_empty_goals, non_empty_stories)
+        suggestions, call_meta = await call_suggest_stories(non_empty_goals, non_empty_stories)
+        if req.session_id:
+            try:
+                await db.create_turn(
+                    session_id=req.session_id,
+                    turn_type="suggest_stories",
+                    input_snapshot={"goals": non_empty_goals, "stories": non_empty_stories},
+                    llm_calls=call_meta,
+                    parsed_output={"suggestions": suggestions},
+                )
+            except Exception:
+                logger.warning("suggest_stories turn-log failed", exc_info=True)
         return SuggestStoriesResponse(suggestions=suggestions)
     except Exception as e:
         logger.exception("Failed to suggest stories")
@@ -524,7 +659,14 @@ async def seed_from_skill(session_id: str, req: SkillSeedRequest):
     await db.create_turn(
         session_id=session_id,
         turn_type="skill_seed",
-        input_snapshot={"skill_name": req.skill_name, "skill_body_len": len(req.skill_body)},
+        # Keep the full SKILL.md body so prompt-eval can replay this turn.
+        # Storing only `_len` (the prior shape) saved bytes but made the turn
+        # unsamplable as a dataset row — the body is the input.
+        input_snapshot={
+            "skill_name": req.skill_name,
+            "skill_description": req.skill_description,
+            "skill_body": req.skill_body,
+        },
         llm_calls=call_meta,
         parsed_output=data,
     )
@@ -686,9 +828,11 @@ async def create_prompt_eval_session(req: CreatePromptEvalRequest):
         await db.create_turn(
             session_id=session_id,
             turn_type="skill_seed",
+            # Persist the full prompt body, not just length — prompt-eval
+            # samples this snapshot as a dataset row and needs to replay it.
             input_snapshot={
                 "prompt_target": req.prompt_target,
-                "prompt_text_len": len(seed_body),
+                "skill_body": seed_body,
             },
             llm_calls=seed_calls,
             parsed_output=seed_data,
@@ -1956,6 +2100,15 @@ def _eval_run_to_summary(run: dict) -> EvalRunSummary:
     )
 
 
+# Active eval-run tasks keyed by run_id. Lets the /cancel endpoint flip the
+# DB row to 'cancelled' so the post-run write doesn't clobber the status.
+# Memory-only — restart wipes it; the DB row still wins. The underlying
+# Braintrust call runs in a thread we can't kill mid-flight, so this is a
+# UI-level cancellation, not a process-level one (the thread finishes in
+# the background but its results are dropped).
+_ACTIVE_EVAL_TASKS: dict[str, "asyncio.Task"] = {}
+
+
 async def _execute_eval_run(
     run_id: str,
     skill_body: str,
@@ -1975,6 +2128,12 @@ async def _execute_eval_run(
     import asyncio
     from datetime import datetime, timezone
     from .eval_runner import DEFAULT_JUDGE_MODEL, DEFAULT_MODEL
+
+    async def _was_cancelled() -> bool:
+        """Returns True if the user clicked Stop while we were running. Read
+        from the DB so we don't have to trust the in-memory task registry."""
+        row = await db.get_eval_run(run_id)
+        return bool(row and row.get("status") == "cancelled")
 
     await db.update_eval_run(run_id, {
         "status": "running",
@@ -1998,8 +2157,36 @@ async def _execute_eval_run(
             prompt_target=prompt_target,
             prompt_body_template=prompt_body_template,
         )
+        # Braintrust returns Done even when every row's task threw — auth
+        # errors against Anthropic, rate limits, etc. Surface that as 'failed'
+        # so the UI shows a red banner instead of a misleading "Done. 0/N rows
+        # evaluated." Partial failures stay 'done' (the user still gets useful
+        # signal from the rows that succeeded).
+        errored_rows = sum(1 for r in result.per_row if r.get("error"))
+        total_rows = len(result.per_row)
+        first_error = next((r.get("error") for r in result.per_row if r.get("error")), None)
+        if total_rows > 0 and errored_rows == total_rows:
+            status = "failed"
+            error_msg = (
+                f"All {total_rows} rows errored. First error: {first_error}"
+                if first_error
+                else f"All {total_rows} rows errored."
+            )
+        else:
+            status = "done"
+            error_msg = (
+                f"{errored_rows} of {total_rows} rows errored. First error: {first_error}"
+                if errored_rows and first_error
+                else None
+            )
+        # If the user hit Stop, don't overwrite the cancelled status with
+        # done/failed — the eval thread couldn't be killed but its results
+        # are no longer wanted by the user.
+        if await _was_cancelled():
+            return
         await db.update_eval_run(run_id, {
-            "status": "done",
+            "status": status,
+            "error": error_msg,
             "finished_at": datetime.now(timezone.utc),
             "experiment_url": result.experiment_url,
             "experiment_name": result.experiment_name,
@@ -2026,11 +2213,14 @@ async def _execute_eval_run(
             logger.exception("Failed to clear 'new' tags after eval run %s", run_id)
     except Exception as e:  # noqa: BLE001
         logger.exception("Eval run %s failed", run_id)
-        await db.update_eval_run(run_id, {
-            "status": "error",
-            "error": str(e),
-            "finished_at": datetime.now(timezone.utc),
-        })
+        if not await _was_cancelled():
+            await db.update_eval_run(run_id, {
+                "status": "error",
+                "error": str(e),
+                "finished_at": datetime.now(timezone.utc),
+            })
+    finally:
+        _ACTIVE_EVAL_TASKS.pop(run_id, None)
 
 
 @app.post("/sessions/{session_id}/run-eval", response_model=EvalRunSummary)
@@ -2078,14 +2268,19 @@ async def run_eval_for_session(session_id: str, req: RunEvalRequest, request: Re
 
     anthropic_key = request.headers.get("x-anthropic-key") or None
 
-    # Capture the active SKILL.md version so this run is tied to a specific edit.
-    # If the session was seeded before versioning landed, auto-create v1 from
-    # the current body so later diffs have something to compare against.
+    # Tag the run with whatever SKILL.md version is *actually* being
+    # evaluated. When a candidate exists, charter.task.skill_body mirrors
+    # the candidate (set when the candidate was created), and the eval
+    # below sends that exact body to Braintrust — so the run's
+    # skill_version_id has to be the candidate's id, not the active's.
+    # Otherwise the Skill version timeline shows "no run" on the candidate
+    # row (because no run is tagged with its id) and the Promote/Discard
+    # banner never fires (it keys off skill_version_id == candidateId).
     # Skipped entirely for prompt-eval projects — no SKILL.md is involved.
-    active_ver_id: str | None = None
-    active_ver_num: int | None = None
+    eval_ver_id: str | None = None
+    eval_ver_num: int | None = None
     if not is_prompt_eval:
-        active_ver_id = state.active_skill_version_id
+        eval_ver_id = state.candidate_skill_version_id or state.active_skill_version_id
         if not state.skill_versions:
             record = _append_skill_version(
                 state,
@@ -2093,13 +2288,13 @@ async def run_eval_for_session(session_id: str, req: RunEvalRequest, request: Re
                 created_from="seed",
                 notes="Backfilled v1 from existing SKILL.md body.",
             )
-            active_ver_id = record["id"]
-            active_ver_num = record["version"]
+            eval_ver_id = record["id"]
+            eval_ver_num = record["version"]
             await _save_state(session_id, state, conversation)
         else:
             for v in state.skill_versions:
-                if v.get("id") == active_ver_id:
-                    active_ver_num = v.get("version")
+                if v.get("id") == eval_ver_id:
+                    eval_ver_num = v.get("version")
                     break
 
     # Resolve the judge model now (rather than only inside _execute_eval_run)
@@ -2115,13 +2310,13 @@ async def run_eval_for_session(session_id: str, req: RunEvalRequest, request: Re
         project=req.project,
         experiment_name=req.experiment_name,
         rows_total=len(examples),
-        skill_version_id=active_ver_id,
-        skill_version_number=active_ver_num,
+        skill_version_id=eval_ver_id,
+        skill_version_number=eval_ver_num,
         charter_snapshot=state.charter.model_dump(),
         judge_model_used=judge_model_resolved,
     )
 
-    asyncio.create_task(
+    eval_task = asyncio.create_task(
         _execute_eval_run(
             run_id=run_id,
             skill_body=skill_body,
@@ -2139,8 +2334,35 @@ async def run_eval_for_session(session_id: str, req: RunEvalRequest, request: Re
             prompt_body_template=skill_body if is_prompt_eval else None,
         )
     )
+    _ACTIVE_EVAL_TASKS[run_id] = eval_task
 
     return _eval_run_to_summary(run_row)
+
+
+@app.post("/sessions/{session_id}/eval-runs/{run_id}/cancel", response_model=EvalRunSummary)
+async def cancel_eval_run(session_id: str, run_id: str):
+    """Cancel a running eval. Marks the DB row as 'cancelled' so the
+    background task's post-run write is skipped, and the polling UI sees
+    the terminal state on the next tick. The Braintrust thread in the pool
+    can't be killed mid-call — it finishes in the background but its
+    results are dropped. Idempotent: cancelling an already-terminal run
+    just returns its current state."""
+    from datetime import datetime, timezone
+    run = await db.get_eval_run(run_id)
+    if run is None or run.get("session_id") != session_id:
+        raise HTTPException(status_code=404, detail="Eval run not found")
+    if run.get("status") in ("done", "failed", "error", "cancelled"):
+        return _eval_run_to_summary(run)
+    await db.update_eval_run(run_id, {
+        "status": "cancelled",
+        "error": "Run cancelled by user.",
+        "finished_at": datetime.now(timezone.utc),
+    })
+    task = _ACTIVE_EVAL_TASKS.pop(run_id, None)
+    if task is not None:
+        task.cancel()
+    fresh = await db.get_eval_run(run_id)
+    return _eval_run_to_summary(fresh or run)
 
 
 @app.get("/sessions/{session_id}/eval-runs/{run_id}", response_model=EvalRunSummary)
@@ -2172,10 +2394,15 @@ async def list_skill_versions(session_id: str):
 
 @app.post("/sessions/{session_id}/skill-versions", response_model=SkillVersion)
 async def create_skill_version(session_id: str, req: CreateSkillVersionRequest):
-    """Create a new SKILL.md version and set it as active.
+    """Create a new SKILL.md version.
 
-    Updates charter.task.skill_body so subsequent evals use the new body. The
-    prior body stays in skill_versions history.
+    Suggestion-derived versions land as candidates (must be promoted after a
+    confirming eval) so a regressing batch of edits doesn't silently become
+    the new active. Manual edits and other sources promote immediately —
+    they're explicit user-typed changes, not LLM proposals to validate.
+
+    Either way, charter.task.skill_body updates so subsequent evals use the
+    new body and the user can re-run on the candidate before committing.
     """
     state, conversation = await _load_state(session_id)
 
@@ -2189,31 +2416,105 @@ async def create_skill_version(session_id: str, req: CreateSkillVersionRequest):
             notes="Backfilled v1 from existing SKILL.md body.",
         )
 
+    created_from = req.created_from or "manual"
+    as_candidate = created_from == "suggestion"
     record = _append_skill_version(
         state,
         body=req.body,
-        created_from=req.created_from or "manual",
+        created_from=created_from,
         notes=req.notes,
         applied_suggestion_ids=req.applied_suggestion_ids,
+        as_candidate=as_candidate,
     )
     state.charter.task.skill_body = req.body
     await _save_state(session_id, state, conversation)
     return SkillVersion(**record)
 
 
+@app.post("/sessions/{session_id}/skill-versions/{version_id}/promote", response_model=SkillVersion)
+async def promote_skill_version(session_id: str, version_id: str):
+    """Promote a candidate version to active.
+
+    Strict pairing with discard: only the *current* candidate can be promoted.
+    Without this guard, a stale UI (or any caller hitting the URL) could flip
+    an arbitrary historical version to active, silently orphaning the real
+    candidate (its pointer would clear on promote even though the user never
+    confirmed it). To restore an older non-candidate version, use
+    /skill-versions/restore — that's the dedicated affordance."""
+    state, conversation = await _load_state(session_id)
+    if state.candidate_skill_version_id != version_id:
+        raise HTTPException(
+            status_code=400,
+            detail="That version isn't the current candidate. Use /skill-versions/restore to revive an older version.",
+        )
+    target = next((v for v in state.skill_versions if v.get("id") == version_id), None)
+    if target is None:
+        # Belt-and-braces — pointer says it's the candidate but the version
+        # row is gone. Shouldn't happen, but don't 500 if it does.
+        raise HTTPException(status_code=404, detail="Skill version not found")
+    state.active_skill_version_id = version_id
+    state.candidate_skill_version_id = None
+    state.charter.task.skill_body = target["body"]
+    await _save_state(session_id, state, conversation)
+    return SkillVersion(**target)
+
+
+@app.post("/sessions/{session_id}/skill-versions/{version_id}/discard", response_model=SkillVersion)
+async def discard_skill_version(session_id: str, version_id: str):
+    """Discard a candidate. Reverts skill_body to the active version's body
+    and clears the candidate pointer. The discarded version stays in history
+    (the user can still review or restore it from the timeline) but stops
+    being the body the next eval runs against."""
+    state, conversation = await _load_state(session_id)
+    if state.candidate_skill_version_id != version_id:
+        raise HTTPException(status_code=400, detail="That version isn't the current candidate.")
+    target = next((v for v in state.skill_versions if v.get("id") == version_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Skill version not found")
+    active = next(
+        (v for v in state.skill_versions if v.get("id") == state.active_skill_version_id),
+        None,
+    )
+    if active is not None:
+        state.charter.task.skill_body = active["body"]
+    state.candidate_skill_version_id = None
+    await _save_state(session_id, state, conversation)
+    return SkillVersion(**target)
+
+
 @app.post("/sessions/{session_id}/skill-versions/restore", response_model=SkillVersion)
 async def restore_skill_version(session_id: str, req: RestoreSkillVersionRequest):
-    """Make a previous version the active one. Does NOT rewrite history —
-    the restored version becomes the latest active; older versions are kept."""
+    """Restore a previous version. Appends a new SkillVersion row with
+    created_from='restore' so the history reads 'v4 — restored from v2',
+    rather than silently flipping the active pointer (which left v3's edits
+    looking lost). The new row's body is identical to the target's body, but
+    its `notes` field carries the lineage so the UI can render an arrow back
+    to the source version.
+
+    Refuses to run while a candidate is pending — restore would otherwise
+    silently clear the candidate (since `_append_skill_version` resets the
+    pointer when not as_candidate), making the user's in-flight edits
+    unreachable. The user has to explicitly promote or discard first.
+    """
     state, conversation = await _load_state(session_id)
+    if state.candidate_skill_version_id is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="A candidate version is pending. Promote or discard it before restoring an older version.",
+        )
     target = next((v for v in state.skill_versions if v.get("id") == req.version_id), None)
     if target is None:
         raise HTTPException(status_code=404, detail="Skill version not found")
 
-    state.active_skill_version_id = target["id"]
+    new_record = _append_skill_version(
+        state,
+        body=target["body"],
+        created_from="restore",
+        notes=f"Restored from v{target.get('version')}",
+    )
     state.charter.task.skill_body = target["body"]
     await _save_state(session_id, state, conversation)
-    return SkillVersion(**target)
+    return SkillVersion(**new_record)
 
 
 @app.post(
@@ -2231,7 +2532,11 @@ async def suggest_skill_improvements(session_id: str, req: SuggestImprovementsRe
     run = await db.get_eval_run(req.run_id)
     if run is None or run.get("session_id") != session_id:
         raise HTTPException(status_code=404, detail="Eval run not found")
-    if run.get("status") != "done":
+    # Allow both 'done' (the happy path) and 'failed' (every row errored —
+    # the prompt now handles the all-errored case and proposes defensive
+    # SKILL.md edits, e.g. "ensure output is JSON only"). 'pending' /
+    # 'running' / 'error' (run never started) still 400.
+    if run.get("status") not in ("done", "failed"):
         raise HTTPException(
             status_code=400,
             detail=f"Eval run must be completed (current status: {run.get('status')}).",

@@ -110,7 +110,32 @@ async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
     throw err
   }
   if (res.status === 401) {
+    let body: { detail?: string; provider?: string; error?: string } = {}
+    try { body = await res.clone().json() } catch { /* not JSON */ }
+    if (body.error === 'llm_auth') {
+      const provider = body.provider === 'openrouter' ? 'OpenRouter' : 'Anthropic'
+      throw new Error(
+        `${provider} rejected the API key: ${body.detail || 'auth failed'}. ` +
+        `Check the API key in Settings.`,
+      )
+    }
     throw new Error('Invalid or missing API key. Please add your API key in Settings.')
+  }
+  if (res.status === 422) {
+    // 422 specifically for "model id not found / not entitled" — the auth
+    // is fine, the model name doesn't resolve. Distinct copy from 401 so
+    // the user looks at the model selector, not the key field.
+    let body: { detail?: string; provider?: string; error?: string } = {}
+    try { body = await res.clone().json() } catch { /* not JSON */ }
+    if (body.error === 'llm_model') {
+      const provider = body.provider === 'openrouter' ? 'OpenRouter' : 'Anthropic'
+      throw new Error(
+        `${provider} doesn't recognize the selected model: ${body.detail || 'model not found'}. ` +
+        `Pick a different model in Settings — your key is fine.`,
+      )
+    }
+    // Fall through to default Response handling for non-LLM 422s
+    // (validation errors etc.).
   }
   if (res.status === 402) {
     // Provider rejected the call for billing reasons. Read the body once,
@@ -451,6 +476,42 @@ export async function restoreSkillVersion(
   return res.json()
 }
 
+export async function cancelEvalRun(
+  sessionId: string,
+  runId: string,
+): Promise<EvalRunSummary> {
+  const res = await apiFetch(
+    `${BASE}/sessions/${sessionId}/eval-runs/${runId}/cancel`,
+    { method: 'POST' },
+  )
+  if (!res.ok) throw new Error(`Failed to cancel eval run: ${res.status}`)
+  return res.json()
+}
+
+export async function promoteSkillVersion(
+  sessionId: string,
+  versionId: string,
+): Promise<SkillVersion> {
+  const res = await apiFetch(
+    `${BASE}/sessions/${sessionId}/skill-versions/${versionId}/promote`,
+    { method: 'POST' },
+  )
+  if (!res.ok) throw new Error(`Failed to promote skill version: ${res.status}`)
+  return res.json()
+}
+
+export async function discardSkillVersion(
+  sessionId: string,
+  versionId: string,
+): Promise<SkillVersion> {
+  const res = await apiFetch(
+    `${BASE}/sessions/${sessionId}/skill-versions/${versionId}/discard`,
+    { method: 'POST' },
+  )
+  if (!res.ok) throw new Error(`Failed to discard skill version: ${res.status}`)
+  return res.json()
+}
+
 export async function suggestImprovements(
   sessionId: string,
   runId: string
@@ -526,24 +587,26 @@ export async function suggestForCharter(
 }
 
 export async function evaluateGoals(
-  goals: string[]
+  goals: string[],
+  sessionId?: string | null,
 ): Promise<{ feedback: Array<{ goal: string; issue: string | null; suggestion: string | null }> }> {
   const res = await apiFetch(`${BASE}/evaluate-goals`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ goals }),
+    body: JSON.stringify({ goals, session_id: sessionId ?? null }),
   })
   if (!res.ok) throw new Error(`Failed to evaluate goals: ${res.status}`)
   return res.json()
 }
 
 export async function suggestGoals(
-  goals: string[]
+  goals: string[],
+  sessionId?: string | null,
 ): Promise<{ suggestions: string[] }> {
   const res = await apiFetch(`${BASE}/suggest-goals`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ goals }),
+    body: JSON.stringify({ goals, session_id: sessionId ?? null }),
   })
   if (!res.ok) throw new Error(`Failed to suggest goals: ${res.status}`)
   return res.json()
@@ -551,12 +614,13 @@ export async function suggestGoals(
 
 export async function suggestStories(
   goals: string[],
-  stories: Array<{ who: string; what: string; why: string }>
+  stories: Array<{ who: string; what: string; why: string }>,
+  sessionId?: string | null,
 ): Promise<{ suggestions: Array<{ who: string; what: string; why: string }> }> {
   const res = await apiFetch(`${BASE}/suggest-stories`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ goals, stories }),
+    body: JSON.stringify({ goals, stories, session_id: sessionId ?? null }),
   })
   if (!res.ok) throw new Error(`Failed to suggest stories: ${res.status}`)
   return res.json()

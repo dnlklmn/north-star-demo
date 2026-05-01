@@ -100,6 +100,11 @@ export interface SessionState {
   extracted_stories?: ExtractedStory[]
   /** Latest SKILL.md version id — mirrors backend active_skill_version_id. */
   active_skill_version_id?: string | null
+  /** Pointer to a candidate version awaiting promote/discard. Set when the
+   *  user accepts suggestions; cleared on promote (becomes active) or
+   *  discard. While set, charter.task.skill_body mirrors the candidate so
+   *  the next eval runs against it. */
+  candidate_skill_version_id?: string | null
   /** Which skill version was active when each artifact was last generated.
    *  Keys: 'goals' | 'users' | 'stories' | 'charter' | 'dataset' | 'scorers'. */
   generated_at_skill_version?: Record<string, string>
@@ -304,7 +309,7 @@ export interface InferSchemaResponse {
 
 // --- Eval run (Braintrust execution eval triggered from the UI) ---
 
-export type EvalRunStatus = 'pending' | 'running' | 'done' | 'error'
+export type EvalRunStatus = 'pending' | 'running' | 'done' | 'failed' | 'error' | 'cancelled'
 
 export interface EvalRunPerRow {
   input: unknown
@@ -345,7 +350,7 @@ export interface EvalRunSummary {
 
 // --- Skill versioning + improvement suggestions (Path A) ---
 
-export type SkillVersionSource = 'seed' | 'suggestion' | 'manual'
+export type SkillVersionSource = 'seed' | 'suggestion' | 'manual' | 'restore'
 
 export interface SkillVersion {
   id: string
