@@ -229,12 +229,6 @@ function applyBatch(
   return { body: cur, modes }
 }
 
-function confidenceColor(c: ImprovementSuggestion['confidence']): string {
-  if (c === 'high') return 'bg-success/15 text-success'
-  if (c === 'medium') return 'bg-warning/15 text-warning'
-  return 'bg-muted text-muted-foreground'
-}
-
 export default function EvaluatePanel({
   sessionId,
   dataset,
@@ -553,7 +547,7 @@ export default function EvaluatePanel({
 
   // Final body + per-suggestion mode map. The mode map drives the save-card
   // copy ("3 applied, 2 appended due to drift") and the per-row chip.
-  const { body: finalBody, modes: finalModes } = useMemo(
+  const { body: finalBody } = useMemo(
     () => applyBatch(skillBody, acceptedSuggestions),
     [skillBody, acceptedSuggestions],
   )
@@ -726,7 +720,7 @@ export default function EvaluatePanel({
         </div>
         {doneRunForImprove && (
           <button
-            onClick={handleSuggest}
+            onClick={() => handleSuggest()}
             disabled={suggesting}
             className="p-1.5 text-fg-dim hover:text-fg-contrast disabled:opacity-50"
             title={suggesting ? 'Analyzing…' : 'Re-analyze the latest run'}
@@ -1107,7 +1101,6 @@ export default function EvaluatePanel({
                 (v.applied_suggestion_ids?.length
                   ? `Applied ${v.applied_suggestion_ids.length} of ${v.applied_suggestion_ids.length} suggestions`
                   : `Created from ${v.created_from}`)
-              const isCandidate = opts.badge === 'candidate'
               const isHistory = opts.badge === 'history'
               const isSelected = selectedSkillVersionId === v.id
               return (
@@ -1636,7 +1629,7 @@ export default function EvaluatePanel({
                       const bt = b.started_at ? new Date(b.started_at).getTime() : 0
                       return at - bt
                     })[0] || null
-                    let originalRun = v1Runs[0] || fallbackOldest
+                    let originalRun: EvalRunSummary | null = v1Runs[0] || fallbackOldest
                     // Don't double-count: if "original" is the same row as
                     // "previous", drop it — the column would just duplicate.
                     if (originalRun && previousRun && originalRun.run_id === previousRun.run_id) {
@@ -1831,9 +1824,9 @@ export default function EvaluatePanel({
               const filteredRuns = selectedSkillVersionId
                 ? runs.filter((r) => r.skill_version_id === selectedSkillVersionId)
                 : runs
-              const selectedVer =
-                selectedSkillVersionId &&
-                skillVersions.find((v) => v.id === selectedSkillVersionId)
+              const selectedVer = selectedSkillVersionId
+                ? skillVersions.find((v) => v.id === selectedSkillVersionId)
+                : undefined
               return (
                 <>
                   <div className="flex items-center justify-between mb-3">

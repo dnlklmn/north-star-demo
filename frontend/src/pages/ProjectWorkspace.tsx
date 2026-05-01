@@ -2219,10 +2219,13 @@ export default function ProjectWorkspace() {
               }
               onRunEval={async (overrides) => {
                 if (!urlSessionId) return null
+                // RunEvalRequest.project is required — bail rather than send
+                // an empty string the backend would create a malformed run for.
+                if (!overrides?.project) return null
                 try {
                   const { runEval } = await import("../api")
                   const run = await runEval(urlSessionId, {
-                    project: overrides?.project,
+                    project: overrides.project,
                     experiment_name: overrides?.experiment_name,
                     limit: overrides?.limit,
                     include_triggering: overrides?.include_triggering,
@@ -2320,7 +2323,7 @@ function buildCoverageGenerateModalProps(req: CoverageGenerateRequestExt): {
 } {
   if (req.kind === "cell") {
     // Per-cell: 2 examples per scenario, one scenario (this intersection).
-    const suggestedCount = 2;
+    const suggestedCount: number = 2;
     const isEmpty = req.currentCount === 0;
     const reason = isEmpty
       ? `${suggestedCount} more example${suggestedCount === 1 ? "" : "s"} will cover "${req.criterion}" × "${req.featureArea}".`
