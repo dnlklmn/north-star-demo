@@ -940,6 +940,94 @@ async def delete_example(example_id: str) -> bool:
         return result == "DELETE 1"
 
 
+async def delete_examples_for_dataset(dataset_id: str) -> int:
+    """Bulk-delete every example row for a dataset. Used by the prompt-eval
+    refresh path: we replace the rolling window of sampled rows in one go,
+    so wiping the dataset's examples first keeps things atomic from the
+    user's perspective. Returns the number of rows deleted (parsed from the
+    asyncpg ``DELETE n`` status string)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        status = await conn.execute(
+            "DELETE FROM examples WHERE dataset_id = $1",
+            dataset_id,
+        )
+        # status is "DELETE <n>" — parse the count for the API response.
+        try:
+            return int(status.split()[-1])
+        except (IndexError, ValueError):
+            return 0
+
+
+async def count_curated_examples(dataset_id: str) -> int:
+    """How many examples in this dataset carry user curation that a
+    replace-mode refresh would silently destroy? Counts rows with a label
+    that isn't ``unlabeled``, a non-default review_status, or any reviewer
+    notes. Used by the refresh endpoint to surface ``rows_curation_lost``
+    so the user knows what they're about to wipe."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT COUNT(*) AS n
+            FROM examples
+            WHERE dataset_id = $1
+              AND (
+                (label IS NOT NULL AND label NOT IN ('', 'unlabeled'))
+                OR review_status NOT IN ('pending', 'approved')
+                OR (reviewer_notes IS NOT NULL AND reviewer_notes <> '')
+              )
+            """,
+            dataset_id,
+        )
+        return int(row["n"]) if row else 0
+
+
+async def replace_examples_for_dataset(
+    dataset_id: str,
+    examples: list[dict],
+) -> int:
+    """Atomically swap the entire example set for a dataset.
+
+    Wraps the DELETE + bulk-INSERT in a single transaction so a failure on
+    the insert path leaves the existing rows in place rather than dropping
+    the dataset to empty. Returns the number of rows deleted before the
+    insert (parsed from the asyncpg ``DELETE n`` status string).
+
+    Mirrors the per-row INSERT shape used by ``bulk_create_examples`` but
+    can't reuse that helper directly because it acquires its own connection
+    — sharing one connection here is what makes the operation atomic.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            status = await conn.execute(
+                "DELETE FROM examples WHERE dataset_id = $1",
+                dataset_id,
+            )
+            try:
+                removed = int(status.split()[-1])
+            except (IndexError, ValueError):
+                removed = 0
+            for ex in examples:
+                await conn.execute(
+                    """
+                    INSERT INTO examples (id, dataset_id, feature_area, input, expected_output,
+                        coverage_tags, source, label, label_reason, review_status,
+                        should_trigger, is_adversarial)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    """,
+                    str(uuid.uuid4()), dataset_id, ex["feature_area"], ex["input"],
+                    ex.get("expected_output", "") or "",
+                    json.dumps(ex.get("coverage_tags", [])), ex.get("source", "manual"),
+                    ex.get("label", "unlabeled"), ex.get("label_reason"),
+                    ex.get("review_status", "pending"),
+                    ex.get("should_trigger"),
+                    ex.get("is_adversarial"),
+                )
+            return removed
+
+
 async def export_dataset(dataset_id: str) -> dict:
     """Export all approved examples as a structured dict."""
     dataset = await get_dataset(dataset_id)

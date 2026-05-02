@@ -409,6 +409,47 @@ class CreatePromptEvalResponse(BaseModel):
     message: str
 
 
+class RefreshDatasetRequest(BaseModel):
+    """Re-sample turns into an existing prompt-eval session's dataset.
+
+    Replace-only for v1: existing examples are wiped, fresh ones inserted.
+    sample_size matches the create-flow ceiling so a refresh can't grow the
+    dataset beyond what create_prompt_eval_session would produce.
+
+    ``confirm`` defaults to False. When the existing dataset has any
+    user-curated examples (labels, review status, reviewer notes), the
+    endpoint refuses with HTTP 409 unless ``confirm=True`` is set. This
+    keeps a casual refresh from silently destroying review work.
+    """
+    sample_size: int = Field(default=30, ge=1, le=200)
+    confirm: bool = Field(
+        default=False,
+        description=(
+            "Set true to acknowledge that any curated examples in the existing "
+            "dataset will be destroyed. Required when rows_curation_lost > 0."
+        ),
+    )
+
+
+class RefreshDatasetResponse(BaseModel):
+    session_id: str
+    prompt_target: str
+    dataset_id: str
+    # rows_sampled is the raw turns-table hit count (3× sample_size ceiling
+    # on the SELECT); rows_deduped is what survived input-snapshot dedup
+    # before truncation; rows_total is the final example_count after insert.
+    # rows_removed is the count cleared from the prior dataset state — the
+    # signal for "how stale was this". rows_curation_lost is the subset of
+    # rows_removed that carried user labels, review status, or notes (i.e.
+    # what the refresh actually destroyed beyond pure auto-sampled rows).
+    rows_sampled: int
+    rows_deduped: int
+    rows_removed: int
+    rows_curation_lost: int
+    rows_total: int
+    message: str
+
+
 class PromptTargetInfo(BaseModel):
     target: str
     label: str
