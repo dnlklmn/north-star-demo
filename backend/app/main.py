@@ -65,6 +65,8 @@ from .models import (
     PromptTargetInfo,
     CreatePromptEvalRequest,
     CreatePromptEvalResponse,
+    RefreshDatasetRequest,
+    RefreshDatasetResponse,
     RestoreSkillVersionRequest,
     RunEvalRequest,
     SendMessageRequest,
@@ -685,6 +687,85 @@ async def list_prompt_targets_endpoint():
     return [PromptTargetInfo(**info) for info in list_prompt_targets()]
 
 
+# Coarse bucket for the `feature_area` column on each sampled row. Rows that
+# all bucket to the same string render as one row in the dataset table, which
+# defeats the visual purpose; for `generate` we use a goals/stories signal,
+# everything else falls back to the prompt_target name. Lifted out of
+# create_prompt_eval_session so the refresh endpoint can reuse it.
+def _bucket_for_prompt_target(prompt_target: str, snap: dict) -> str:
+    if prompt_target != "generate":
+        return prompt_target
+    has_goals = bool((snap.get("business_goals") or "").strip())
+    has_stories = bool((snap.get("user_stories") or "").strip())
+    if has_goals and has_stories:
+        return "goals+stories"
+    if has_goals:
+        return "goals_only"
+    if has_stories:
+        return "stories_only"
+    return "empty_input"
+
+
+async def _sample_and_build_example_rows(
+    prompt_target: str,
+    exclude_session_id: str,
+    sample_size: int,
+) -> tuple[int, int, list[dict]]:
+    """Sample turns for a prompt-eval target and shape them as example rows.
+
+    Returns (sampled_count, deduped_count, example_rows). Used both at session
+    creation and on dataset refresh — the only difference between those callers
+    is what they do with the returned rows.
+
+    Pulls 3× sample_size from the turns table (since dedup may discard most),
+    dedupes by input_snapshot key, then truncates to sample_size. Excludes the
+    prompt-eval project's own session so re-runs of the prompt under test
+    don't pollute the dataset they're sampled from.
+    """
+    sampled = await db.sample_turns_for_prompt_eval(
+        turn_type=prompt_target,
+        limit=sample_size * 3,
+        exclude_session_id=exclude_session_id,
+    )
+
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for t in sampled:
+        snap = t.get("input_snapshot") or {}
+        key = json.dumps(snap, sort_keys=True)[:1000]
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(t)
+        if len(deduped) >= sample_size:
+            break
+
+    example_rows: list[dict] = []
+    for t in deduped:
+        snap = t.get("input_snapshot") or {}
+        # Historical agent_message lives on the turn but generate-style turns
+        # store the produced charter under parsed_output instead. Capture
+        # whichever is present so the user can see what was produced before
+        # — useful as a comparison even when scorers are reference-free.
+        historical = t.get("agent_message") or ""
+        if not historical:
+            parsed = t.get("parsed_output")
+            if isinstance(parsed, (dict, list)):
+                historical = json.dumps(parsed)[:4000]
+            elif isinstance(parsed, str):
+                historical = parsed[:4000]
+        example_rows.append({
+            "feature_area": _bucket_for_prompt_target(prompt_target, snap),
+            "input": json.dumps(snap),
+            "expected_output": historical,
+            "coverage_tags": ["prompt-eval", prompt_target],
+            "source": "turns_sample",
+            "label": "unlabeled",
+            "review_status": "approved",
+        })
+    return len(sampled), len(deduped), example_rows
+
+
 @app.post("/sessions/prompt-eval", response_model=CreatePromptEvalResponse)
 async def create_prompt_eval_session(req: CreatePromptEvalRequest):
     """Spin up a prompt-eval project end-to-end.
@@ -838,25 +919,14 @@ async def create_prompt_eval_session(req: CreatePromptEvalRequest):
             parsed_output=seed_data,
         )
 
-    # Sample turns. Excluding self is moot today (state has no turns yet)
-    # but matters once re-runs land their own generate-style turns.
-    sampled = await db.sample_turns_for_prompt_eval(
-        turn_type=req.prompt_target,
-        limit=sample_size * 3,
+    # Sample turns + build example rows. Excluding self is moot at create
+    # time (no turns yet) but matters once re-runs land their own turns —
+    # and the same helper is reused by /refresh-dataset below.
+    rows_sampled, rows_deduped, example_rows = await _sample_and_build_example_rows(
+        prompt_target=req.prompt_target,
         exclude_session_id=session_id,
+        sample_size=sample_size,
     )
-
-    seen: set[str] = set()
-    deduped: list[dict] = []
-    for t in sampled:
-        snap = t.get("input_snapshot") or {}
-        key = json.dumps(snap, sort_keys=True)[:1000]
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(t)
-        if len(deduped) >= sample_size:
-            break
 
     dataset = await db.create_dataset(
         session_id=session_id,
@@ -864,46 +934,6 @@ async def create_prompt_eval_session(req: CreatePromptEvalRequest):
         charter_snapshot={},
     )
 
-    # feature_area: bucket rows by a coarse signal so the dataset table isn't
-    # 21 identical-looking rows. For the generate target the obvious signal
-    # is "did the user supply only goals, only stories, or both" — that maps
-    # directly to which charter dimensions the prompt has signal for.
-    def _bucket_for_generate(snap: dict) -> str:
-        has_goals = bool((snap.get("business_goals") or "").strip())
-        has_stories = bool((snap.get("user_stories") or "").strip())
-        if has_goals and has_stories:
-            return "goals+stories"
-        if has_goals:
-            return "goals_only"
-        if has_stories:
-            return "stories_only"
-        return "empty_input"
-
-    bucket_fn = _bucket_for_generate if req.prompt_target == "generate" else (lambda s: req.prompt_target)
-
-    example_rows: list[dict] = []
-    for t in deduped:
-        snap = t.get("input_snapshot") or {}
-        # Historical agent_message lives on the turn but generate-style turns
-        # store the produced charter under parsed_output instead. Capture
-        # whichever is present so the user can see what was produced before
-        # — useful as a comparison even when scorers are reference-free.
-        historical = t.get("agent_message") or ""
-        if not historical:
-            parsed = t.get("parsed_output")
-            if isinstance(parsed, (dict, list)):
-                historical = json.dumps(parsed)[:4000]
-            elif isinstance(parsed, str):
-                historical = parsed[:4000]
-        example_rows.append({
-            "feature_area": bucket_fn(snap),
-            "input": json.dumps(snap),
-            "expected_output": historical,
-            "coverage_tags": ["prompt-eval", req.prompt_target],
-            "source": "turns_sample",
-            "label": "unlabeled",
-            "review_status": "approved",
-        })
     if example_rows:
         await db.bulk_create_examples(dataset["id"], example_rows)
         await db.update_dataset_stats(dataset["id"])
@@ -911,13 +941,107 @@ async def create_prompt_eval_session(req: CreatePromptEvalRequest):
     return CreatePromptEvalResponse(
         session_id=session_id,
         prompt_target=req.prompt_target,
-        rows_sampled=len(sampled),
-        rows_deduped=len(deduped),
+        rows_sampled=rows_sampled,
+        rows_deduped=rows_deduped,
         dataset_id=dataset["id"],
         message=(
             f"Seeded goals/users/stories from synthetic description, sampled "
-            f"{len(sampled)} turns, deduped to {len(deduped)}. Generate the "
+            f"{rows_sampled} turns, deduped to {rows_deduped}. Generate the "
             f"charter and scorers next."
+        ),
+    )
+
+
+@app.post("/sessions/{session_id}/refresh-dataset", response_model=RefreshDatasetResponse)
+async def refresh_prompt_eval_dataset(session_id: str, req: RefreshDatasetRequest):
+    """Re-sample the latest turns into a prompt-eval session's dataset.
+
+    The rolling-window pattern: the dataset that was sampled at session
+    creation goes stale as new production turns accumulate. This endpoint
+    wipes the existing examples and replaces them with a fresh sample —
+    the same logic ``create_prompt_eval_session`` uses, so a refresh is
+    indistinguishable from a re-spawn except it preserves the charter,
+    scorers, and any other downstream work attached to the session.
+
+    **DESTRUCTIVE on user curation.** Any per-example labels, review
+    statuses, or reviewer notes attached to the existing dataset rows
+    are wiped along with the rows themselves. The response surfaces
+    ``rows_curation_lost`` so callers can warn before invoking. Pass
+    ``confirm: true`` to acknowledge — without it, the endpoint refuses
+    when curation is non-zero (preserves the dataset by default).
+
+    Replace-only for v1. An ``append`` mode is a follow-up if regression
+    tracking becomes a use case (today the user wants "what is the prompt
+    doing on current traffic", not "is it regressing across releases").
+    """
+    raw = await db.get_session(session_id)
+    if raw is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    state = SessionState(**raw["state"])
+    if state.kind != SessionKind.prompt or not state.prompt_target:
+        raise HTTPException(
+            status_code=400,
+            detail="refresh-dataset only applies to prompt-eval sessions (kind=prompt with a prompt_target).",
+        )
+
+    dataset = await db.get_dataset_by_session(session_id)
+    if dataset is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No dataset attached to this session. Create the prompt-eval project first.",
+        )
+
+    # Refuse to wipe user curation unless the caller explicitly confirms.
+    # This keeps a stray refresh from silently destroying labels someone
+    # spent time applying. Counted before sampling so the cost of the
+    # confirmation roundtrip stays cheap (no LLM, no DB writes).
+    rows_curation_lost = await db.count_curated_examples(dataset["id"])
+    if rows_curation_lost > 0 and not req.confirm:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Refresh would destroy {rows_curation_lost} curated example(s) "
+                f"(labeled, reviewed, or annotated). Re-send with confirm=true to proceed."
+            ),
+        )
+
+    rows_sampled, rows_deduped, example_rows = await _sample_and_build_example_rows(
+        prompt_target=state.prompt_target,
+        exclude_session_id=session_id,
+        sample_size=req.sample_size,
+    )
+
+    # Refuse to wipe a populated dataset for an empty sample — that's
+    # almost always a misconfiguration (wrong turn_type filter, no recent
+    # traffic) rather than the user's intent. Existing examples survive.
+    if not example_rows:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Refresh aborted: 0 turns matched the prompt_target. "
+                "Existing examples preserved."
+            ),
+        )
+
+    # Atomic swap: delete + bulk-insert under one transaction so an
+    # insert-side failure doesn't leave the dataset empty (the prior
+    # non-transactional shape had this hazard).
+    rows_removed = await db.replace_examples_for_dataset(dataset["id"], example_rows)
+    stats = await db.update_dataset_stats(dataset["id"])
+
+    return RefreshDatasetResponse(
+        session_id=session_id,
+        prompt_target=state.prompt_target,
+        dataset_id=dataset["id"],
+        rows_sampled=rows_sampled,
+        rows_deduped=rows_deduped,
+        rows_removed=rows_removed,
+        rows_curation_lost=rows_curation_lost,
+        rows_total=int(stats.get("total", len(example_rows))),
+        message=(
+            f"Refreshed dataset: removed {rows_removed} stale examples "
+            f"(of which {rows_curation_lost} were curated), sampled {rows_sampled} "
+            f"turns, deduped to {rows_deduped}."
         ),
     )
 
@@ -934,9 +1058,107 @@ async def update_session_scorers(session_id: str, body: dict):
         raise HTTPException(status_code=404, detail="Session not found")
 
 
+# --- Scorer file export (GitHub-as-source-of-truth groundwork) ---
+
+# Generated scorers land in backend/app/scorers/generated/<scope>/<name>.py
+# so they can be committed, diffed in PRs, and pushed to Braintrust by CI.
+# Scope keeps scorer-name collisions across prompt-eval targets (and skill
+# sessions) from overwriting each other — `completeness` from skill_seed
+# and `completeness` from suggest_goals are different scorers.
+_GENERATED_SCORERS_DIR = Path(__file__).parent / "scorers" / "generated"
+
+
+def _slugify_scope(text: str) -> str:
+    """Conservative slugger for directory names — keeps the tree predictable
+    in `git diff` output and avoids surprises when a session name has a slash
+    or unicode the OS dislikes. Also caps length so a runaway session name
+    can't produce a 200-char path."""
+    cleaned = "".join(c if (c.isalnum() or c in "-_") else "_" for c in (text or ""))
+    cleaned = cleaned.strip("_") or "unscoped"
+    return cleaned[:60]
+
+
+def _scope_for_scorer_export(state: SessionState) -> str:
+    """Pick a stable scope for a session's generated scorers.
+
+    For prompt-eval projects (kind=prompt) the scope is the prompt_target,
+    so re-running scorer generation for the same target overwrites the
+    previous files in place — that's the "stable canonical artifact" the
+    GitHub-source-of-truth flow wants.
+
+    For skill-eval projects we don't have a stable identifier across runs
+    (a session is one user's one project), so we scope by session-id prefix.
+    Re-running scorer generation in the same session overwrites; a new
+    session for the same skill produces a sibling directory the user can
+    reconcile manually.
+    """
+    if state.kind == SessionKind.prompt and state.prompt_target:
+        return _slugify_scope(state.prompt_target)
+    return f"skill__{state.session_id[:8]}" if state.session_id else "skill__unknown"
+
+
+def _export_generated_scorers(state: SessionState, scorers: list[dict]) -> int:
+    """Write each scorer dict as a `.py` file under scorers/generated/<scope>/.
+
+    Returns the number of files written. Best-effort — IO failures log a
+    warning and return whatever count succeeded; never raises (we don't
+    want a permission error to break the user-facing /generate-scorers
+    endpoint, since the DB persistence already happened by the time this
+    runs).
+    """
+    if not scorers:
+        return 0
+    scope = _scope_for_scorer_export(state)
+    target_dir = _GENERATED_SCORERS_DIR / scope
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.warning(f"scorer file export: mkdir {target_dir} failed: {e}")
+        return 0
+
+    # Lazy import to match the rest of this module's datetime usage pattern.
+    from datetime import datetime, timezone
+    written = 0
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for scorer in scorers:
+        name = scorer.get("name") or ""
+        code = scorer.get("code") or ""
+        if not name or not code:
+            continue
+        # Same conservative slug rules as the directory — names come from
+        # the LLM and we don't want a bad one breaking the filesystem.
+        filename = _slugify_scope(name) + ".py"
+        path = target_dir / filename
+        # Deterministic header that traces back to the session that produced
+        # the file — matters when a CI step asks "where did this come from".
+        header = (
+            f'"""\n{scorer.get("description") or "(no description)"}\n\n'
+            f'Generated by North Star.\n'
+            f'session_id: {state.session_id or "unknown"}\n'
+            f'scope: {scope}\n'
+            f'type: {scorer.get("type") or "unknown"}\n'
+            f'generated_at: {timestamp}\n'
+            f'"""\n\n'
+        )
+        try:
+            path.write_text(header + code.lstrip() + "\n")
+            written += 1
+        except OSError as e:
+            logger.warning(f"scorer file export: write {path} failed: {e}")
+            continue
+    return written
+
+
 @app.post("/sessions/{session_id}/generate-scorers")
 async def generate_scorers_endpoint(session_id: str):
-    """Generate evaluation scorers from charter via LLM."""
+    """Generate evaluation scorers from charter via LLM.
+
+    Writes each generated scorer to ``backend/app/scorers/generated/<scope>/``
+    as a side effect — gives downstream CI / `braintrust push` a canonical
+    file to read, lets the scorers be diffed in PRs when they regenerate.
+    The DB row remains the operational source of truth; the file mirror is
+    the versioned one. File-write failures don't block the response.
+    """
     state, conversation = await _load_state(session_id)
     charter = state.charter.model_dump()
     scorers, call_meta = await call_generate_scorers(charter)
@@ -950,7 +1172,8 @@ async def generate_scorers_endpoint(session_id: str):
         llm_calls=call_meta,
         parsed_output={"scorers": scorers},
     )
-    return {"scorers": scorers}
+    files_written = _export_generated_scorers(state, scorers)
+    return {"scorers": scorers, "files_written": files_written}
 
 
 @app.delete("/sessions/{session_id}")
@@ -1755,19 +1978,6 @@ async def refresh_dataset_from_turns(dataset_id: str):
         exclude_session_id=dataset["session_id"],
     )
 
-    def _bucket_for_generate(snap: dict) -> str:
-        has_goals = bool((snap.get("business_goals") or "").strip())
-        has_stories = bool((snap.get("user_stories") or "").strip())
-        if has_goals and has_stories:
-            return "goals+stories"
-        if has_goals:
-            return "goals_only"
-        if has_stories:
-            return "stories_only"
-        return "empty_input"
-
-    bucket_fn = _bucket_for_generate if state.prompt_target == "generate" else (lambda s: state.prompt_target)
-
     new_rows: list[dict] = []
     seen_in_batch: set[str] = set()
     for t in sampled:
@@ -1787,7 +1997,7 @@ async def refresh_dataset_from_turns(dataset_id: str):
                 historical = parsed[:4000]
 
         new_rows.append({
-            "feature_area": bucket_fn(snap),
+            "feature_area": _bucket_for_prompt_target(state.prompt_target, snap),
             "input": input_str,
             "expected_output": historical,
             # "new" tag lets the UI badge these rows; the user can clear it
