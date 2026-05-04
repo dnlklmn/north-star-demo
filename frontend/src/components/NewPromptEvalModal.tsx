@@ -14,11 +14,12 @@ interface NewPromptEvalModalProps {
 }
 
 /**
- * Create a prompt-eval session. The user sees the prompt text under
- * evaluation pre-filled in a textarea — they can review or tweak before
- * hitting Create. Tweaking changes what the seed pass extracts (goals/users/
- * stories/charter) but not what runs at eval time; that's the registered
- * prompt builder, identified by `target`.
+ * Create a prompt-eval session. The user picks which North Star prompt to
+ * evaluate from a dropdown of registered targets, then sees the prompt text
+ * pre-filled in a textarea — they can review or tweak before hitting Create.
+ * Tweaking changes what the seed pass extracts (goals/users/stories/charter)
+ * but not what runs at eval time; that's the registered prompt builder,
+ * identified by `target`.
  */
 export default function NewPromptEvalModal({
   isOpen,
@@ -27,6 +28,7 @@ export default function NewPromptEvalModal({
   onCreate,
 }: NewPromptEvalModalProps) {
   const [targets, setTargets] = useState<PromptTargetInfo[]>([])
+  const [targetId, setTargetId] = useState<string>('')
   const [body, setBody] = useState<string>('')
   const [sampleSize, setSampleSize] = useState<number>(30)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -35,15 +37,30 @@ export default function NewPromptEvalModal({
     if (!isOpen) return
     setLoadError(null)
     setBody('')
+    setTargetId('')
     listPromptTargets()
       .then((list) => {
         setTargets(list)
-        if (list[0]?.prompt_text) {
-          setBody(list[0].prompt_text)
+        // Default to skill_seed when present — that's the prompt project most
+        // closely aligned with the SKILL.md flow people land here from. Falls
+        // back to the first registered target otherwise.
+        const preferred = list.find((t) => t.target === 'skill_seed') ?? list[0]
+        if (preferred) {
+          setTargetId(preferred.target)
+          if (preferred.prompt_text) setBody(preferred.prompt_text)
         }
       })
       .catch((err) => setLoadError(err instanceof Error ? err.message : 'Failed to load'))
   }, [isOpen])
+
+  const target = targets.find((t) => t.target === targetId)
+
+  // When the user picks a different target, reset the body to that target's
+  // rendered prompt so they don't accidentally seed prompt A's body into
+  // prompt B's eval.
+  useEffect(() => {
+    if (target?.prompt_text) setBody(target.prompt_text)
+  }, [targetId, target?.prompt_text])
 
   useEffect(() => {
     if (!isOpen) return
@@ -51,17 +68,15 @@ export default function NewPromptEvalModal({
       if (e.key === 'Escape') onClose()
       else if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
         e.preventDefault()
-        const target = targets[0]?.target
-        if (target && body.trim()) onCreate(target, sampleSize, body)
+        if (target && body.trim()) onCreate(target.target, sampleSize, body)
       }
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [isOpen, onClose, onCreate, targets, sampleSize, body])
+  }, [isOpen, onClose, onCreate, target, sampleSize, body])
 
   if (!isOpen) return null
 
-  const target = targets[0]
   const canSubmit = !!target && body.trim().length > 0 && !isLoading
 
   return (
@@ -80,14 +95,31 @@ export default function NewPromptEvalModal({
           chosen prompt is re-run on each, and reference-free scorers grade the output.
         </p>
 
+        <label className="text-xs uppercase tracking-wide text-muted-foreground mb-1">
+          Prompt under test
+        </label>
+        <select
+          value={targetId}
+          onChange={(e) => setTargetId(e.target.value)}
+          className="w-full p-3 text-sm bg-background border border-border focus:outline-none focus:ring-1 focus:ring-accent text-foreground mb-2"
+          disabled={!targets.length}
+        >
+          {targets.map((t) => (
+            <option key={t.target} value={t.target}>
+              {t.label}
+            </option>
+          ))}
+        </select>
         {target && (
-          <div className="text-xs text-muted-foreground mb-2 flex items-center gap-2 flex-wrap">
-            <span className="text-foreground font-medium">{target.label}</span>
+          <div className="text-xs text-muted-foreground mb-4 flex items-center gap-2 flex-wrap">
             {target.builder_name && (
               <code className="font-mono">{target.builder_name}</code>
             )}
             {target.source_path && (
               <span className="text-muted-foreground/70">· {target.source_path}</span>
+            )}
+            {target.description && (
+              <span className="text-muted-foreground/70 w-full mt-1">{target.description}</span>
             )}
           </div>
         )}

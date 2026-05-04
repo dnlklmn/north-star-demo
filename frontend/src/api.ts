@@ -185,6 +185,30 @@ export async function generateScorers(sessionId: string): Promise<{ scorers: Sco
   return res.json()
 }
 
+/** Returns the Mustache-templated prompt body for a single scorer, ready to
+ *  paste into Braintrust's online-scorer editor. Includes the trigger
+ *  filter expression for prompt-eval projects (skill-eval projects have no
+ *  natural live filter; `filter` comes back null and the user picks one). */
+export async function getBraintrustScorerPrompt(
+  sessionId: string,
+  scorerName: string,
+): Promise<{ name: string; prompt: string; filter: string | null }> {
+  const res = await apiFetch(
+    `${BASE}/sessions/${sessionId}/scorers/${encodeURIComponent(scorerName)}/braintrust-prompt`,
+  )
+  if (!res.ok) {
+    let detail = `Failed to build Braintrust prompt (${res.status})`
+    try {
+      const j = await res.json()
+      if (j?.detail) detail = j.detail
+    } catch {
+      /* fallthrough */
+    }
+    throw new Error(detail)
+  }
+  return res.json()
+}
+
 // --- Project / Session management ---
 
 export async function listSessions(): Promise<{ sessions: ProjectSummary[] }> {

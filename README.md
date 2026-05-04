@@ -451,6 +451,7 @@ Code seams:
 | `charter_quality` | Sonnet | `turn_type = "generate_draft"` | every trace |
 | `goal_extraction_quality` | Haiku | `turn_type = "discovery"` AND `phase = "goals"` | every trace |
 | `conversation_quality` | Haiku | `turn_type = "discovery"` AND `phase IN ("goals","users","stories")` | 1 in 5 |
+| `skill_seed_quality` | Sonnet | `turn_type = "skill_seed"` | every trace |
 
 ### Iterating on a scorer
 
@@ -467,6 +468,21 @@ echo '{"input": "...", "output": "..."}' | \
 ```
 
 The prompts live in code so changes go through normal review. The Braintrust UI references these prompts manually for now — the [doc on automated push](backend/app/online_scorers.py) is a future hook once Braintrust's online-scorer API stabilises.
+
+### Publishing a project's generated scorers to Braintrust
+
+When you run `/generate-scorers` on a North Star project (skill-eval or prompt-eval), the LLM emits Python scorers stored on `state.scorers`. Each one is also written as both a `.py` (for offline evals) and a `.md` (for Braintrust online scorers) under `backend/app/scorers/generated/<scope>/`. The `.md` form is what you paste into the Braintrust UI.
+
+For projects generated **before** this bridge existed — or when you want to re-emit after editing the generation prompt — backfill with:
+
+```bash
+python -m backend.app.online_scorers publish <session_id>
+
+# or only a subset by name:
+python -m backend.app.online_scorers publish <session_id> alignment_positive_vs_offtarget_separation,coverage_wellformed_complete_sections,safety_no_prompt_injection_echo
+```
+
+The CLI prints the trace filter to use when attaching each scorer in the Braintrust UI (for prompt-eval projects this is `metadata.turn_type = "<prompt_target>"` — e.g. `metadata.turn_type = "skill_seed"`).
 
 ---
 

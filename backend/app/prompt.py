@@ -1468,8 +1468,22 @@ Return ONLY valid JSON:
 
 # --- Scorer generation prompts ---
 
-def build_generate_scorers_prompt(charter: dict) -> str:
-    """Build prompt for generating evaluation scorers from charter."""
+def build_generate_scorers_prompt(charter: dict, agent_contract: str | None = None) -> str:
+    """Build prompt for generating evaluation scorers from charter.
+
+    ``agent_contract`` is the system-prompt / SKILL.md / prompt-template that
+    the system being scored operates under. Pass it when known so the LLM can
+    align scorer pass criteria with what the system is *actually told to do*
+    — e.g. if the contract says "infer goals from context", a scorer that
+    requires literal preservation will always fail. Without this signal the
+    LLM has to guess from the charter alone, and the failure mode that
+    surfaces is overly strict scorers that the agent can never satisfy.
+
+    For prompt-eval projects this is ``PROMPT_TARGETS[prompt_target].prompt_text``.
+    For skill-eval (triggered) projects this is the user's SKILL.md body.
+    For skill-eval (chat) projects there is no separate agent prompt — the
+    charter is the only contract — pass None and the section is omitted.
+    """
     task = charter.get("task", {})
     coverage = charter.get("coverage", {}).get("criteria", [])
     balance = charter.get("balance", {}).get("criteria", [])
@@ -1489,9 +1503,42 @@ def build_generate_scorers_prompt(charter: dict) -> str:
 
 """
 
+    # Cap at ~8000 chars so the contract never crowds out the charter or
+    # instructions in the LLM's context window. Same convention used by
+    # build_skill_seed_prompt for the same reason. We truncate from the end
+    # rather than the middle because the head of an agent contract typically
+    # carries the role description + key constraints, while the tail is
+    # often examples or schema — losing examples is cheaper than losing
+    # the contract's framing.
+    contract_section = ""
+    if agent_contract and agent_contract.strip():
+        snippet = agent_contract.strip()
+        if len(snippet) > 8000:
+            snippet = snippet[:8000] + "\n\n[…contract truncated for context budget…]"
+        # Use a 5-backtick fence so any nested ``` (extremely common in
+        # SKILL.md content — pasted code blocks, examples, etc.) doesn't
+        # close the contract block early and bleed into the directive that
+        # follows. Markdown-aware models read the longer fence as the
+        # outer delimiter without confusion.
+        contract_section = f"""## What the system under evaluation is told to do
+
+The scorers you generate will grade outputs from a specific system. Below is the contract that system operates under — its prompt template / SKILL.md verbatim. **Your scorer pass criteria must not require behavior the contract explicitly disallows, and must not forbid behavior the contract explicitly requires.**
+
+Concretely:
+- When the contract says "infer X from context" or "extract 2-4 of Y" → grade quality of inference (grounded, well-shaped, distinct), NOT literal preservation from the input.
+- When the contract says "extract verbatim" or "preserve original wording" → grade fidelity to the source.
+- When the contract says "do not invent scope" or "stay within the skill's purpose" → that becomes a real failure mode worth scoring; out-of-scope additions should fail the relevant alignment scorer.
+- If the charter and the contract disagree (charter requires what the contract forbids, or vice versa), the contract wins — write the scorer to grade what the system is actually told to produce.
+
+`````
+{snippet}
+`````
+
+"""
+
     return f"""Generate Python evaluation scorer functions from this charter. Each scorer should be a complete, working function that uses an LLM-as-judge pattern.
 
-{task_context}## Charter
+{contract_section}{task_context}## Charter
 
 ### Coverage criteria (input scenarios):
 {json.dumps(coverage, indent=2)}

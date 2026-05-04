@@ -1098,13 +1098,19 @@ def _scope_for_scorer_export(state: SessionState) -> str:
 
 
 def _export_generated_scorers(state: SessionState, scorers: list[dict]) -> int:
-    """Write each scorer dict as a `.py` file under scorers/generated/<scope>/.
+    """Write each scorer dict as both a `.py` and a `.md` file under
+    scorers/generated/<scope>/.
 
-    Returns the number of files written. Best-effort — IO failures log a
-    warning and return whatever count succeeded; never raises (we don't
-    want a permission error to break the user-facing /generate-scorers
-    endpoint, since the DB persistence already happened by the time this
-    runs).
+    Two artifacts per scorer:
+      * `.py` — the LLM-emitted Python function used by offline evals (the
+        `evals/run_eval.py` harness execs these with a `call_judge` helper).
+      * `.md` — the same judge prompt converted to Braintrust online-scorer
+        format (Mustache placeholders, YAML frontmatter). Picked up by
+        `online_scorers.list_scorers()` so the user can paste the body into
+        Braintrust UI and attach as an autoeval scorer on production traces.
+
+    Returns the number of `.py` files written. Best-effort on both formats —
+    IO failures log a warning, never raise.
     """
     if not scorers:
         return 0
@@ -1118,8 +1124,16 @@ def _export_generated_scorers(state: SessionState, scorers: list[dict]) -> int:
 
     # Lazy import to match the rest of this module's datetime usage pattern.
     from datetime import datetime, timezone
+    from .scorer_publish import scorer_to_online_md, ScorerPublishError
     written = 0
     timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # turn_type for the Braintrust filter: prompt-eval scorers grade the
+    # output of the prompt under test, so they fire on that target's spans.
+    # Skill-eval scorers score the eval task itself — no good live trace
+    # filter, so we leave turn_type empty and the user adds one manually.
+    turn_type_for_filter = (
+        state.prompt_target if state.kind == SessionKind.prompt else None
+    )
     for scorer in scorers:
         name = scorer.get("name") or ""
         code = scorer.get("code") or ""
@@ -1146,7 +1160,51 @@ def _export_generated_scorers(state: SessionState, scorers: list[dict]) -> int:
         except OSError as e:
             logger.warning(f"scorer file export: write {path} failed: {e}")
             continue
+
+        # Mirror as a Braintrust online-scorer .md. Failures here don't undo
+        # the .py write — offline evals still work without the .md.
+        md_path = target_dir / (_slugify_scope(name) + ".md")
+        try:
+            md_text = scorer_to_online_md(
+                scorer,
+                turn_type=turn_type_for_filter,
+                session_id=state.session_id,
+                scope=scope,
+                generated_at=timestamp,
+            )
+            md_path.write_text(md_text)
+        except ScorerPublishError as e:
+            logger.warning(f"scorer .md export: {name} skipped — {e}")
+        except OSError as e:
+            logger.warning(f"scorer .md export: write {md_path} failed: {e}")
     return written
+
+
+def _agent_contract_for_session(state: SessionState) -> str | None:
+    """Resolve the system-prompt / SKILL.md the scorers are grading outputs of.
+
+    Three branches, all derived from session state, no graceful-fallback
+    invention — by the time scorer generation runs, the user has either:
+
+      * created a prompt-eval project (prompt_target set at creation),
+      * seeded a triggered skill-eval project from a SKILL.md (skill_body
+        set at seeding time, gates the rest of the workspace),
+      * walked through chat/discovery — in which case there is no separate
+        agent prompt at all and the charter IS the contract. We return None
+        and the scorer-generation prompt omits the section, falling back to
+        the historic charter-only behavior for that one mode.
+
+    Branches are dispatched on ``state.kind`` exclusively, not on the
+    presence of skill_body — prompt-eval sessions seed a synthetic
+    skill_body containing the rendered prompt template, and confusing that
+    with a user's actual SKILL.md would silently corrupt the contract.
+    """
+    if state.kind == SessionKind.prompt:
+        target = get_prompt_target(state.prompt_target) if state.prompt_target else None
+        return target.prompt_text if target else None
+    if state.kind == SessionKind.skill and state.charter.task.skill_body:
+        return state.charter.task.skill_body
+    return None
 
 
 @app.post("/sessions/{session_id}/generate-scorers")
@@ -1158,10 +1216,15 @@ async def generate_scorers_endpoint(session_id: str):
     file to read, lets the scorers be diffed in PRs when they regenerate.
     The DB row remains the operational source of truth; the file mirror is
     the versioned one. File-write failures don't block the response.
+
+    The agent contract (the prompt / SKILL.md the scorers will grade outputs
+    of) is passed alongside the charter so the LLM doesn't fabricate criteria
+    the agent can't satisfy — see build_generate_scorers_prompt's docstring.
     """
     state, conversation = await _load_state(session_id)
     charter = state.charter.model_dump()
-    scorers, call_meta = await call_generate_scorers(charter)
+    agent_contract = _agent_contract_for_session(state)
+    scorers, call_meta = await call_generate_scorers(charter, agent_contract=agent_contract)
     state.scorers = scorers
     _stamp_lineage(state, "scorers")
     await _save_state(session_id, state, conversation)
@@ -1174,6 +1237,52 @@ async def generate_scorers_endpoint(session_id: str):
     )
     files_written = _export_generated_scorers(state, scorers)
     return {"scorers": scorers, "files_written": files_written}
+
+
+@app.get("/sessions/{session_id}/scorers/{scorer_name}/braintrust-prompt")
+async def get_braintrust_prompt(session_id: str, scorer_name: str):
+    """Return the Mustache-templated prompt body for one generated scorer.
+
+    Powers the "Export to Braintrust" button in the Scorers panel — the
+    button writes the response body to the clipboard so the user can paste
+    it directly into Braintrust's online-scorer editor without leaving the
+    browser. Same conversion path as ``_export_generated_scorers`` and the
+    ``online_scorers.py publish`` CLI, so all three stay consistent.
+    """
+    state, _ = await _load_state(session_id)
+    # scorer_name is used only as a dict-key lookup against state.scorers —
+    # never touched the filesystem here, so path traversal isn't a risk.
+    # If a future refactor uses it for file IO, slugify via _slugify_scope
+    # before that point.
+    scorers = state.scorers or []
+    scorer = next((s for s in scorers if s.get("name") == scorer_name), None)
+    if scorer is None:
+        raise HTTPException(status_code=404, detail=f"No scorer named '{scorer_name}' on session {session_id}")
+
+    from .scorer_publish import scorer_to_online_md, ScorerPublishError
+    turn_type = state.prompt_target if state.kind == SessionKind.prompt else None
+    try:
+        body = scorer_to_online_md(
+            scorer,
+            turn_type=turn_type,
+            session_id=state.session_id,
+            scope=_scope_for_scorer_export(state),
+        )
+    except ScorerPublishError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Cannot convert scorer to Braintrust format: {e}",
+        )
+    # Filter expression the user pastes into the Braintrust UI's trigger
+    # field. None for skill-eval projects (no live trace turn_type to filter on).
+    filter_expression = (
+        f'metadata.turn_type = "{turn_type}"' if turn_type else None
+    )
+    return {
+        "name": scorer_name,
+        "prompt": body,
+        "filter": filter_expression,
+    }
 
 
 @app.delete("/sessions/{session_id}")
