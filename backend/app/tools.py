@@ -1043,10 +1043,19 @@ async def call_gap_analysis(charter: dict, dataset_stats: dict, examples: list[d
 # --- Scorer generation tools ---
 
 @traced("generate_scorers")
-async def call_generate_scorers(charter: dict) -> tuple[list[dict], list[dict]]:
-    """Generate evaluation scorers from charter. Returns (scorers, call metadata list)."""
+async def call_generate_scorers(
+    charter: dict,
+    agent_contract: str | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """Generate evaluation scorers from charter. Returns (scorers, call metadata list).
+
+    ``agent_contract`` is the verbatim prompt / SKILL.md the system being
+    scored operates under. See build_generate_scorers_prompt for why this
+    matters — without it, scorers can be written with criteria the agent
+    can never satisfy because the LLM has to guess what the agent does.
+    """
     await _refresh_settings()
-    prompt = build_generate_scorers_prompt(charter)
+    prompt = build_generate_scorers_prompt(charter, agent_contract=agent_contract)
     text, meta = _call_llm(prompt, max_tokens=8192)
     data = _extract_json(text)
     return data.get("scorers", []), [meta]

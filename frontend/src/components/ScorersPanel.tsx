@@ -1,7 +1,7 @@
 import { useState } from 'react'
-import { Sparkles, ChevronRight, Copy, Download, Loader2, ArrowRight } from 'lucide-react'
+import { Sparkles, ChevronRight, Copy, Download, Loader2, ArrowRight, Check, Upload } from 'lucide-react'
 import type { Charter, ScorerDef } from '../types'
-import { generateScorers } from '../api'
+import { generateScorers, getBraintrustScorerPrompt } from '../api'
 import { AIIcon } from './ui/Icons'
 
 interface Props {
@@ -28,6 +28,11 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
   const generating = generatingLocal || !!externalGenerating
   const [expandedScorer, setExpandedScorer] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Per-scorer ephemeral state for the Braintrust export button. The success
+  // tick decays after a short delay so the button reverts to its idle label,
+  // matching how the Copy button behaves elsewhere in the app.
+  const [exportingName, setExportingName] = useState<string | null>(null)
+  const [exportedName, setExportedName] = useState<string | null>(null)
 
   const hasCriteria = charter.coverage.criteria.length > 0
     || charter.balance.criteria.length > 0
@@ -57,6 +62,31 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
 
   const handleCopy = (code: string) => {
     navigator.clipboard.writeText(code)
+  }
+
+  /** Fetch the Mustache-templated prompt for one scorer and copy it to the
+   *  clipboard. The user pastes it into Braintrust's online-scorer editor.
+   *  Filter expression is included as a trailing hint comment so it travels
+   *  with the prompt — the user reads it once when configuring the trigger
+   *  in the Braintrust UI, then strips it. */
+  const handleExportToBraintrust = async (scorerName: string) => {
+    setExportingName(scorerName)
+    setError(null)
+    try {
+      const result = await getBraintrustScorerPrompt(sessionId, scorerName)
+      const clipboardText = result.filter
+        ? `${result.prompt}\n<!-- Braintrust trigger filter: ${result.filter} -->\n`
+        : result.prompt
+      await navigator.clipboard.writeText(clipboardText)
+      setExportedName(scorerName)
+      window.setTimeout(() => {
+        setExportedName((current) => (current === scorerName ? null : current))
+      }, 2000)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to build Braintrust prompt')
+    } finally {
+      setExportingName(null)
+    }
   }
 
   const handleDownloadAll = () => {
@@ -173,24 +203,56 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
           <div className="max-w-2xl space-y-2">
             {scorers.map(scorer => (
               <div key={scorer.name} className="border border-border bg-surface-raised">
-                <button
-                  onClick={() => setExpandedScorer(expandedScorer === scorer.name ? null : scorer.name)}
-                  className="w-full flex items-center justify-between p-3 hover:bg-muted/50 transition-colors"
-                >
-                  <div className="flex items-center gap-2">
+                {/* Row layout uses flex of three siblings instead of one big
+                    button containing two more — nested <button>s are invalid
+                    HTML and React 19 flags them as hydration errors. The
+                    chevron + name area is the toggle (a <button>); the
+                    Braintrust + Copy actions live alongside as their own
+                    real <button>s. */}
+                <div className="flex items-stretch">
+                  <button
+                    type="button"
+                    onClick={() => setExpandedScorer(expandedScorer === scorer.name ? null : scorer.name)}
+                    className="flex-1 flex items-center gap-2 p-3 hover:bg-muted/50 transition-colors text-left"
+                  >
                     <ChevronRight className={`w-3.5 h-3.5 text-muted-foreground transition-transform ${expandedScorer === scorer.name ? 'rotate-90' : ''}`} />
                     <code className="text-sm font-medium text-foreground">{scorer.name}</code>
                     <span className={`text-[10px] px-1.5 py-0.5 border ${typeColors[scorer.type]}`}>
                       {scorer.type}
                     </span>
-                  </div>
-                  <button
-                    onClick={e => { e.stopPropagation(); handleCopy(scorer.code) }}
-                    className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
-                  >
-                    <Copy className="w-3 h-3" />
                   </button>
-                </button>
+                  <div className="flex items-center gap-2 px-3">
+                    <button
+                      type="button"
+                      onClick={() => handleExportToBraintrust(scorer.name)}
+                      disabled={exportingName === scorer.name}
+                      title="Copy Braintrust online-scorer prompt to clipboard"
+                      className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 disabled:opacity-50 disabled:cursor-wait"
+                    >
+                      {exportingName === scorer.name ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : exportedName === scorer.name ? (
+                        <>
+                          <Check className="w-3 h-3 text-emerald-400" />
+                          <span className="text-emerald-400">Copied</span>
+                        </>
+                      ) : (
+                        <>
+                          <Upload className="w-3 h-3" />
+                          <span>Braintrust</span>
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleCopy(scorer.code)}
+                      title="Copy Python scorer code"
+                      className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
+                    >
+                      <Copy className="w-3 h-3" />
+                    </button>
+                  </div>
+                </div>
                 {expandedScorer === scorer.name && (
                   <div className="px-3 pb-3">
                     <p className="text-xs text-muted-foreground mb-2">{scorer.description}</p>

@@ -15,7 +15,8 @@ Braintrust UI is where you attach trigger filters (e.g. ``turn_type =
 
 CLI usage:
 
-    # List all scorers + their config
+    # List all scorers + their config (includes generated scorers under
+    # scorers/generated/<scope>/ once they've been published).
     python -m backend.app.online_scorers list
 
     # Print the full prompt body for one scorer (copy/paste into Braintrust UI)
@@ -25,6 +26,13 @@ CLI usage:
     # useful for iterating on prompt text before pushing.
     echo '{"input": "...", "output": "..."}' | \\
         python -m backend.app.online_scorers test charter_quality
+
+    # Convert a project's generated scorers (state.scorers in the DB) into
+    # Braintrust online-scorer .md files. New /generate-scorers calls do this
+    # automatically; use this command to backfill older sessions or to
+    # publish a subset of an existing project's scorers.
+    python -m backend.app.online_scorers publish <session_id>
+    python -m backend.app.online_scorers publish <session_id> name1,name2,name3
 """
 
 from __future__ import annotations
@@ -159,11 +167,25 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
 
 
 def list_scorers() -> list[ScorerSpec]:
-    """Discover all scorer .md files in the scorers/ directory."""
+    """Discover all scorer .md files in the scorers/ directory.
+
+    Picks up two layers:
+      * ``scorers/*.md`` — hand-curated scorers (charter quality, etc.)
+      * ``scorers/generated/<scope>/*.md`` — emitted by /generate-scorers,
+        one per project that has run scorer generation. Letting these
+        appear in the same list means ``online_scorers.py list`` shows
+        everything attachable in Braintrust without a separate command.
+    """
     if not SCORERS_DIR.exists():
         return []
     scorers: list[ScorerSpec] = []
-    for path in sorted(SCORERS_DIR.glob("*.md")):
+    paths: list[Path] = list(SCORERS_DIR.glob("*.md"))
+    paths += list(SCORERS_DIR.glob("generated/*/*.md"))
+    for path in sorted(paths):
+        # The README.md in generated/ is human docs, not a scorer prompt.
+        # Skip it explicitly; everything else with frontmatter parses fine.
+        if path.parent == SCORERS_DIR / "generated" and path.name == "README.md":
+            continue
         text = path.read_text()
         fm, body = _parse_frontmatter(text)
         name = fm.get("name") or path.stem
@@ -238,6 +260,99 @@ def _print_show(name: str) -> None:
     print(spec.body)
 
 
+def _publish_session(session_id: str, names_filter: list[str] | None = None) -> None:
+    """Retroactively export a session's generated scorers as Braintrust
+    online-scorer .md files.
+
+    Reads ``state.scorers`` from the database for ``session_id`` and writes
+    one ``.md`` per scorer under ``scorers/generated/<scope>/``. Existing
+    files are overwritten. Used to backfill projects that ran
+    /generate-scorers before the bridge existed (and to re-emit after
+    iterating on the prompt template).
+
+    ``names_filter`` is an optional allow-list — pass when you only want a
+    subset of the scorers published (e.g. the 3 you actually plan to attach
+    in Braintrust UI).
+    """
+    import asyncio
+    from .scorer_publish import scorer_to_online_md, ScorerPublishError
+
+    async def _load():
+        # Local import: db pulls in asyncpg at module load and we don't want
+        # other CLI commands (list / show / test) to require a live DB.
+        from . import db  # type: ignore
+        database_url = os.environ.get("DATABASE_URL", "postgresql://localhost:5432/northstar")
+        await db.init_db(database_url)
+        return await db.get_session(session_id)
+
+    try:
+        record = asyncio.run(_load())
+    except Exception as e:
+        raise SystemExit(f"Failed to load session {session_id}: {e}")
+    if not record:
+        raise SystemExit(f"No session found with id {session_id}")
+
+    state_dict = record.get("state") or {}
+    scorers = state_dict.get("scorers") or []
+    if not scorers:
+        raise SystemExit(f"Session {session_id} has no generated scorers — run /generate-scorers first.")
+
+    # Scope mirrors what the live export uses, so re-runs of the live path
+    # and this CLI write to the same directory.
+    kind = state_dict.get("kind")
+    prompt_target = state_dict.get("prompt_target")
+    if kind == "prompt" and prompt_target:
+        scope = prompt_target
+        turn_type = prompt_target
+    else:
+        scope = f"skill__{(state_dict.get('session_id') or session_id)[:8]}"
+        turn_type = None
+    # Defensive slug — keep names matching what main._slugify_scope produces.
+    scope_clean = "".join(c if (c.isalnum() or c in "-_") else "_" for c in scope).strip("_")[:60]
+
+    target_dir = SCORERS_DIR / "generated" / (scope_clean or "unscoped")
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    from datetime import datetime, timezone
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    written = 0
+    skipped: list[tuple[str, str]] = []
+    name_set = set(names_filter) if names_filter else None
+    for scorer in scorers:
+        name = scorer.get("name") or ""
+        if not name:
+            continue
+        if name_set is not None and name not in name_set:
+            continue
+        slug = "".join(c if (c.isalnum() or c in "-_") else "_" for c in name).strip("_")[:60]
+        path = target_dir / (slug + ".md")
+        try:
+            md_text = scorer_to_online_md(
+                scorer,
+                turn_type=turn_type,
+                session_id=session_id,
+                scope=scope_clean,
+                generated_at=timestamp,
+            )
+        except ScorerPublishError as e:
+            skipped.append((name, str(e)))
+            continue
+        path.write_text(md_text)
+        written += 1
+        print(f"wrote {path.relative_to(SCORERS_DIR.parent.parent)}")
+
+    print(f"\nDone — {written} scorer(s) published to {target_dir}.")
+    if skipped:
+        print(f"\nSkipped {len(skipped)}:")
+        for name, reason in skipped:
+            print(f"  - {name}: {reason}")
+    if turn_type:
+        print(f"\nBraintrust UI: attach with filter `metadata.turn_type = \"{turn_type}\"`.")
+    else:
+        print("\nBraintrust UI: this is a skill-eval session (no live trace turn_type) — set the filter manually based on which prompt you want scored.")
+
+
 def _run_test(name: str) -> None:
     spec = get_scorer(name)
     raw = sys.stdin.read().strip()
@@ -267,6 +382,15 @@ def _main() -> None:
         if len(args) < 2:
             raise SystemExit("usage: python -m backend.app.online_scorers test <name> < payload.json")
         _run_test(args[1])
+    elif cmd == "publish":
+        if len(args) < 2:
+            raise SystemExit(
+                "usage: python -m backend.app.online_scorers publish <session_id> [name1,name2,...]"
+            )
+        names = None
+        if len(args) >= 3 and args[2]:
+            names = [n.strip() for n in args[2].split(",") if n.strip()]
+        _publish_session(args[1], names_filter=names)
     else:
         raise SystemExit(f"unknown command: {cmd}")
 
