@@ -1,5 +1,24 @@
 export type AgentStatus = 'drafting' | 'validating' | 'questioning' | 'soft_ok' | 'review' | 'discovery'
 
+// --- Project sharing (sessions are projects in the URL/UX) ---
+
+export type ShareRole = 'owner' | 'editor' | 'viewer'
+
+export interface ShareTokenSummary {
+  id: string
+  role: 'viewer' | 'editor'
+  label: string | null
+  token_preview: string
+  created_at: string
+  revoked_at: string | null
+}
+
+export interface CreatedShareToken extends ShareTokenSummary {
+  /** Plaintext token — only set on the creation response. Subsequent list
+   *  fetches return only the preview. */
+  token: string
+}
+
 export type DimensionStatus = 'pending' | 'weak' | 'good'
 
 export type ValidationStatus = 'pass' | 'weak' | 'fail' | 'untested'
@@ -119,6 +138,11 @@ export interface SessionState {
   prompt_source_path?: string | null
   /** When kind=prompt: builder function name, e.g. "build_generate_draft_prompt". */
   prompt_builder_name?: string | null
+  /** Access level the current request was authorized at. The backend stamps
+   *  this on every GET /sessions/{id} response based on the X-Share-Token
+   *  header (or the absence of one → 'owner'). The frontend mirrors this
+   *  into the role pub/sub so panels can hide edit affordances for viewers. */
+  _access?: { role: ShareRole }
 }
 
 export interface ExtractedStory {

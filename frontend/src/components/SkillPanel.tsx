@@ -53,6 +53,9 @@ interface Props {
   onStartFromScratch?: () => void
   /** Called when the user clicks "Go to business goals" or presses Cmd+Enter. */
   onNext?: () => void
+  /** Read-only when false: Analyze / Save / Promote / Discard / Start-from-
+   *  scratch all hide. Body textarea becomes read-only. Defaults to true. */
+  canEdit?: boolean
 }
 
 /**
@@ -83,6 +86,7 @@ export default function SkillPanel({
   onSeeded,
   onStartFromScratch,
   onNext,
+  canEdit = true,
 }: Props) {
   const [draft, setDraft] = useState(skillBody)
   const [nameDraft, setNameDraft] = useState(skillName ?? '')
@@ -289,8 +293,9 @@ export default function SkillPanel({
               placeholder="auto-detected from frontmatter"
               value={nameDraft}
               onChange={(e) => setNameDraft(e.target.value)}
-              className="w-full px-3 py-2 border border-border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-accent"
-              disabled={working}
+              className="w-full px-3 py-2 border border-border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-60"
+              disabled={working || !canEdit}
+              readOnly={!canEdit}
             />
           </div>
           <div>
@@ -302,8 +307,9 @@ export default function SkillPanel({
               placeholder="the routing signal — auto-detected from frontmatter"
               value={descriptionDraft}
               onChange={(e) => setDescriptionDraft(e.target.value)}
-              className="w-full px-3 py-2 border border-border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-accent"
-              disabled={working}
+              className="w-full px-3 py-2 border border-border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-60"
+              disabled={working || !canEdit}
+              readOnly={!canEdit}
             />
           </div>
         </section>
@@ -323,7 +329,8 @@ export default function SkillPanel({
           }
           rows={24}
           className="w-full p-3 bg-background border border-border font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent"
-          disabled={working}
+          disabled={working || !canEdit}
+          readOnly={!canEdit}
         />
         {hasVersions && hasChanges && (
           <div className="mt-2">
@@ -344,7 +351,9 @@ export default function SkillPanel({
   // Floating footer — matches the pattern on Goals / Stories / Charter.
   // Analyze before first seed, Save as v{n} after edits. "Go to business
   // goals" shows after seeding so the user can jump to the next phase.
-  const footer = canAnalyze ? (
+  // Viewers see no footer (no write actions); Cmd+Enter Next is also disabled
+  // upstream because the navigation buttons drive panel switches.
+  const footer = !canEdit ? null : canAnalyze ? (
     <Button
       size="big"
       variant="primary"
@@ -406,9 +415,14 @@ export default function SkillPanel({
   ) : undefined
 
   // Show the fields in: (a) existing-version edits, (b) the Manual tab,
-  // (c) the GitHub tab AFTER a successful fetch. This keeps the GitHub tab
-  // minimal until the URL has been resolved.
-  const showFields = hasVersions || sourceMode === 'manual' || (sourceMode === 'github' && !!githubSource)
+  // (c) the GitHub tab AFTER a successful fetch, (d) viewers (canEdit=false)
+  // before any version exists — the source-mode tabs are hidden for them so
+  // they'd see an empty panel otherwise.
+  const showFields =
+    hasVersions ||
+    sourceMode === 'manual' ||
+    (sourceMode === 'github' && !!githubSource) ||
+    !canEdit
 
   return (
     <PanelLayout
@@ -447,8 +461,10 @@ export default function SkillPanel({
             </span>
           </div>
         )}
-        {/* Source tabs only before the first analyze. */}
-        {!isPromptEval && !hasVersions && (
+        {/* Source tabs only before the first analyze. Hidden for viewers —
+            they have no write actions, so seeding from GitHub or pasting a
+            new SKILL.md isn't actionable. */}
+        {!isPromptEval && !hasVersions && canEdit && (
           <section>
             <div className="flex items-stretch border-b border-border mb-3">
               <button
@@ -637,7 +653,7 @@ export default function SkillPanel({
                           <Eye className="w-3.5 h-3.5" />
                         </button>
                       )}
-                      {isCandidate && (
+                      {isCandidate && canEdit && (
                         <>
                           <button
                             onClick={handleDiscard}
@@ -655,7 +671,7 @@ export default function SkillPanel({
                           </button>
                         </>
                       )}
-                      {!isActive && !isCandidate && (
+                      {!isActive && !isCandidate && canEdit && (
                         <button
                           onClick={() => handleRestore(v)}
                           className="p-1 text-muted-foreground hover:text-foreground"
@@ -672,7 +688,7 @@ export default function SkillPanel({
           </section>
         )}
 
-        {!hasVersions && onStartFromScratch && (
+        {!hasVersions && onStartFromScratch && canEdit && (
           <div className="pt-6 border-t border-border flex items-center justify-center">
             <button
               type="button"

@@ -69,6 +69,9 @@ import ExampleReview from "../components/ExampleReview";
 import CoverageMap, { computeCoverageScore } from "../components/CoverageMap";
 import GenerateModal from "../components/examples/GenerateModal";
 import SettingsPanel from "../components/SettingsPanel";
+import ShareModal from "../components/ShareModal";
+import { useProjectEvents } from "../hooks/useProjectEvents";
+import { useShareToken } from "../hooks/useShareToken";
 
 type ActiveTab =
   | "skill"
@@ -217,6 +220,27 @@ export default function ProjectWorkspace() {
   const [gapAnalysis, setGapAnalysis] = useState<GapAnalysis | null>(null);
   const [showCoverageMap, setShowCoverageMap] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showShareModal, setShowShareModal] = useState(false);
+
+  // --- Sharing / access role ---
+  // role flips from 'owner' (no token) → 'editor'/'viewer' once a session
+  // fetch resolves the X-Share-Token header on the server.
+  const { role } = useShareToken(sessionId);
+  const canEdit = role !== "viewer";
+
+  // Inline banner for 403 (write attempt by viewer). The modal-style toast
+  // pattern would be over-engineering — a thin top-of-content message that
+  // auto-clears after a few seconds is plenty.
+  const [shareForbiddenMsg, setShareForbiddenMsg] = useState<string | null>(null);
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ message: string }>).detail;
+      setShareForbiddenMsg(detail?.message || "You have read-only access to this project.");
+      window.setTimeout(() => setShareForbiddenMsg(null), 5000);
+    };
+    window.addEventListener("northstar:share-forbidden", handler);
+    return () => window.removeEventListener("northstar:share-forbidden", handler);
+  }, []);
 
   // Coverage map status comes from the gap analysis. Compute once per
   // gapAnalysis change so the dataset toolbar dot stays in sync.
@@ -362,6 +386,27 @@ export default function ProjectWorkspace() {
     };
     hydrate();
   }, [urlSessionId, navigate]);
+
+  // --- Live updates: re-fetch session + dataset on SSE state_changed ---
+  // The hook subscribes to /sessions/:id/events and calls this on every push.
+  // We refetch session state (cheap, single request) and the dataset (only
+  // if one already exists locally — avoids 404 spam on fresh projects).
+  const handleLiveStateChange = useCallback(async () => {
+    if (!sessionId) return;
+    try {
+      const session = await getSession(sessionId);
+      setState(session.state as SessionState);
+    } catch (err) {
+      console.warn("Live refetch (session) failed:", err);
+    }
+    try {
+      const ds = await getDataset(sessionId);
+      setDataset(ds);
+    } catch {
+      // No dataset yet, or fetch failed — non-fatal.
+    }
+  }, [sessionId]);
+  useProjectEvents(sessionId, handleLiveStateChange);
 
   const status: AgentStatus = state.agent_status;
   const hasCharter = !!(
@@ -1746,6 +1791,15 @@ export default function ProjectWorkspace() {
           <StarIcon />
         </IconButton>
         <div className="flex items-center gap-3">
+          {role === "owner" && sessionId && (
+            <Button
+              size="small"
+              variant="neutral"
+              onClick={() => setShowShareModal(true)}
+            >
+              Share
+            </Button>
+          )}
           <Button
             size="small"
             variant="neutral"
@@ -1756,6 +1810,25 @@ export default function ProjectWorkspace() {
           </Button>
         </div>
       </header>
+
+      {/* Role banner — viewers see a read-only notice, editors see a heads-up
+          that they're acting via a shared link (so a stray click that doesn't
+          land doesn't feel mysterious). */}
+      {role === "viewer" && (
+        <div className="px-4 py-2 text-xs bg-fill-neutral border-b border-border-hint text-fg-dim">
+          You're viewing this project. Editing is disabled.
+        </div>
+      )}
+      {role === "editor" && (
+        <div className="px-4 py-2 text-xs bg-fill-neutral border-b border-border-hint text-fg-dim">
+          You have edit access via a shared link.
+        </div>
+      )}
+      {shareForbiddenMsg && (
+        <div className="px-4 py-2 text-xs bg-danger/10 border-b border-danger/30 text-danger">
+          {shareForbiddenMsg}
+        </div>
+      )}
 
       {/* Body: sidebar + main */}
       <div className="flex-1 flex min-h-0 gap-6">
@@ -1953,6 +2026,7 @@ export default function ProjectWorkspace() {
                 setActiveTab("goals");
               }}
               onNext={() => setActiveTab("goals")}
+              canEdit={canEdit}
             />
           )}
 
@@ -1977,6 +2051,7 @@ export default function ProjectWorkspace() {
               nextDisabled={goalsNextDisabled}
               rightBottom={showAssistant ? undefined : aiAssistButton}
               rightBottomExpanded={showAssistant ? polarisPanel : undefined}
+              canEdit={canEdit}
             />
             </>
           )}
@@ -2019,6 +2094,7 @@ export default function ProjectWorkspace() {
               loading={loading}
               rightBottom={showAssistant ? undefined : aiAssistButton}
               rightBottomExpanded={showAssistant ? polarisPanel : undefined}
+              canEdit={canEdit}
             />
             </>
           )}
@@ -2059,6 +2135,7 @@ export default function ProjectWorkspace() {
               scorersState={
                 scorers.length === 0 ? "missing" : scorersStale ? "stale" : "fresh"
               }
+              canEdit={canEdit}
             />
             </>
           )}
@@ -2088,6 +2165,7 @@ export default function ProjectWorkspace() {
                     revisionsLoading={revisionsLoading}
                     onRetagAgainstCharter={isPromptEval && hasCharter ? handleRetagAgainstCharter : undefined}
                     retagLoading={retagLoading}
+                    canEdit={canEdit}
                   />
                   {/* Once every example has been reviewed, surface the tri-state
                       scorers CTA — Generate / Regenerate / Go to — mirroring the
@@ -2196,6 +2274,7 @@ export default function ProjectWorkspace() {
                 }}
                 onNavigateToEvaluate={() => setActiveTab("evaluate")}
                 externalGenerating={generatingScorersShortcut || generatingBoth}
+                canEdit={canEdit}
               />
             </>
           )}
@@ -2300,6 +2379,16 @@ export default function ProjectWorkspace() {
 
       {/* Settings overlay */}
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
+
+      {/* Share overlay — owner-only; rendered unconditionally so its open
+          state can animate, gated on sessionId so the URL is stable. */}
+      {sessionId && (
+        <ShareModal
+          sessionId={sessionId}
+          open={showShareModal}
+          onClose={() => setShowShareModal(false)}
+        />
+      )}
     </div>
   );
 }

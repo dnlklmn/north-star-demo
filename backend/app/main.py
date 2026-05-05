@@ -27,19 +27,23 @@ import uuid
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import db
 from .agent import run_agent_turn, run_dataset_chat
 from .eval_runner import EvalResult, run_eval_sync
+from .sharing import Access, broadcaster, capacity, require_writer, resolve_access
 from .models import (
     AgentStatus,
     CreateDatasetRequest,
     CreateExampleRequest,
     CreateSessionRequest,
     CreateSessionResponse,
+    CreateShareTokenRequest,
+    CreateShareTokenResponse,
     CreateSkillVersionRequest,
     DetectedField,
     DetectSchemaRequest,
@@ -74,6 +78,7 @@ from .models import (
     SessionState,
     SessionKind,
     SetModeRequest,
+    ShareTokenSummary,
     Settings,
     SkillSeedRequest,
     SkillSeedResponse,
@@ -240,6 +245,8 @@ app.add_middleware(
         "X-Anthropic-Key",
         "X-Braintrust-Key",
         "X-Github-Token",
+        # Project-sharing tokens — viewers/editors send this on every call.
+        "X-Share-Token",
     ],
 )
 
@@ -526,8 +533,14 @@ async def list_sessions():
 
 
 @app.patch("/sessions/{session_id}/name")
-async def rename_session(session_id: str, body: dict):
-    """Rename a session."""
+async def rename_session(
+    session_id: str,
+    body: dict,
+    access: Access = Depends(resolve_access),
+):
+    """Rename a session. Owner-only — share-token bearers can't change
+    project metadata visible to all collaborators."""
+    _require_owner(access)
     name = body.get("name")
     if not name:
         raise HTTPException(status_code=400, detail="name is required")
@@ -539,8 +552,13 @@ async def rename_session(session_id: str, body: dict):
 
 
 @app.patch("/sessions/{session_id}/input")
-async def update_session_input(session_id: str, req: UpdateInputRequest):
+async def update_session_input(
+    session_id: str,
+    req: UpdateInputRequest,
+    access: Access = Depends(resolve_access),
+):
     """Save structured goals and story_groups without triggering the agent."""
+    require_writer(access)
     state, conversation = await _load_state(session_id)
 
     state.input.goals = req.goals
@@ -554,13 +572,21 @@ async def update_session_input(session_id: str, req: UpdateInputRequest):
 
 
 @app.patch("/sessions/{session_id}/mode")
-async def set_session_mode(session_id: str, req: SetModeRequest):
+async def set_session_mode(
+    session_id: str,
+    req: SetModeRequest,
+    access: Access = Depends(resolve_access),
+):
     """Set the eval mode for a session.
 
     - standard: existing flow, no routing decision modeled.
     - triggered: skill/tool/agent under evaluation — enables off-target stories,
       negative coverage, and should_trigger dataset labels.
+
+    Owner-only — eval_mode is project-shaping metadata; share-token bearers
+    (even editors) shouldn't be able to flip the mode on the project owner.
     """
+    _require_owner(access)
     state, conversation = await _load_state(session_id)
     state.eval_mode = req.eval_mode
     await _save_state(session_id, state, conversation)
@@ -568,12 +594,17 @@ async def set_session_mode(session_id: str, req: SetModeRequest):
 
 
 @app.post("/sessions/{session_id}/skill-seed", response_model=SkillSeedResponse)
-async def seed_from_skill(session_id: str, req: SkillSeedRequest):
+async def seed_from_skill(
+    session_id: str,
+    req: SkillSeedRequest,
+    access: Access = Depends(resolve_access),
+):
     """Seed goals/users/stories/task from a pasted SKILL.md body.
 
     Switches the session to triggered mode and populates extracted state. The
     user can review and edit before the charter is generated.
     """
+    require_writer(access)
     state, conversation = await _load_state(session_id)
 
     data, call_meta = await call_skill_seed(
@@ -1047,8 +1078,13 @@ async def refresh_prompt_eval_dataset(session_id: str, req: RefreshDatasetReques
 
 
 @app.patch("/sessions/{session_id}/scorers")
-async def update_session_scorers(session_id: str, body: dict):
+async def update_session_scorers(
+    session_id: str,
+    body: dict,
+    access: Access = Depends(resolve_access),
+):
     """Save generated scorers to session state."""
+    require_writer(access)
     state, conversation = await _load_state(session_id)
     state.scorers = body.get("scorers", [])
     try:
@@ -1208,7 +1244,10 @@ def _agent_contract_for_session(state: SessionState) -> str | None:
 
 
 @app.post("/sessions/{session_id}/generate-scorers")
-async def generate_scorers_endpoint(session_id: str):
+async def generate_scorers_endpoint(
+    session_id: str,
+    access: Access = Depends(resolve_access),
+):
     """Generate evaluation scorers from charter via LLM.
 
     Writes each generated scorer to ``backend/app/scorers/generated/<scope>/``
@@ -1221,6 +1260,7 @@ async def generate_scorers_endpoint(session_id: str):
     of) is passed alongside the charter so the LLM doesn't fabricate criteria
     the agent can't satisfy — see build_generate_scorers_prompt's docstring.
     """
+    require_writer(access)
     state, conversation = await _load_state(session_id)
     charter = state.charter.model_dump()
     agent_contract = _agent_contract_for_session(state)
@@ -1286,13 +1326,219 @@ async def get_braintrust_prompt(session_id: str, scorer_name: str):
 
 
 @app.delete("/sessions/{session_id}")
-async def delete_session(session_id: str):
-    """Delete a session and all associated data."""
+async def delete_session(session_id: str, access: Access = Depends(resolve_access)):
+    """Delete a session and all associated data. Owner-only — share-token
+    bearers (even editors) must not destroy the project they were invited to."""
+    _require_owner(access)
     try:
         await db.delete_session(session_id)
         return {"ok": True}
     except ValueError:
         raise HTTPException(status_code=404, detail="Session not found")
+
+
+# --- Share tokens (project sharing) ----------------------------------------
+#
+# Every project ("session") can hand out viewer/editor links via short-lived
+# share tokens. Owners — i.e. callers without an X-Share-Token / ?token= —
+# can mint, list, and revoke. Token bearers cannot manage tokens (would let
+# an editor escalate to permanent access by minting a fresh editor token
+# then revoking the original on a whim).
+
+def _require_owner(access: Access) -> None:
+    """Refuse the request if the caller authed via a share token.
+
+    Used by the token-management endpoints — only the owner gets to mint or
+    revoke. Token-bearing collaborators always 403 here, even editors.
+    """
+    if access.via_token:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the project owner can manage share tokens.",
+        )
+
+
+@app.post(
+    "/sessions/{session_id}/share-tokens",
+    response_model=CreateShareTokenResponse,
+)
+async def create_share_token_endpoint(
+    session_id: str,
+    req: CreateShareTokenRequest,
+    access: Access = Depends(resolve_access),
+):
+    """Mint a new viewer/editor token for this session.
+
+    The plaintext token is in the response **once and only once** — there's
+    no recovery flow. Caller is expected to copy/embed it immediately.
+    """
+    _require_owner(access)
+    if req.role not in ("viewer", "editor"):
+        raise HTTPException(status_code=400, detail="role must be 'viewer' or 'editor'.")
+    # Confirm the session exists so a typo in the URL doesn't leave a dangling
+    # token row referencing a missing session (FK would catch it, but the
+    # 500 → 404 mapping is friendlier from the dependency layer).
+    if await db.get_session(session_id) is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    row = await db.create_share_token(session_id, req.role, req.label)
+    return CreateShareTokenResponse(
+        id=str(row["id"]),
+        token=row["token"],
+        role=row["role"],
+        label=row.get("label"),
+        created_at=row["created_at"],
+    )
+
+
+@app.get(
+    "/sessions/{session_id}/share-tokens",
+    response_model=list[ShareTokenSummary],
+)
+async def list_share_tokens_endpoint(
+    session_id: str,
+    access: Access = Depends(resolve_access),
+):
+    """List active + revoked tokens for a session, plaintext redacted."""
+    _require_owner(access)
+    rows = await db.list_share_tokens(session_id)
+    return [
+        ShareTokenSummary(
+            id=str(r["id"]),
+            role=r["role"],
+            label=r.get("label"),
+            token_preview=r["token_preview"],
+            created_at=r["created_at"],
+            revoked_at=r.get("revoked_at"),
+        )
+        for r in rows
+    ]
+
+
+@app.delete(
+    "/sessions/{session_id}/share-tokens/{token_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def revoke_share_token_endpoint(
+    session_id: str,
+    token_id: str,
+    access: Access = Depends(resolve_access),
+):
+    """Revoke a token. Idempotent — already-revoked still returns 204."""
+    _require_owner(access)
+    await db.revoke_share_token(token_id, session_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# --- Dataset access dependency ---------------------------------------------
+
+async def resolve_dataset_access(
+    dataset_id: str,
+    request: Request,
+    x_share_token: str | None = None,
+) -> Access:
+    """Like `resolve_access` but for endpoints that take dataset_id in the path.
+
+    Looks up the owning session_id and delegates to `resolve_access`. Used by
+    every dataset-scoped mutating endpoint so a viewer-token holder can't
+    sneak in by addressing the dataset directly. Falls through to 404 when
+    the dataset doesn't exist (rather than 403) so missing-resource
+    semantics stay clean for honest callers.
+    """
+    # Header lookup matches resolve_access's alias casing exactly.
+    header_token = request.headers.get("x-share-token")
+    session_id = await db.get_session_id_for_dataset(dataset_id)
+    if session_id is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    return await resolve_access(
+        session_id=session_id,
+        request=request,
+        x_share_token=header_token,
+    )
+
+
+# --- Live SSE updates ------------------------------------------------------
+
+@app.get("/sessions/{session_id}/events")
+async def session_events(
+    session_id: str,
+    request: Request,
+    access: Access = Depends(resolve_access),
+):
+    """Server-Sent Events stream of state changes for one session.
+
+    Every successful `db.update_session` call publishes a `state_changed`
+    event via the in-process broadcaster; this endpoint relays them over an
+    EventSource-compatible stream so the frontend updates without polling.
+
+    Auth: the share-token can come on the `X-Share-Token` header (regular
+    fetch) or `?token=` query param (EventSource — can't set headers).
+    Both routes go through `resolve_access`, viewer + editor + owner all
+    pass; viewers don't get events any more limited than editors do because
+    the underlying state is the same regardless of role.
+
+    Heartbeat: 15s of silence emits an SSE comment line so intermediary
+    proxies don't time the connection out. Browsers ignore comments.
+    """
+    import asyncio
+
+    # Capacity tracking + alerting. inc/dec inside try/finally so a slow
+    # consumer disconnect or proxy timeout always decrements the counter.
+    await capacity.inc("sse_connections")
+    queue = await broadcaster.subscribe(session_id)
+
+    async def event_stream():
+        try:
+            # Initial hello — lets the frontend confirm role at handshake
+            # time without a separate fetch.
+            yield f'event: hello\ndata: {{"role": "{access.role}"}}\n\n'
+            while True:
+                # Bail if the client went away — without this an aborted
+                # EventSource would keep the queue subscription forever.
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    # Heartbeat: SSE comment line. Browsers + EventSource
+                    # treat lines starting with ":" as comments and ignore.
+                    yield ": ping\n\n"
+                    continue
+                event_type = event.get("type", "message")
+                yield f"event: {event_type}\ndata: {{}}\n\n"
+        except asyncio.CancelledError:
+            # Cancellation flows through here when the request is torn down
+            # — re-raise so FastAPI unwinds correctly.
+            raise
+        finally:
+            broadcaster.unsubscribe(session_id, queue)
+            await capacity.dec("sse_connections")
+
+    headers = {
+        "Cache-Control": "no-cache",
+        # Prevents nginx from buffering the stream into chunks of full
+        # responses. Fastly + Cloudflare also honor this.
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    }
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers=headers,
+    )
+
+
+# --- Metrics ---------------------------------------------------------------
+
+@app.get("/metrics")
+async def metrics():
+    """Plain-text capacity gauges. NOT auth-gated — fine for the prototype
+    because the values are aggregate counts with no secrets, but should be
+    locked down (scrape token, internal-only ingress, etc.) before any
+    real production deployment.
+    """
+    snap = capacity.snapshot()
+    body = "\n".join(f"{k} {v}" for k, v in snap.items()) + "\n"
+    return Response(content=body, media_type="text/plain")
 
 
 # Session IDs with an in-flight auto-retag. Module-level set + check-then-add
@@ -1361,41 +1607,59 @@ async def _retag_dataset_after_charter(session_id: str, charter: dict) -> None:
 
 
 @app.post("/sessions/{session_id}/message", response_model=SendMessageResponse)
-async def send_message(session_id: str, req: SendMessageRequest):
-    state, conversation = await _load_state(session_id)
+async def send_message(
+    session_id: str,
+    req: SendMessageRequest,
+    access: Access = Depends(resolve_access),
+):
+    require_writer(access)
 
-    result = await run_agent_turn(state, req.message, regenerate=req.regenerate)
+    # Track that an LLM agent loop is in flight so the capacity monitor can
+    # alert if too many pile up at once. Outer try/finally guarantees the
+    # counter decrements on every exit path (HTTPException, cancel, etc.).
+    await capacity.inc("agent_inflight")
+    try:
+        state, conversation = await _load_state(session_id)
 
-    conversation = state.input.conversation_history.copy()
-    await _save_state(session_id, state, conversation)
+        result = await run_agent_turn(state, req.message, regenerate=req.regenerate)
 
-    logger.info(
-        f"Turn complete: session={session_id} status={state.agent_status.value} "
-        f"tools={result.tool_calls} rounds={state.rounds_of_questions}"
-    )
+        conversation = state.input.conversation_history.copy()
+        await _save_state(session_id, state, conversation)
 
-    # For prompt-eval projects: when the agent just generated a fresh charter,
-    # re-tag the dataset (sampled from `turns`) against the charter's axes so
-    # the Coverage Map matrix becomes meaningful. Fire-and-forget so we don't
-    # add 5–15s to the message turn — the user can refresh the dataset to see
-    # updated tags, or trigger manually via the retag endpoint.
-    if state.kind == SessionKind.prompt and "generate_draft" in result.tool_calls:
-        asyncio.create_task(
-            _retag_dataset_after_charter(session_id, state.charter.model_dump())
+        logger.info(
+            f"Turn complete: session={session_id} status={state.agent_status.value} "
+            f"tools={result.tool_calls} rounds={state.rounds_of_questions}"
         )
 
-    return SendMessageResponse(
-        message=result.message,
-        agent_status=state.agent_status,
-        state=state,
-        tool_calls=result.tool_calls,
-        suggestions=result.suggestions,
-        suggested_stories=result.suggested_stories,
-    )
+        # For prompt-eval projects: when the agent just generated a fresh
+        # charter, re-tag the dataset (sampled from `turns`) against the
+        # charter's axes so the Coverage Map matrix becomes meaningful.
+        # Fire-and-forget so we don't add 5–15s to the message turn — the
+        # user can refresh the dataset to see updated tags, or trigger
+        # manually via the retag endpoint.
+        if state.kind == SessionKind.prompt and "generate_draft" in result.tool_calls:
+            asyncio.create_task(
+                _retag_dataset_after_charter(session_id, state.charter.model_dump())
+            )
+
+        return SendMessageResponse(
+            message=result.message,
+            agent_status=state.agent_status,
+            state=state,
+            tool_calls=result.tool_calls,
+            suggestions=result.suggestions,
+            suggested_stories=result.suggested_stories,
+        )
+    finally:
+        await capacity.dec("agent_inflight")
 
 
 @app.post("/sessions/{session_id}/proceed", response_model=ProceedResponse)
-async def proceed_to_review(session_id: str):
+async def proceed_to_review(
+    session_id: str,
+    access: Access = Depends(resolve_access),
+):
+    require_writer(access)
     state, conversation = await _load_state(session_id)
 
     state.agent_status = AgentStatus.review
@@ -1409,21 +1673,32 @@ async def proceed_to_review(session_id: str):
 
 
 @app.get("/sessions/{session_id}")
-async def get_session(session_id: str):
+async def get_session(
+    session_id: str,
+    access: Access = Depends(resolve_access),
+):
     row = await db.get_session(session_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Session not found")
     state, conversation = await _load_state(session_id)
+    state_dict = state.model_dump()
+    # Frontend reads state._access.role to hide write affordances for viewers.
+    state_dict["_access"] = {"role": access.role}
     return {
         "session_id": session_id,
         "name": row.get("name"),
-        "state": state.model_dump(),
+        "state": state_dict,
         "conversation": conversation,
     }
 
 
 @app.patch("/sessions/{session_id}/charter")
-async def patch_charter(session_id: str, req: PatchCharterRequest):
+async def patch_charter(
+    session_id: str,
+    req: PatchCharterRequest,
+    access: Access = Depends(resolve_access),
+):
+    require_writer(access)
     state, conversation = await _load_state(session_id)
 
     if req.coverage is not None:
@@ -1443,8 +1718,12 @@ async def patch_charter(session_id: str, req: PatchCharterRequest):
 
 
 @app.post("/sessions/{session_id}/validate", response_model=ValidateResponse)
-async def validate_charter(session_id: str):
+async def validate_charter(
+    session_id: str,
+    access: Access = Depends(resolve_access),
+):
     """Run validation on the current charter and return results."""
+    require_writer(access)
     state, conversation = await _load_state(session_id)
 
     validation, call_meta = await call_validate_charter(state)
@@ -1465,8 +1744,12 @@ async def validate_charter(session_id: str):
 
 
 @app.post("/sessions/{session_id}/suggest", response_model=SuggestResponse)
-async def suggest_for_charter(session_id: str):
+async def suggest_for_charter(
+    session_id: str,
+    access: Access = Depends(resolve_access),
+):
     """Generate suggestions for weak/empty charter sections."""
+    require_writer(access)
     state, conversation = await _load_state(session_id)
 
     (suggestions, stories), call_meta = await call_generate_suggestions(state)
@@ -1484,7 +1767,11 @@ async def suggest_for_charter(session_id: str):
 
 
 @app.post("/sessions/{session_id}/finalize", response_model=FinalizeResponse)
-async def finalize_session(session_id: str):
+async def finalize_session(
+    session_id: str,
+    access: Access = Depends(resolve_access),
+):
+    require_writer(access)
     state, conversation = await _load_state(session_id)
 
     # Collect weak criteria
@@ -1663,8 +1950,28 @@ async def get_session_activity(session_id: str, after: str | None = None):
 
 
 @app.post("/judge/run")
-async def run_judge(session_id: str | None = None, limit: int = 50):
-    """Run judge scoring on unjudged turns. Call this manually when you want to evaluate agent quality."""
+async def run_judge(
+    request: Request,
+    session_id: str | None = None,
+    limit: int = 50,
+):
+    """Run judge scoring on unjudged turns.
+
+    Auth note: when ``session_id`` is provided, the call must pass write
+    auth on that session — we re-use ``resolve_access`` so a viewer-token
+    holder can't trigger judge work on a project they only read. With no
+    ``session_id`` (the cross-session admin path), we require *no* token —
+    only direct (owner-style) access. A token of any kind is rejected,
+    since the bearer has no scope to run global judging.
+    """
+    if session_id is not None:
+        access = await resolve_access(session_id=session_id, request=request)
+        require_writer(access)
+    elif request.headers.get("x-share-token") or request.query_params.get("token"):
+        raise HTTPException(
+            status_code=403,
+            detail="Cross-session judge runs aren't accessible via share tokens.",
+        )
     from .tools import get_client, get_model
 
     turns = await db.get_unjudged_turns(session_id=session_id)
@@ -1805,8 +2112,13 @@ Return ONLY JSON:
 # --- Dataset Endpoints ---
 
 @app.post("/sessions/{session_id}/dataset")
-async def create_dataset(session_id: str, req: CreateDatasetRequest):
+async def create_dataset(
+    session_id: str,
+    req: CreateDatasetRequest,
+    access: Access = Depends(resolve_access),
+):
     """Create a dataset for this session's charter."""
+    require_writer(access)
     state, _ = await _load_state(session_id)
     charter_snapshot = state.charter.model_dump()
 
@@ -1843,8 +2155,12 @@ async def get_dataset_versions(dataset_id: str):
 
 
 @app.post("/datasets/{dataset_id}/version")
-async def create_dataset_version(dataset_id: str):
+async def create_dataset_version(
+    dataset_id: str,
+    access: Access = Depends(resolve_dataset_access),
+):
     """Snapshot current dataset as a new version."""
+    require_writer(access)
     dataset = await db.get_dataset(dataset_id)
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -1857,8 +2173,13 @@ async def create_dataset_version(dataset_id: str):
 
 
 @app.post("/datasets/{dataset_id}/import")
-async def import_examples(dataset_id: str, req: ImportExamplesRequest):
+async def import_examples(
+    dataset_id: str,
+    req: ImportExamplesRequest,
+    access: Access = Depends(resolve_dataset_access),
+):
     """Import examples from JSON."""
+    require_writer(access)
     dataset = await db.get_dataset(dataset_id)
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -1884,8 +2205,13 @@ async def import_examples(dataset_id: str, req: ImportExamplesRequest):
 
 
 @app.post("/datasets/{dataset_id}/synthesize")
-async def synthesize_examples(dataset_id: str, req: SynthesizeRequest):
+async def synthesize_examples(
+    dataset_id: str,
+    req: SynthesizeRequest,
+    access: Access = Depends(resolve_dataset_access),
+):
     """Generate synthetic examples from the charter."""
+    require_writer(access)
     dataset = await db.get_dataset(dataset_id)
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -1942,8 +2268,13 @@ async def list_examples(
 
 
 @app.post("/datasets/{dataset_id}/examples")
-async def add_example(dataset_id: str, req: CreateExampleRequest):
+async def add_example(
+    dataset_id: str,
+    req: CreateExampleRequest,
+    access: Access = Depends(resolve_dataset_access),
+):
     """Add a manual example."""
+    require_writer(access)
     dataset = await db.get_dataset(dataset_id)
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -1965,8 +2296,14 @@ async def add_example(dataset_id: str, req: CreateExampleRequest):
 
 
 @app.patch("/datasets/{dataset_id}/examples/{example_id}")
-async def update_example(dataset_id: str, example_id: str, req: UpdateExampleRequest):
+async def update_example(
+    dataset_id: str,
+    example_id: str,
+    req: UpdateExampleRequest,
+    access: Access = Depends(resolve_dataset_access),
+):
     """Update an example (edit, approve, reject, relabel)."""
+    require_writer(access)
     fields = {k: v for k, v in req.model_dump().items() if v is not None}
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -1977,8 +2314,13 @@ async def update_example(dataset_id: str, example_id: str, req: UpdateExampleReq
 
 
 @app.delete("/datasets/{dataset_id}/examples/{example_id}")
-async def remove_example(dataset_id: str, example_id: str):
+async def remove_example(
+    dataset_id: str,
+    example_id: str,
+    access: Access = Depends(resolve_dataset_access),
+):
     """Remove an example from the dataset."""
+    require_writer(access)
     deleted = await db.delete_example(example_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Example not found")
@@ -1987,8 +2329,12 @@ async def remove_example(dataset_id: str, example_id: str):
 
 
 @app.post("/datasets/{dataset_id}/review")
-async def auto_review_examples(dataset_id: str):
+async def auto_review_examples(
+    dataset_id: str,
+    access: Access = Depends(resolve_dataset_access),
+):
     """Run auto-review on pending examples using the judge."""
+    require_writer(access)
     dataset = await db.get_dataset(dataset_id)
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -2043,7 +2389,10 @@ async def auto_review_examples(dataset_id: str):
 
 
 @app.post("/datasets/{dataset_id}/refresh-from-turns")
-async def refresh_dataset_from_turns(dataset_id: str):
+async def refresh_dataset_from_turns(
+    dataset_id: str,
+    access: Access = Depends(resolve_dataset_access),
+):
     """Pull any new historical turns into a prompt-eval dataset.
 
     Re-samples turns matching the session's prompt_target, dedupes against
@@ -2054,6 +2403,7 @@ async def refresh_dataset_from_turns(dataset_id: str):
     No-op for sessions that aren't kind=prompt — use the manual import flow
     or synthesize for skill-eval datasets instead.
     """
+    require_writer(access)
     dataset = await db.get_dataset(dataset_id)
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -2128,7 +2478,10 @@ async def refresh_dataset_from_turns(dataset_id: str):
 
 
 @app.post("/datasets/{dataset_id}/retag-against-charter")
-async def retag_examples_against_charter(dataset_id: str):
+async def retag_examples_against_charter(
+    dataset_id: str,
+    access: Access = Depends(resolve_dataset_access),
+):
     """Re-tag every example's feature_area + coverage_tags against the current
     charter. Built for prompt-eval (where the dataset is sampled from `turns`
     before the charter exists, so the seeded `feature_area` buckets don't
@@ -2136,6 +2489,7 @@ async def retag_examples_against_charter(dataset_id: str):
 
     Idempotent — re-running just refreshes tags against the latest charter.
     """
+    require_writer(access)
     dataset = await db.get_dataset(dataset_id)
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -2193,8 +2547,13 @@ async def retag_examples_against_charter(dataset_id: str):
 
 
 @app.post("/datasets/{dataset_id}/suggest-revisions")
-async def suggest_revisions(dataset_id: str, req: SuggestRevisionsRequest):
+async def suggest_revisions(
+    dataset_id: str,
+    req: SuggestRevisionsRequest,
+    access: Access = Depends(resolve_dataset_access),
+):
     """Suggest revisions for examples that have review issues."""
+    require_writer(access)
     dataset = await db.get_dataset(dataset_id)
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -2279,8 +2638,13 @@ async def analyze_gaps(dataset_id: str):
 
 
 @app.post("/datasets/{dataset_id}/enrich")
-async def enrich_dataset(dataset_id: str, req: EnrichRequest):
+async def enrich_dataset(
+    dataset_id: str,
+    req: EnrichRequest,
+    access: Access = Depends(resolve_dataset_access),
+):
     """Generate examples to fill identified gaps."""
+    require_writer(access)
     dataset = await db.get_dataset(dataset_id)
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -2316,8 +2680,13 @@ async def enrich_dataset(dataset_id: str, req: EnrichRequest):
 
 
 @app.post("/datasets/{dataset_id}/chat")
-async def dataset_chat(dataset_id: str, req: SendMessageRequest):
+async def dataset_chat(
+    dataset_id: str,
+    req: SendMessageRequest,
+    access: Access = Depends(resolve_dataset_access),
+):
     """Chat with the agent in dataset phase."""
+    require_writer(access)
     dataset = await db.get_dataset(dataset_id)
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -2537,13 +2906,19 @@ async def _execute_eval_run(
 
 
 @app.post("/sessions/{session_id}/run-eval", response_model=EvalRunSummary)
-async def run_eval_for_session(session_id: str, req: RunEvalRequest, request: Request):
+async def run_eval_for_session(
+    session_id: str,
+    req: RunEvalRequest,
+    request: Request,
+    access: Access = Depends(resolve_access),
+):
     """Trigger a Braintrust eval run for this session's dataset + scorers + skill.
 
     Braintrust API key is read from the X-Braintrust-Key header. Anthropic key
     from X-Anthropic-Key (same pattern as other endpoints). Runs asynchronously
     in a background task; poll GET /sessions/{id}/eval-runs/{run_id} for status.
     """
+    require_writer(access)
     import uuid as _uuid
 
     braintrust_key = request.headers.get("x-braintrust-key") or os.environ.get("BRAINTRUST_API_KEY")
@@ -2651,13 +3026,18 @@ async def run_eval_for_session(session_id: str, req: RunEvalRequest, request: Re
 
 
 @app.post("/sessions/{session_id}/eval-runs/{run_id}/cancel", response_model=EvalRunSummary)
-async def cancel_eval_run(session_id: str, run_id: str):
+async def cancel_eval_run(
+    session_id: str,
+    run_id: str,
+    access: Access = Depends(resolve_access),
+):
     """Cancel a running eval. Marks the DB row as 'cancelled' so the
     background task's post-run write is skipped, and the polling UI sees
     the terminal state on the next tick. The Braintrust thread in the pool
     can't be killed mid-call — it finishes in the background but its
     results are dropped. Idempotent: cancelling an already-terminal run
     just returns its current state."""
+    require_writer(access)
     from datetime import datetime, timezone
     run = await db.get_eval_run(run_id)
     if run is None or run.get("session_id") != session_id:
@@ -2704,7 +3084,11 @@ async def list_skill_versions(session_id: str):
 
 
 @app.post("/sessions/{session_id}/skill-versions", response_model=SkillVersion)
-async def create_skill_version(session_id: str, req: CreateSkillVersionRequest):
+async def create_skill_version(
+    session_id: str,
+    req: CreateSkillVersionRequest,
+    access: Access = Depends(resolve_access),
+):
     """Create a new SKILL.md version.
 
     Suggestion-derived versions land as candidates (must be promoted after a
@@ -2715,6 +3099,7 @@ async def create_skill_version(session_id: str, req: CreateSkillVersionRequest):
     Either way, charter.task.skill_body updates so subsequent evals use the
     new body and the user can re-run on the candidate before committing.
     """
+    require_writer(access)
     state, conversation = await _load_state(session_id)
 
     # If this is the first version on a legacy session, backfill v1 from the
@@ -2743,7 +3128,11 @@ async def create_skill_version(session_id: str, req: CreateSkillVersionRequest):
 
 
 @app.post("/sessions/{session_id}/skill-versions/{version_id}/promote", response_model=SkillVersion)
-async def promote_skill_version(session_id: str, version_id: str):
+async def promote_skill_version(
+    session_id: str,
+    version_id: str,
+    access: Access = Depends(resolve_access),
+):
     """Promote a candidate version to active.
 
     Strict pairing with discard: only the *current* candidate can be promoted.
@@ -2752,6 +3141,7 @@ async def promote_skill_version(session_id: str, version_id: str):
     candidate (its pointer would clear on promote even though the user never
     confirmed it). To restore an older non-candidate version, use
     /skill-versions/restore — that's the dedicated affordance."""
+    require_writer(access)
     state, conversation = await _load_state(session_id)
     if state.candidate_skill_version_id != version_id:
         raise HTTPException(
@@ -2771,11 +3161,16 @@ async def promote_skill_version(session_id: str, version_id: str):
 
 
 @app.post("/sessions/{session_id}/skill-versions/{version_id}/discard", response_model=SkillVersion)
-async def discard_skill_version(session_id: str, version_id: str):
+async def discard_skill_version(
+    session_id: str,
+    version_id: str,
+    access: Access = Depends(resolve_access),
+):
     """Discard a candidate. Reverts skill_body to the active version's body
     and clears the candidate pointer. The discarded version stays in history
     (the user can still review or restore it from the timeline) but stops
     being the body the next eval runs against."""
+    require_writer(access)
     state, conversation = await _load_state(session_id)
     if state.candidate_skill_version_id != version_id:
         raise HTTPException(status_code=400, detail="That version isn't the current candidate.")
@@ -2794,7 +3189,11 @@ async def discard_skill_version(session_id: str, version_id: str):
 
 
 @app.post("/sessions/{session_id}/skill-versions/restore", response_model=SkillVersion)
-async def restore_skill_version(session_id: str, req: RestoreSkillVersionRequest):
+async def restore_skill_version(
+    session_id: str,
+    req: RestoreSkillVersionRequest,
+    access: Access = Depends(resolve_access),
+):
     """Restore a previous version. Appends a new SkillVersion row with
     created_from='restore' so the history reads 'v4 — restored from v2',
     rather than silently flipping the active pointer (which left v3's edits
@@ -2807,6 +3206,7 @@ async def restore_skill_version(session_id: str, req: RestoreSkillVersionRequest
     pointer when not as_candidate), making the user's in-flight edits
     unreachable. The user has to explicitly promote or discard first.
     """
+    require_writer(access)
     state, conversation = await _load_state(session_id)
     if state.candidate_skill_version_id is not None:
         raise HTTPException(
@@ -2832,12 +3232,17 @@ async def restore_skill_version(session_id: str, req: RestoreSkillVersionRequest
     "/sessions/{session_id}/suggest-improvements",
     response_model=SuggestImprovementsResponse,
 )
-async def suggest_skill_improvements(session_id: str, req: SuggestImprovementsRequest):
+async def suggest_skill_improvements(
+    session_id: str,
+    req: SuggestImprovementsRequest,
+    access: Access = Depends(resolve_access),
+):
     """Analyze a completed eval run and propose targeted SKILL.md edits.
 
     Reads the run (in-memory for MVP), the current SKILL.md body, and the
     charter. Returns a list of suggestions with rationale + row citations.
     """
+    require_writer(access)
     from .tools import call_suggest_improvements
 
     run = await db.get_eval_run(req.run_id)
@@ -2933,8 +3338,13 @@ async def get_judge_results(session_id: str | None = None):
 # --- Schema Detection Endpoints ---
 
 @app.post("/sessions/{session_id}/detect-schema", response_model=DetectSchemaResponse)
-async def detect_schema(session_id: str, req: DetectSchemaRequest):
+async def detect_schema(
+    session_id: str,
+    req: DetectSchemaRequest,
+    access: Access = Depends(resolve_access),
+):
     """Detect schema from pasted sample data."""
+    require_writer(access)
     # Verify session exists
     state, _ = await _load_state(session_id)
 
@@ -2969,8 +3379,13 @@ async def detect_schema(session_id: str, req: DetectSchemaRequest):
 
 
 @app.post("/sessions/{session_id}/import-from-url", response_model=ImportFromUrlResponse)
-async def import_from_url(session_id: str, req: ImportFromUrlRequest):
+async def import_from_url(
+    session_id: str,
+    req: ImportFromUrlRequest,
+    access: Access = Depends(resolve_access),
+):
     """Import schema from a URL (JSON data, OpenAPI spec, or docs)."""
+    require_writer(access)
     import httpx
 
     # Verify session exists
@@ -3181,8 +3596,12 @@ async def fetch_skill_from_url(req: FetchSkillFromUrlRequest, request: Request):
 
 
 @app.post("/datasets/{dataset_id}/infer-schema", response_model=InferSchemaResponse)
-async def infer_schema_from_examples(dataset_id: str):
+async def infer_schema_from_examples(
+    dataset_id: str,
+    access: Access = Depends(resolve_dataset_access),
+):
     """Infer schema from existing dataset examples."""
+    require_writer(access)
     dataset = await db.get_dataset(dataset_id)
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")

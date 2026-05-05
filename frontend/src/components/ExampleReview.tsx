@@ -47,6 +47,9 @@ interface ExampleReviewProps {
    *  the parent passes undefined for skill-eval to hide the button. */
   onRetagAgainstCharter?: () => void
   retagLoading?: boolean
+  /** Read-only when false: synthesize, auto-review, delete, inline edit, and
+   *  revision-acceptance buttons all hide. The list itself remains visible. */
+  canEdit?: boolean
 }
 
 export default function ExampleReview({
@@ -71,6 +74,7 @@ export default function ExampleReview({
   revisionsLoading,
   onRetagAgainstCharter,
   retagLoading,
+  canEdit = true,
 }: ExampleReviewProps) {
   const [filterArea, setFilterArea] = useState<string>('')
   const [filterLabel, setFilterLabel] = useState<string>('')
@@ -350,14 +354,16 @@ export default function ExampleReview({
             >
               Export
             </button>
-            <button
-              onClick={onAutoReview}
-              disabled={loading || stats.pending === 0}
-              className="px-2 py-1 text-xs border border-border-hint hover:bg-fill-neutral transition-colors disabled:opacity-50"
-            >
-              Auto-review
-            </button>
-            {onRetagAgainstCharter && (
+            {canEdit && (
+              <button
+                onClick={onAutoReview}
+                disabled={loading || stats.pending === 0}
+                className="px-2 py-1 text-xs border border-border-hint hover:bg-fill-neutral transition-colors disabled:opacity-50"
+              >
+                Auto-review
+              </button>
+            )}
+            {canEdit && onRetagAgainstCharter && (
               <button
                 onClick={onRetagAgainstCharter}
                 disabled={loading || retagLoading || stats.total === 0}
@@ -367,7 +373,7 @@ export default function ExampleReview({
                 {retagLoading ? 'Retagging…' : 'Retag against charter'}
               </button>
             )}
-            {onSuggestRevisions && (
+            {canEdit && onSuggestRevisions && (
               <button
                 onClick={onSuggestRevisions}
                 disabled={loading || revisionsLoading || examplesWithIssues === 0}
@@ -379,13 +385,15 @@ export default function ExampleReview({
                   : `Fix flagged${examplesWithIssues > 0 ? ` (${examplesWithIssues})` : ''}`}
               </button>
             )}
-            <button
-              onClick={() => setShowGenerateModal(true)}
-              disabled={loading}
-              className="px-2.5 py-1 text-xs bg-fill-primary text-bg-default hover:bg-fill-primary-hover transition-colors disabled:opacity-50"
-            >
-              {loading ? 'Generating...' : 'Generate'}
-            </button>
+            {canEdit && (
+              <button
+                onClick={() => setShowGenerateModal(true)}
+                disabled={loading}
+                className="px-2.5 py-1 text-xs bg-fill-primary text-bg-default hover:bg-fill-primary-hover transition-colors disabled:opacity-50"
+              >
+                {loading ? 'Generating...' : 'Generate'}
+              </button>
+            )}
           </div>
         </div>
 
@@ -423,53 +431,55 @@ export default function ExampleReview({
             />
           </div>
 
-          <div className="flex items-center gap-2 flex-wrap">
-            <ActionButton
-              icon={<Check className="w-4 h-4" />}
-              shortcut="A"
-              label="pprove"
-              variant={ACTIONS_BY_CELL[focusedCell].includes('approve') ? 'neutral' : 'outline'}
-              onClick={() => actOnSelected(ex => onUpdateExample(ex.id, { review_status: 'approved' }))}
-              disabled={!selectedExample}
-            />
-            <ActionButton
-              icon={<X className="w-4 h-4" />}
-              shortcut="R"
-              label="eject"
-              variant={ACTIONS_BY_CELL[focusedCell].includes('reject') ? 'neutral' : 'outline'}
-              onClick={() => actOnSelected(ex => onUpdateExample(ex.id, { review_status: 'rejected' }))}
-              disabled={!selectedExample}
-            />
-            <ActionButton
-              icon={<RefreshCw className="w-4 h-4" />}
-              prefix="Re"
-              shortcut="l"
-              label="abel"
-              variant={ACTIONS_BY_CELL[focusedCell].includes('relabel') ? 'neutral' : 'outline'}
-              onClick={() =>
-                actOnSelected(ex =>
-                  onUpdateExample(ex.id, { label: ex.label === 'good' ? 'bad' : 'good' }),
-                )
-              }
-              disabled={!selectedExample}
-            />
-            <ActionButton
-              icon={<Pencil className="w-4 h-4" />}
-              shortcut="E"
-              label="dit"
-              variant={ACTIONS_BY_CELL[focusedCell].includes('edit') ? 'neutral' : 'outline'}
-              onClick={() => actOnSelected(ex => beginEdit(ex.id))}
-              disabled={!selectedExample}
-            />
-            <ActionButton
-              icon={<Trash2 className="w-4 h-4" />}
-              shortcut="D"
-              label="elete"
-              variant={ACTIONS_BY_CELL[focusedCell].includes('delete') ? 'neutral' : 'outline'}
-              onClick={() => actOnSelected(ex => setDeleteConfirmId(ex.id))}
-              disabled={!selectedExample}
-            />
-          </div>
+          {canEdit && (
+            <div className="flex items-center gap-2 flex-wrap">
+              <ActionButton
+                icon={<Check className="w-4 h-4" />}
+                shortcut="A"
+                label="pprove"
+                variant={ACTIONS_BY_CELL[focusedCell].includes('approve') ? 'neutral' : 'outline'}
+                onClick={() => actOnSelected(ex => onUpdateExample(ex.id, { review_status: 'approved' }))}
+                disabled={!selectedExample}
+              />
+              <ActionButton
+                icon={<X className="w-4 h-4" />}
+                shortcut="R"
+                label="eject"
+                variant={ACTIONS_BY_CELL[focusedCell].includes('reject') ? 'neutral' : 'outline'}
+                onClick={() => actOnSelected(ex => onUpdateExample(ex.id, { review_status: 'rejected' }))}
+                disabled={!selectedExample}
+              />
+              <ActionButton
+                icon={<RefreshCw className="w-4 h-4" />}
+                prefix="Re"
+                shortcut="l"
+                label="abel"
+                variant={ACTIONS_BY_CELL[focusedCell].includes('relabel') ? 'neutral' : 'outline'}
+                onClick={() =>
+                  actOnSelected(ex =>
+                    onUpdateExample(ex.id, { label: ex.label === 'good' ? 'bad' : 'good' }),
+                  )
+                }
+                disabled={!selectedExample}
+              />
+              <ActionButton
+                icon={<Pencil className="w-4 h-4" />}
+                shortcut="E"
+                label="dit"
+                variant={ACTIONS_BY_CELL[focusedCell].includes('edit') ? 'neutral' : 'outline'}
+                onClick={() => actOnSelected(ex => beginEdit(ex.id))}
+                disabled={!selectedExample}
+              />
+              <ActionButton
+                icon={<Trash2 className="w-4 h-4" />}
+                shortcut="D"
+                label="elete"
+                variant={ACTIONS_BY_CELL[focusedCell].includes('delete') ? 'neutral' : 'outline'}
+                onClick={() => actOnSelected(ex => setDeleteConfirmId(ex.id))}
+                disabled={!selectedExample}
+              />
+            </div>
+          )}
         </div>
 
         {/* Grouped list */}

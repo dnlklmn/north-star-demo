@@ -32,6 +32,9 @@ interface Props {
   rightBottom?: ReactNode;
   /** When set, expands bottom section to fill and caps Suggestions height. */
   rightBottomExpanded?: ReactNode;
+  /** Read-only when false: compose row, suggestions, edit/delete affordances,
+   *  and the footer CTA all hide. Defaults to true. */
+  canEdit?: boolean;
 }
 
 export default function GoalsPanel({
@@ -49,6 +52,7 @@ export default function GoalsPanel({
   nextDisabled,
   rightBottom,
   rightBottomExpanded,
+  canEdit = true,
 }: Props) {
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
   const focusIndexRef = useRef<number | null>(null);
@@ -199,62 +203,69 @@ export default function GoalsPanel({
       rightBottom={rightBottom}
       rightBottomExpanded={rightBottomExpanded}
       right={
-        <SuggestionBox
-          onRefresh={nonEmptyGoals.length > 0 ? onGoalCommit : undefined}
-          loading={suggestionsLoading}
-          emptyText="Enter a business goal to see suggestions."
-        >
-          {goalSuggestions.length > 0
-            ? goalSuggestions.map((suggestion, i) => (
-                <SuggestionCard
-                  key={i}
-                  onAccept={() => onAcceptGoalSuggestion(suggestion)}
-                  onDismiss={() => onDismissGoalSuggestion(suggestion)}
-                >
-                  {suggestion}
-                </SuggestionCard>
-              ))
-            : null}
-        </SuggestionBox>
+        canEdit ? (
+          <SuggestionBox
+            onRefresh={nonEmptyGoals.length > 0 ? onGoalCommit : undefined}
+            loading={suggestionsLoading}
+            emptyText="Enter a business goal to see suggestions."
+          >
+            {goalSuggestions.length > 0
+              ? goalSuggestions.map((suggestion, i) => (
+                  <SuggestionCard
+                    key={i}
+                    onAccept={() => onAcceptGoalSuggestion(suggestion)}
+                    onDismiss={() => onDismissGoalSuggestion(suggestion)}
+                  >
+                    {suggestion}
+                  </SuggestionCard>
+                ))
+              : null}
+          </SuggestionBox>
+        ) : undefined
       }
       footer={
-        <Button
-          size="big"
-          variant={nextVariant}
-          shortcut={<CmdReturnIcon />}
-          onClick={onNext}
-          disabled={nextDisabled}
-        >
-          {nextLabel}
-        </Button>
+        canEdit ? (
+          <Button
+            size="big"
+            variant={nextVariant}
+            shortcut={<CmdReturnIcon />}
+            onClick={onNext}
+            disabled={nextDisabled}
+          >
+            {nextLabel}
+          </Button>
+        ) : undefined
       }
     >
-      {/* Compose row */}
-      <div className="flex items-stretch gap-2.5 mb-6">
-        <Input
-          ref={(el) => {
-            inputRefs.current[goals.length - 1] = el;
-          }}
-          type="text"
-          value={goals[goals.length - 1] ?? ""}
-          onChange={(e) => updateGoal(goals.length - 1, e.target.value)}
-          onKeyDown={(e) => handleKeyDown(goals.length - 1, e)}
-          placeholder="What do you want to achieve?"
-        />
-        <Button
-          size="big"
-          variant={goals[goals.length - 1]?.trim() ? "primary" : "neutral"}
-          shortcut={<ReturnKeyIcon />}
-          onClick={() => {
-            if (goals[goals.length - 1].trim()) {
-              onGoalCommit();
-              onGoalsChange([...goals, ""]);
-            }
-          }}
-        >
-          Submit
-        </Button>
-      </div>
+      {/* Compose row — only shown when the user can actually edit. Viewers see
+          the existing goal list as a read-only summary. */}
+      {canEdit && (
+        <div className="flex items-stretch gap-2.5 mb-6">
+          <Input
+            ref={(el) => {
+              inputRefs.current[goals.length - 1] = el;
+            }}
+            type="text"
+            value={goals[goals.length - 1] ?? ""}
+            onChange={(e) => updateGoal(goals.length - 1, e.target.value)}
+            onKeyDown={(e) => handleKeyDown(goals.length - 1, e)}
+            placeholder="What do you want to achieve?"
+          />
+          <Button
+            size="big"
+            variant={goals[goals.length - 1]?.trim() ? "primary" : "neutral"}
+            shortcut={<ReturnKeyIcon />}
+            onClick={() => {
+              if (goals[goals.length - 1].trim()) {
+                onGoalCommit();
+                onGoalsChange([...goals, ""]);
+              }
+            }}
+          >
+            Submit
+          </Button>
+        </div>
+      )}
 
       {/* Existing goal rows */}
       <div className="flex flex-col gap-0.5">
@@ -388,9 +399,11 @@ export default function GoalsPanel({
             <div key={i}>
               {dropIndicator}
               <div
-                onClick={() => startEdit(i, goal)}
-                className="flex items-center justify-between gap-1 group px-4 h-[72px] bg-fill-neutral cursor-pointer"
-                draggable={dragEnabled}
+                onClick={canEdit ? () => startEdit(i, goal) : undefined}
+                className={`flex items-center justify-between gap-1 group px-4 h-[72px] bg-fill-neutral ${
+                  canEdit ? "cursor-pointer" : "cursor-default"
+                }`}
+                draggable={canEdit && dragEnabled}
                 onDragStart={() => handleDragStart(i)}
                 onDragOver={(e) => handleDragOver(i, e)}
                 onDrop={() => handleDrop(i)}
@@ -399,17 +412,19 @@ export default function GoalsPanel({
                 <span className="text-base font-medium text-gray-900 flex-1 min-w-0 truncate">
                   {goal}
                 </span>
-                <IconButton
-                  tone="dim"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    removeGoal(i);
-                  }}
-                  className="opacity-0 group-hover:opacity-100 transition-opacity"
-                  title="Remove"
-                >
-                  <CloseIcon />
-                </IconButton>
+                {canEdit && (
+                  <IconButton
+                    tone="dim"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      removeGoal(i);
+                    }}
+                    className="opacity-0 group-hover:opacity-100 transition-opacity"
+                    title="Remove"
+                  >
+                    <CloseIcon />
+                  </IconButton>
+                )}
                 <div
                   onClick={(e) => e.stopPropagation()}
                   className={`w-10 h-10 flex items-center justify-center flex-shrink-0 transition-colors ${

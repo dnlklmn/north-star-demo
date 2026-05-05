@@ -72,6 +72,10 @@ interface Props {
    *  Defaults to "missing" so older callers keep their existing behaviour. */
   datasetState?: "missing" | "stale" | "fresh";
   scorersState?: "missing" | "stale" | "fresh";
+  /** When false, hide edit/add/delete affordances and the suggestion + shortcut
+   *  CTAs. Pass `role !== 'viewer'` from the parent. Defaults to true so older
+   *  callers keep their existing behavior. */
+  canEdit?: boolean;
 }
 
 type CharterTab = "task" | "coverage" | "balance" | "alignment" | "rot" | "safety";
@@ -80,33 +84,53 @@ export default function CharterPanel({
   charter,
   validation,
   activeCriteria,
-  onEditCriterion,
-  onAddCriterion,
-  onEditAlignment,
-  onDeleteCriterion,
-  onAddAlignment,
-  onDeleteAlignment,
-  onEditTask,
-  onReorderCriteria,
-  onReorderAlignment,
+  onEditCriterion: rawOnEditCriterion,
+  onAddCriterion: rawOnAddCriterion,
+  onEditAlignment: rawOnEditAlignment,
+  onDeleteCriterion: rawOnDeleteCriterion,
+  onAddAlignment: rawOnAddAlignment,
+  onDeleteAlignment: rawOnDeleteAlignment,
+  onEditTask: rawOnEditTask,
+  onReorderCriteria: rawOnReorderCriteria,
+  onReorderAlignment: rawOnReorderAlignment,
   suggestions = [],
-  onAcceptSuggestion,
-  onDismissSuggestion,
-  onRegenSuggestions,
+  onAcceptSuggestion: rawOnAcceptSuggestion,
+  onDismissSuggestion: rawOnDismissSuggestion,
+  onRegenSuggestions: rawOnRegenSuggestions,
   onCriteriaChanged,
   suggestionsLoading,
   loading,
   rightBottom,
   rightBottomExpanded,
-  onGenerateDataset,
-  onGenerateScorers,
-  onGenerateBoth,
+  onGenerateDataset: rawOnGenerateDataset,
+  onGenerateScorers: rawOnGenerateScorers,
+  onGenerateBoth: rawOnGenerateBoth,
   generatingDataset,
   generatingScorers,
   generatingBoth,
   datasetState = "missing",
   scorersState = "missing",
+  canEdit = true,
 }: Props) {
+  // Strip every edit handler when canEdit is false so the inner sub-components
+  // (CriteriaEditor, AlignmentEditor, TaskEditor, suggestion cards, shortcut
+  // footer) naturally collapse their edit/add/delete UI — these all already
+  // gate their affordances on whether the handler is defined.
+  const onEditCriterion = canEdit ? rawOnEditCriterion : undefined;
+  const onAddCriterion = canEdit ? rawOnAddCriterion : undefined;
+  const onEditAlignment = canEdit ? rawOnEditAlignment : undefined;
+  const onDeleteCriterion = canEdit ? rawOnDeleteCriterion : undefined;
+  const onAddAlignment = canEdit ? rawOnAddAlignment : undefined;
+  const onDeleteAlignment = canEdit ? rawOnDeleteAlignment : undefined;
+  const onEditTask = canEdit ? rawOnEditTask : undefined;
+  const onReorderCriteria = canEdit ? rawOnReorderCriteria : undefined;
+  const onReorderAlignment = canEdit ? rawOnReorderAlignment : undefined;
+  const onAcceptSuggestion = canEdit ? rawOnAcceptSuggestion : undefined;
+  const onDismissSuggestion = canEdit ? rawOnDismissSuggestion : undefined;
+  const onRegenSuggestions = canEdit ? rawOnRegenSuggestions : undefined;
+  const onGenerateDataset = canEdit ? rawOnGenerateDataset : undefined;
+  const onGenerateScorers = canEdit ? rawOnGenerateScorers : undefined;
+  const onGenerateBoth = canEdit ? rawOnGenerateBoth : undefined;
   // Charter is presented as a tabbed view — one section at a time, so users
   // focus on one dimension without scrolling past the others. State persists
   // within the panel mount so switching back to a dimension restores the
@@ -138,7 +162,9 @@ export default function CharterPanel({
   const hasRadarData = radarDimensions.some((d) => d.value > 0);
 
   // Flat layout shows every suggestion — no per-tab filtering needed.
-  const tabSuggestions = suggestions;
+  // Suggestions are write-side affordances ("accept this into the charter").
+  // For viewers, hide them entirely rather than render dead-clickable cards.
+  const tabSuggestions = canEdit ? suggestions : [];
 
   // Compute tab readiness scores (0–1)
   const covScore = dimensionScore(charter.coverage.status, validation.coverage, charter.coverage.criteria.length).value;
