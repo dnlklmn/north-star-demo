@@ -62,7 +62,7 @@ jobs:
         # backend/ resolves [tool.ruff] correctly and applies the same rules
         # to the evals/ tree and the root-level eval script.
         working-directory: backend
-        run: ruff check app/ scripts/ ../evals/ ../north-star-eval.py
+        run: ruff check app/ scripts/ tests/ ../evals/ ../north-star-eval.py
 
       - name: Import smoke test
         # Catches broken imports, syntax errors, missing dependencies, and
@@ -76,3 +76,7 @@ jobs:
           python -c "import app.tools"
           python -c "import app.eval_runner"
           python -c "import app.online_scorers"
+
+      - name: Pytest
+        working-directory: backend
+        run: pytest -q

@@ -22,6 +22,12 @@ dev = [
     "ruff>=0.8.0",
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Lets us write `async def test_*` without per-test markers when async
+# tests show up later (none today).
+asyncio_mode = "auto"
+
 [tool.ruff]
 target-version = "py311"
 line-length = 120
