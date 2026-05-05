@@ -17,6 +17,7 @@ Core endpoints:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -35,7 +36,6 @@ from .agent import run_agent_turn, run_dataset_chat
 from .eval_runner import EvalResult, run_eval_sync
 from .models import (
     AgentStatus,
-    Charter,
     CreateDatasetRequest,
     CreateExampleRequest,
     CreateSessionRequest,
@@ -322,8 +322,8 @@ def _append_skill_version(
     state: SessionState,
     body: str,
     created_from: str,
-    notes: Optional[str] = None,
-    applied_suggestion_ids: Optional[list[str]] = None,
+    notes: str | None = None,
+    applied_suggestion_ids: list[str] | None = None,
     as_candidate: bool = False,
 ) -> dict:
     """Create a new SkillVersion entry and return the record.
@@ -1052,7 +1052,7 @@ async def update_session_scorers(session_id: str, body: dict):
     state, conversation = await _load_state(session_id)
     state.scorers = body.get("scorers", [])
     try:
-        result = await db.update_session_input(session_id, state.model_dump())
+        await db.update_session_input(session_id, state.model_dump())
         return {"ok": True}
     except ValueError:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1362,7 +1362,6 @@ async def _retag_dataset_after_charter(session_id: str, charter: dict) -> None:
 
 @app.post("/sessions/{session_id}/message", response_model=SendMessageResponse)
 async def send_message(session_id: str, req: SendMessageRequest):
-    import asyncio
     state, conversation = await _load_state(session_id)
 
     result = await run_agent_turn(state, req.message, regenerate=req.regenerate)
@@ -1700,7 +1699,7 @@ async def run_judge(session_id: str | None = None, limit: int = 50):
         scores = data.get("scores", {})
         reasoning = data.get("reasoning", text)
 
-        judgement = await db.create_judgement(
+        await db.create_judgement(
             turn_id=turn["id"],
             judge_model=get_model(),
             judge_prompt=judge_prompt,
@@ -1716,12 +1715,8 @@ def _build_judge_prompt(turn: dict) -> str:
     """Build a judge prompt for a single turn."""
     turn_type = turn["turn_type"]
     input_snapshot = turn.get("input_snapshot", {})
-    llm_calls = turn.get("llm_calls", [])
     parsed_output = turn.get("parsed_output")
     agent_message = turn.get("agent_message")
-
-    # Get the raw LLM response from the first call
-    raw_response = llm_calls[0]["raw_response"] if llm_calls else "(no response captured)"
 
     if turn_type == "generate":
         return f"""You are a judge evaluating a charter generation agent. The agent was given user input and generated a charter draft.
@@ -2444,7 +2439,6 @@ async def _execute_eval_run(
     All status transitions + results are written to the eval_runs DB row so
     the UI sees them on the next poll, and history survives process restarts.
     """
-    import asyncio
     from datetime import datetime, timezone
     from .eval_runner import DEFAULT_JUDGE_MODEL, DEFAULT_MODEL
 
@@ -2550,9 +2544,7 @@ async def run_eval_for_session(session_id: str, req: RunEvalRequest, request: Re
     from X-Anthropic-Key (same pattern as other endpoints). Runs asynchronously
     in a background task; poll GET /sessions/{id}/eval-runs/{run_id} for status.
     """
-    import asyncio
     import uuid as _uuid
-    from datetime import datetime, timezone
 
     braintrust_key = request.headers.get("x-braintrust-key") or os.environ.get("BRAINTRUST_API_KEY")
     if not braintrust_key:

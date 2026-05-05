@@ -567,6 +567,10 @@ def build_conversational_turn_prompt(state: SessionState, user_message: str) -> 
     # keep the "never say the word charter" framing because that flow still
     # leads a non-technical user through discovery.
     if is_triggered:
+        message_rules = (
+            "- The user pasted a SKILL.md and knows what a charter/eval/scorer is. "
+            "Speak in those terms — don't translate into product language."
+        )
         skill_desc = state.charter.task.skill_description or "(none)"
         context_preamble = f"""You are helping the user refine the charter for evaluating their Claude Code skill.
 
@@ -579,6 +583,10 @@ Extracted goals + stories from SKILL.md:
 
 {state.input.user_stories or ''}"""
     else:
+        message_rules = (
+            "- Never use technical words like: charter, eval, criterion, dataset, LLM, prompt, model\n"
+            "- Ask about their product and users, not about the document"
+        )
         context_preamble = f"""You are helping a user define what good AI output looks like for their feature.
 
 Here's what they told you:
@@ -638,9 +646,7 @@ Rules for suggestions:
 - DE-DUP: every suggestion must be substantively different from every other suggestion AND from criteria already in the charter. Do not output the same idea with reworded phrasing. If you can only find 2 meaningfully distinct ones, return 2 — don't pad.
 
 Rules for your message:
-{"- The user pasted a SKILL.md and knows what a charter/eval/scorer is. Speak in those terms — don't translate into product language."
- if is_triggered else
- "- Never use technical words like: charter, eval, criterion, dataset, LLM, prompt, model\n- Ask about their product and users, not about the document"}
+{message_rules}
 - Only update a section when the user has given you concrete new information
 - Keep updates minimal — only change what the user's input directly improves
 - Be BRIEF. 2-4 sentences max for your commentary. No fluff, no repetition.
