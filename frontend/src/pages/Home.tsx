@@ -108,6 +108,19 @@ export default function Home() {
     setIsNewPromptModalOpen(true);
   };
 
+  const handleNewProject = async () => {
+    setCreating(true);
+    try {
+      const res = await createSession({ name: "Untitled project" });
+      navigate(`/project/${res.session_id}?tab=goals`);
+    } catch (err) {
+      console.error("Failed to create project:", err);
+      alert(`Error: ${err instanceof Error ? err.message : "Unknown error"}`);
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const handleCreatePromptEval = async (target: string, sampleSize: number, body: string) => {
     setCreating(true);
     try {
@@ -231,12 +244,12 @@ export default function Home() {
             <Button
               size="small"
               variant="primary"
-              onClick={openNewSkillModal}
+              onClick={handleNewProject}
               disabled={creating}
               className="rounded-r-none"
             >
               {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-              New skill eval
+              New project
             </Button>
             <Button
               size="small"
@@ -250,6 +263,13 @@ export default function Home() {
             </Button>
             {isMenuOpen && (
               <div className="absolute right-0 top-full mt-1 w-56 bg-surface-raised border border-border shadow-lg z-30">
+                <button
+                  type="button"
+                  onClick={openNewSkillModal}
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-fill-neutral/30 text-foreground"
+                >
+                  New skill eval
+                </button>
                 <button
                   type="button"
                   onClick={openNewPromptModal}
@@ -276,16 +296,16 @@ export default function Home() {
                 No projects yet
               </h2>
               <p className="text-sm text-fg-dim mb-6 max-w-sm">
-                Paste a SKILL.md to build a charter, generate a dataset, and run evals.
+                Start with your business goals — North Star can generate them from a skill or prompt if you have one.
               </p>
               <Button
                 size="big"
                 variant="primary"
-                onClick={openNewSkillModal}
+                onClick={handleNewProject}
                 disabled={creating}
               >
                 {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-                New skill eval
+                New project
               </Button>
             </div>
           ) : (

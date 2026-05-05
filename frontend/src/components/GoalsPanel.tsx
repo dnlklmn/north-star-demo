@@ -35,6 +35,8 @@ interface Props {
   /** Read-only when false: compose row, suggestions, edit/delete affordances,
    *  and the footer CTA all hide. Defaults to true. */
   canEdit?: boolean;
+  /** Optional banner rendered above the compose row (e.g. "Add skill / prompt"). */
+  banner?: ReactNode;
 }
 
 export default function GoalsPanel({
@@ -53,6 +55,7 @@ export default function GoalsPanel({
   rightBottom,
   rightBottomExpanded,
   canEdit = true,
+  banner,
 }: Props) {
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
   const focusIndexRef = useRef<number | null>(null);
@@ -237,6 +240,8 @@ export default function GoalsPanel({
         ) : undefined
       }
     >
+      {banner && <div className="mb-6">{banner}</div>}
+
       {/* Compose row — only shown when the user can actually edit. Viewers see
           the existing goal list as a read-only summary. */}
       {canEdit && (

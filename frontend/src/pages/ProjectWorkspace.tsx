@@ -59,6 +59,7 @@ import Button from "../components/ui/Button";
 import { uniqueProjectName } from "../utils/skillFrontmatter";
 import IconButton from "../components/ui/IconButton";
 import GoalsPanel from "../components/GoalsPanel";
+import AddSourceBanner from "../components/AddSourceBanner";
 import UsersPanel from "../components/UsersPanel";
 import CharterPanel from "../components/CharterPanel";
 import ScorersPanel from "../components/ScorersPanel";
@@ -179,6 +180,12 @@ export default function ProjectWorkspace() {
 
   // --- Story suggestion state ---
   const [storySuggestionsLoading, setStorySuggestionsLoading] = useState(false);
+
+  // --- Goals "Add skill / Add prompt" banner ---
+  // Hidden after the user dismisses it OR once the session already has a
+  // skill body / is a prompt-eval (banner offer is moot). Per-session state,
+  // doesn't persist across reloads.
+  const [addSourceBannerDismissed, setAddSourceBannerDismissed] = useState(false);
 
   // --- Charter phase state ---
   const [activeCriteria, setActiveCriteria] = useState<string[]>([]);
@@ -367,7 +374,7 @@ export default function ProjectWorkspace() {
            } else if (hasCharter) {
              setActiveTab("charter");
            } else if (hasSkillBody || isTriggered) {
-             setActiveTab("skill");
+             setActiveTab("goals");
            }
          } catch {
            // No dataset yet
@@ -378,7 +385,7 @@ export default function ProjectWorkspace() {
            } else if (hasCharter) {
              setActiveTab("charter");
            } else if (hasSkillBody || isTriggered) {
-             setActiveTab("skill");
+             setActiveTab("goals");
            } else if (s.input.story_groups && s.input.story_groups.length > 0) {
              setActiveTab("users");
            }
@@ -432,12 +439,11 @@ export default function ProjectWorkspace() {
     0,
   );
 
-  // Tab availability. In triggered mode, no tab downstream of Skill opens
-  // until the user has pasted + seeded a SKILL.md. This makes the empty
-  // Skill tab the only interactive surface on a brand-new skill session —
-  // mirroring the old standalone "new skill eval" page while keeping the
-  // user in the project workspace throughout.
-  const isTriggered = state.eval_mode === "triggered";
+  // Tab availability. Goals is the entry point and always open; everything
+  // downstream gates on its own data. Triggered- and prompt-eval projects
+  // surface a Skill/Prompt nav item but no longer block the rest of the flow
+  // — users can type goals manually or seed them via the Goals page banner.
+  //
   // Prompt-eval projects share the full skill-eval flow: synthetic SKILL.md
   // describes the prompt under test, gets seeded through call_skill_seed
   // into goals/users/stories, then the user reviews the charter + generates
@@ -445,15 +451,11 @@ export default function ProjectWorkspace() {
   // at run time, where the eval task replays the prompt builder instead
   // of running skill_body as a system prompt.
   const isPromptEval = state.kind === "prompt";
-  const skillReady = !!state.charter.task.skill_body || !isTriggered;
-  const usersAvailable = skillReady && nonEmptyGoals.length >= 2;
-  const charterAvailable = skillReady && (hasCharter || loading);
-  // Prompt-eval seeds the dataset up-front, so it's available even before
-  // the charter has been generated. Skill mode still gates on hasCharter
-  // because that's where dataset feature_areas come from.
-  const datasetAvailable = isPromptEval ? !!dataset : (skillReady && hasCharter);
-  const scorersAvailable = skillReady && hasCharter;
-  const evaluateAvailable = skillReady && !!dataset;
+  const usersAvailable = nonEmptyGoals.length >= 1;
+  const charterAvailable = hasCharter || loading;
+  const datasetAvailable = isPromptEval ? !!dataset : hasCharter;
+  const scorersAvailable = hasCharter;
+  const evaluateAvailable = !!dataset;
 
   const [evalAutoRun, setEvalAutoRun] = useState(false);
   // Generation shortcuts on the Users tab. Independent spinners so the
@@ -791,6 +793,53 @@ export default function ProjectWorkspace() {
       }
     };
   }, []);
+
+  // --- Skill / prompt seed completion ---
+  // Re-hydrates session state, refreshes local goals/story_groups, and renames
+  // the project from the freshly-extracted skill_name when the current name is
+  // still a generic default. Used by both the SkillPanel (Analyze) and the
+  // Goals-page AddSourceBanner (Add skill).
+  const handleSessionSeeded = useCallback(async () => {
+    if (!urlSessionId) return;
+    try {
+      const session = await getSession(urlSessionId);
+      setState(session.state as SessionState);
+      if (session.state.input?.goals) {
+        setGoals([...session.state.input.goals, ""]);
+      }
+      if (session.state.input?.story_groups) {
+        setStoryGroups(session.state.input.story_groups as StoryGroup[]);
+      }
+
+      const desiredBase = session.state.charter?.task?.skill_name?.trim();
+      const currentName = (session as { name?: string }).name?.trim();
+      const isDefault =
+        !currentName ||
+        currentName === "Untitled skill eval" ||
+        currentName === "Untitled project" ||
+        currentName === "Skill eval";
+      if (desiredBase && isDefault) {
+        try {
+          const list = await listSessions();
+          const taken = new Set(
+            list.sessions
+              .filter((p) => p.id !== urlSessionId)
+              .map((p) => p.name?.trim())
+              .filter(Boolean) as string[],
+          );
+          const candidate = uniqueProjectName(desiredBase, taken);
+          if (candidate && candidate !== currentName) {
+            await updateSessionName(urlSessionId, candidate);
+            setProjectName(candidate);
+          }
+        } catch (err) {
+          console.error("Failed to rename project:", err);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to refresh after seed:", err);
+    }
+  }, [urlSessionId]);
 
   // --- Charter phase handlers ---
 
@@ -1878,28 +1927,12 @@ export default function ProjectWorkspace() {
           </div>
 
           {/* Nav groups */}
-          {(state.eval_mode === "triggered" || state.charter.task.skill_body) && (
-            <SidebarGroup hideTopDivider>
-              <SidebarItem
-                label={isPromptEval ? "Prompt" : "Skill"}
-                icon={<GoalsIcon width={24} height={24} />}
-                active={activeTab === "skill"}
-                onClick={() => setActiveTab("skill")}
-              />
-            </SidebarGroup>
-          )}
-
-          <SidebarGroup
-            hideTopDivider={
-              !(state.eval_mode === "triggered" || state.charter.task.skill_body)
-            }
-          >
+          <SidebarGroup hideTopDivider>
             <SidebarItem
               label="Business Goals"
               icon={<GoalsIcon width={24} height={24} />}
               active={activeTab === "goals"}
               onClick={() => setActiveTab("goals")}
-              disabled={!skillReady}
               badge={
                 nonEmptyGoals.length > 0 ? `${nonEmptyGoals.length}` : undefined
               }
@@ -1913,6 +1946,17 @@ export default function ProjectWorkspace() {
               badge={totalStoryCount > 0 ? `${totalStoryCount}` : undefined}
             />
           </SidebarGroup>
+
+          {(state.eval_mode === "triggered" || state.charter.task.skill_body) && (
+            <SidebarGroup>
+              <SidebarItem
+                label={isPromptEval ? "Prompt" : "Skill"}
+                icon={<GoalsIcon width={24} height={24} />}
+                active={activeTab === "skill"}
+                onClick={() => setActiveTab("skill")}
+              />
+            </SidebarGroup>
+          )}
 
           <SidebarGroup>
             <SidebarItem
@@ -1983,54 +2027,10 @@ export default function ProjectWorkspace() {
               }}
               onSeeded={async () => {
                 // Re-hydrate session state so extracted goals/users/stories
-                // show up and downstream tabs unlock. Rename the project to
-                // the skill name if it's still the default. Then jump to
-                // Goals so the user's next action is reviewing extractions.
-                if (!urlSessionId) return;
-                try {
-                  const session = await getSession(urlSessionId);
-                  setState(session.state as SessionState);
-                  if (session.state.input?.goals) {
-                    setGoals([...session.state.input.goals, ""]);
-                  }
-                  if (session.state.input?.story_groups) {
-                    setStoryGroups(session.state.input.story_groups as StoryGroup[]);
-                  }
-
-                  // Rename: take skill name (if any), dedupe against other
-                  // projects with a " N" suffix, only touch generic defaults
-                  // so we don't clobber a name the user typed themselves.
-                  const desiredBase =
-                    session.state.charter?.task?.skill_name?.trim();
-                  const currentName = (session as { name?: string }).name?.trim();
-                  const isDefault =
-                    !currentName ||
-                    currentName === "Untitled skill eval" ||
-                    currentName === "Untitled project" ||
-                    currentName === "Skill eval";
-                  if (desiredBase && isDefault) {
-                    try {
-                      const list = await listSessions();
-                      const taken = new Set(
-                        list.sessions
-                          .filter((p) => p.id !== urlSessionId)
-                          .map((p) => p.name?.trim())
-                          .filter(Boolean) as string[],
-                      );
-                      const candidate = uniqueProjectName(desiredBase, taken);
-                      if (candidate && candidate !== currentName) {
-                        await updateSessionName(urlSessionId, candidate);
-                        setProjectName(candidate);
-                      }
-                    } catch (err) {
-                      console.error("Failed to rename project:", err);
-                    }
-                  }
-
-                  setActiveTab("goals");
-                } catch (err) {
-                  console.error("Failed to refresh after seed:", err);
-                }
+                // show up and downstream tabs unlock. Then jump to Goals so
+                // the user's next action is reviewing extractions.
+                await handleSessionSeeded();
+                setActiveTab("goals");
               }}
               onStartFromScratch={() => {
                 // SkillPanel has already flipped the session to standard mode.
@@ -2065,6 +2065,22 @@ export default function ProjectWorkspace() {
               rightBottom={showAssistant ? undefined : aiAssistButton}
               rightBottomExpanded={showAssistant ? polarisPanel : undefined}
               canEdit={canEdit}
+              banner={
+                canEdit &&
+                urlSessionId &&
+                !addSourceBannerDismissed &&
+                !state.charter.task.skill_body &&
+                !isPromptEval ? (
+                  <AddSourceBanner
+                    sessionId={urlSessionId}
+                    onSeeded={handleSessionSeeded}
+                    onPromptCreated={(newSessionId) => {
+                      navigate(`/project/${newSessionId}?tab=goals`);
+                    }}
+                    onDismiss={() => setAddSourceBannerDismissed(true)}
+                  />
+                ) : undefined
+              }
             />
             </>
           )}
