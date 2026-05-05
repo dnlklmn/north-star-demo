@@ -439,7 +439,7 @@ export default function EvaluatePanel({
         pollTimerRef.current = null
       }
     }
-  }, [activeRun, sessionId, refreshRuns])
+  }, [activeRun, sessionId, refreshRuns, refreshSkillVersions, onRunTerminal])
 
   const canRun =
     keySaved &&
@@ -482,7 +482,7 @@ export default function EvaluatePanel({
         setStarting(false)
       }
     },
-    [sessionId, project, experiment, limit, includeTriggering, judgeModel, refreshRuns],
+    [sessionId, project, experiment, limit, includeTriggering, judgeModel, refreshRuns, hasOpenRouterKey],
   )
 
   const handleRun = async () => {

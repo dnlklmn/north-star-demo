@@ -66,7 +66,9 @@ export default function PanelLayout({
       setIsResizing(false);
       try {
         window.localStorage.setItem("ns:suggestions-width", String(rightWidth));
-      } catch {}
+      } catch {
+        // localStorage unavailable (private mode, quota) — width simply isn't persisted.
+      }
     };
     window.addEventListener("mousemove", handleMove);
     window.addEventListener("mouseup", handleUp);

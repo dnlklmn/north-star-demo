@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { useParams, useNavigate, useSearchParams } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import { ArrowRight as ArrowRightLucide, Loader2, Sparkles as SparklesIcon } from "lucide-react";
 import {
   GearIcon,
@@ -66,7 +66,8 @@ import EvaluatePanel from "../components/EvaluatePanel";
 import SkillPanel from "../components/SkillPanel";
 import ConversationPanel from "../components/ConversationPanel";
 import ExampleReview from "../components/ExampleReview";
-import CoverageMap, { computeCoverageScore } from "../components/CoverageMap";
+import CoverageMap from "../components/CoverageMap";
+import { computeCoverageScore } from "../components/coverage";
 import GenerateModal from "../components/examples/GenerateModal";
 import SettingsPanel from "../components/SettingsPanel";
 import ShareModal from "../components/ShareModal";
@@ -147,7 +148,6 @@ function formatStoryGroups(groups: StoryGroup[]): string {
 
 export default function ProjectWorkspace() {
   const { sessionId: urlSessionId } = useParams<{ sessionId: string }>();
-  const [searchParams] = useSearchParams();
   const navigate = useNavigate();
 
   // --- Navigation ---
@@ -315,8 +315,12 @@ export default function ProjectWorkspace() {
          const isTriggered = s.eval_mode === "triggered";
          const isPromptEval = s.kind === "prompt";
 
-         // Check for ?tab= query param (e.g. ?tab=goals from Home modal)
-         const tabParam = searchParams.get("tab");
+         // Check for ?tab= query param (e.g. ?tab=goals from Home modal).
+         // Read directly from window.location so this effect only re-runs on
+         // urlSessionId change — adding searchParams to the dep list would
+         // re-hydrate on every tab toggle (the user can change tabs after
+         // load, which updates searchParams).
+         const tabParam = new URLSearchParams(window.location.search).get("tab");
           const validTabs: ActiveTab[] = ["skill", "goals", "users", "charter", "dataset", "scorers", "evaluate"];
          const tabFromUrl = validTabs.includes(tabParam as ActiveTab) ? tabParam as ActiveTab : null;
 

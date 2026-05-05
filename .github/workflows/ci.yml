@@ -33,11 +33,7 @@ jobs:
       - name: Install dependencies
         run: npm ci --legacy-peer-deps
 
-      - name: Lint (advisory)
-        # TODO: drop continue-on-error once the 31 pre-existing eslint errors
-        # are cleared (mostly react-hooks/set-state-in-effect and
-        # react-refresh/only-export-components). Build below is a hard gate.
-        continue-on-error: true
+      - name: Lint
         run: npm run lint
 
       - name: Type-check + build

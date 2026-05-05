@@ -145,13 +145,16 @@ export default function UsersPanel({
   } | null>(null);
   const editRoleRef = useRef<HTMLInputElement | null>(null);
 
+  // Focus runs only when the edited row changes (gi). Pulling gi out lets
+  // exhaustive-deps see exactly what we're synchronizing on.
+  const editingRoleGi = editingRole?.gi
   useEffect(() => {
-    if (!editingRole) return;
+    if (editingRoleGi == null) return;
     requestAnimationFrame(() => {
       editRoleRef.current?.focus();
       editRoleRef.current?.select();
     });
-  }, [editingRole?.gi]);
+  }, [editingRoleGi]);
 
   const startEditRole = (gi: number) => {
     setEditingRole({ gi, value: storyGroups[gi].role });
@@ -174,13 +177,18 @@ export default function UsersPanel({
   const editWhatRef = useRef<HTMLInputElement | null>(null);
   const editWhyRef = useRef<HTMLInputElement | null>(null);
 
+  // Same pattern as editingRoleGi — pull the identity fields we synchronize
+  // on so exhaustive-deps can see them.
+  const editingStoryGi = editingStory?.gi
+  const editingStorySi = editingStory?.si
+  const editingStoryFocusField = editingStory?.focusField
   useEffect(() => {
-    if (!editingStory) return;
+    if (editingStoryGi == null) return;
     requestAnimationFrame(() => {
-      if (editingStory.focusField === "why") editWhyRef.current?.focus();
+      if (editingStoryFocusField === "why") editWhyRef.current?.focus();
       else editWhatRef.current?.focus();
     });
-  }, [editingStory?.gi, editingStory?.si, editingStory?.focusField]);
+  }, [editingStoryGi, editingStorySi, editingStoryFocusField]);
 
   const startEditStory = (gi: number, si: number, field: "what" | "why") => {
     const s = storyGroups[gi]?.stories[si];
@@ -240,33 +248,29 @@ export default function UsersPanel({
     }
   }, [addingRole]);
 
-  // Auto-commit roles that have content from outside (e.g. accepted suggestions)
-  useEffect(() => {
-    setCommittedRoles((prev) => {
-      let changed = false;
-      const next = new Set(prev);
-      storyGroups.forEach((g, i) => {
-        if (
-          g.role.trim() &&
-          g.stories.some((s) => s.what.trim()) &&
-          !next.has(i)
-        ) {
-          next.add(i);
-          changed = true;
-        }
-      });
-      return changed ? next : prev;
+  // Auto-commit roles that have content from outside (e.g. accepted suggestions).
+  // Derived during render rather than in an effect.
+  {
+    let nextCommitted: Set<number> | null = null;
+    storyGroups.forEach((g, i) => {
+      if (
+        g.role.trim() &&
+        g.stories.some((s) => s.what.trim()) &&
+        !committedRoles.has(i)
+      ) {
+        if (!nextCommitted) nextCommitted = new Set(committedRoles);
+        nextCommitted.add(i);
+      }
     });
-  }, [storyGroups]);
+    if (nextCommitted) setCommittedRoles(nextCommitted);
+  }
 
-  // If the first group has no committed role yet and has a role name, show the role input
-  // Otherwise keep active index in bounds
-  useEffect(() => {
-    const committedIndices = Array.from(committedRoles).sort((a, b) => a - b);
-    if (committedIndices.length > 0 && !committedRoles.has(activeRoleIndex)) {
-      setActiveRoleIndex(committedIndices[0]);
-    }
-  }, [committedRoles, activeRoleIndex]);
+  // Keep the active role index pointing at a committed role. If we're sitting
+  // on a non-committed index but committed roles exist, jump to the first one.
+  if (committedRoles.size > 0 && !committedRoles.has(activeRoleIndex)) {
+    const firstCommitted = Math.min(...Array.from(committedRoles));
+    setActiveRoleIndex(firstCommitted);
+  }
 
   // Cmd+Enter → next phase
   useEffect(() => {
@@ -392,12 +396,21 @@ export default function UsersPanel({
     storyGroups[0]?.role ?? "",
   );
 
-  // Keep initialRoleName in sync if storyGroups changes externally
-  useEffect(() => {
+  // Keep initialRoleName in sync if storyGroups changes externally. Track
+  // the previous source value and update during render.
+  const externalInitialRole = storyGroups[0]?.role ?? "";
+  const [prevExternalInitialRole, setPrevExternalInitialRole] = useState(externalInitialRole);
+  const [prevShowInitialRoleInput, setPrevShowInitialRoleInput] = useState(showInitialRoleInput);
+  if (
+    externalInitialRole !== prevExternalInitialRole ||
+    showInitialRoleInput !== prevShowInitialRoleInput
+  ) {
+    setPrevExternalInitialRole(externalInitialRole);
+    setPrevShowInitialRoleInput(showInitialRoleInput);
     if (showInitialRoleInput && storyGroups[0]) {
       setInitialRoleName(storyGroups[0].role);
     }
-  }, [showInitialRoleInput, storyGroups]);
+  }
 
   const handleInitialRoleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {

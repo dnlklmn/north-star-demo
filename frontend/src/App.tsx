@@ -7,15 +7,12 @@ import ApiKeyBanner from './components/ApiKeyBanner'
 import LLMBillingBanner from './components/LLMBillingBanner'
 
 export default function App() {
-  const [needsKey, setNeedsKey] = useState(false)
+  const [needsKey, setNeedsKey] = useState(() => !hasApiKey())
 
   useEffect(() => {
-    // Check if we need to show the API key banner
-    if (hasApiKey()) {
-      setNeedsKey(false)
-      return
-    }
-    // No local key — check if server has a default
+    // If we already have a local key, no async check needed.
+    if (hasApiKey()) return
+    // No local key — check if server has a default.
     checkHealth().then(h => {
       setNeedsKey(!h.has_default_api_key)
     }).catch(() => {

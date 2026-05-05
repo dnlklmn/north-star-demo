@@ -11,12 +11,13 @@ interface NewSkillEvalModalProps {
 
 export default function NewSkillEvalModal({ isOpen, isLoading, onClose, onAnalyze }: NewSkillEvalModalProps) {
   const [skillInput, setSkillInput] = useState('')
-
-  useEffect(() => {
-    if (isOpen) {
-      setSkillInput('')
-    }
-  }, [isOpen])
+  // Reset the input every time the modal opens. Track previous open-state and
+  // clear during render rather than via setState-in-effect.
+  const [prevIsOpen, setPrevIsOpen] = useState(isOpen)
+  if (isOpen !== prevIsOpen) {
+    setPrevIsOpen(isOpen)
+    if (isOpen) setSkillInput('')
+  }
 
   useEffect(() => {
     if (!isOpen) return
