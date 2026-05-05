@@ -57,7 +57,8 @@ logger = logging.getLogger(__name__)
 _client: anthropic.Anthropic | None = None
 
 # Per-request API key (set via contextvars for thread safety)
-import contextvars
+import contextvars  # noqa: E402
+
 _request_api_key: contextvars.ContextVar[str | None] = contextvars.ContextVar('_request_api_key', default=None)
 
 # Cached settings (refreshed each LLM call)
@@ -1277,7 +1278,7 @@ def _extract_json(text: str) -> dict:
     text = text.strip()
     if text.startswith("```"):
         lines = text.split("\n")
-        lines = [l for l in lines[1:] if not l.strip().startswith("```")]
+        lines = [line for line in lines[1:] if not line.strip().startswith("```")]
         text = "\n".join(lines)
     start = text.find("{")
     end = text.rfind("}") + 1

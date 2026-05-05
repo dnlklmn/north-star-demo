@@ -84,7 +84,7 @@ def judge_charter(charter: dict) -> dict | None:
     # extract JSON from the response
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
-        print(f"    [warn] could not parse JSON from judge response")
+        print("    [warn] could not parse JSON from judge response")
         return None
 
     try:
@@ -156,7 +156,7 @@ def run_eval():
         tick = "✓" if bad_correct else "✗"
         print(f"  bad output   {tick}  judge: {bad_got}")
         if not bad_correct and bad_verdict:
-            print(f"               → judge thought this was good")
+            print("               → judge thought this was good")
             for dim, detail in (bad_verdict.get("dimensions") or {}).items():
                 if detail.get("status") == "pass":
                     print(f"               → {dim} passed when it should have failed: {detail.get('reason')}")

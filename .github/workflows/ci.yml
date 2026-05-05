@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel stale runs on the same branch / PR when a new commit lands.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: Frontend (lint + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Lint (advisory)
+        # TODO: drop continue-on-error once the 31 pre-existing eslint errors
+        # are cleared (mostly react-hooks/set-state-in-effect and
+        # react-refresh/only-export-components). Build below is a hard gate.
+        continue-on-error: true
+        run: npm run lint
+
+      - name: Type-check + build
+        run: npm run build
+
+  backend:
+    name: Backend (lint + import)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Ruff lint (backend + evals)
+        # Evals scripts share the backend's ruff config — running ruff from
+        # backend/ resolves [tool.ruff] correctly and applies the same rules
+        # to the evals/ tree and the root-level eval script.
+        working-directory: backend
+        run: ruff check app/ scripts/ tests/ ../evals/ ../north-star-eval.py
+
+      - name: Import smoke test
+        # Catches broken imports, syntax errors, missing dependencies, and
+        # circular imports without needing a database or API key.
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://localhost:5432/northstar
+        run: |
+          python -c "import app.main"
+          python -c "import app.agent"
+          python -c "import app.tools"
+          python -c "import app.eval_runner"
+          python -c "import app.online_scorers"
+
+      - name: Pytest
+        working-directory: backend
+        run: pytest -q
