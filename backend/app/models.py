@@ -736,3 +736,31 @@ class InferSchemaResponse(BaseModel):
     confidence: str  # "high" | "medium" | "low"
     example_count: int
     pattern_notes: str  # What patterns were detected
+
+
+# --- Share tokens (project sharing) ---------------------------------------
+
+class CreateShareTokenRequest(BaseModel):
+    """Owner-only payload for minting a new share token."""
+    role: str  # 'viewer' | 'editor'
+    label: Optional[str] = None
+
+
+class CreateShareTokenResponse(BaseModel):
+    """Returned exactly once at create time — the plaintext `token` is never
+    surfaced again, so the frontend must capture it from this response."""
+    id: str
+    token: str
+    role: str
+    label: Optional[str] = None
+    created_at: datetime
+
+
+class ShareTokenSummary(BaseModel):
+    """List-view shape: redacted, safe to render in the management UI."""
+    id: str
+    role: str
+    label: Optional[str] = None
+    token_preview: str  # First 8 chars + "…"
+    created_at: datetime
+    revoked_at: Optional[datetime] = None

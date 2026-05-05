@@ -15,9 +15,11 @@ interface Props {
    *  charter page kicked off `Generate dataset and scorers`). The empty-state
    *  spinner picks this up so the user sees feedback when they land here. */
   externalGenerating?: boolean
+  /** Read-only when false: generate/regenerate, save and download buttons hide. */
+  canEdit?: boolean
 }
 
-export default function ScorersPanel({ charter, hasDataset: _hasDataset, sessionId, scorers: externalScorers, onScorersChange, onNavigateToEvaluate, externalGenerating }: Props) {
+export default function ScorersPanel({ charter, hasDataset: _hasDataset, sessionId, scorers: externalScorers, onScorersChange, onNavigateToEvaluate, externalGenerating, canEdit = true }: Props) {
   const [localScorers, setLocalScorers] = useState<ScorerDef[]>([])
   const scorers = externalScorers ?? localScorers
   const setScorers = (s: ScorerDef[]) => {
@@ -118,6 +120,9 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
             <span className="text-xs text-muted-foreground">{scorers.length} scorers</span>
           </div>
           <div className="flex items-center gap-2">
+            {/* Download is technically read-only (export of public state),
+                but the spec calls for hiding save + regen for viewers; we
+                keep Download for everyone since it's not a mutation. */}
             <button
               onClick={handleDownloadAll}
               className="px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground border border-border transition-colors flex items-center gap-1"
@@ -125,23 +130,25 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
               <Download className="w-3 h-3" />
               Download all
             </button>
-            <button
-              onClick={handleGenerate}
-              disabled={!hasCriteria || generating}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {generating ? (
-                <>
-                  <Loader2 className="w-3 h-3 animate-spin" />
-                  Generating...
-                </>
-              ) : (
-                <>
-                  <Sparkles className="w-3 h-3" />
-                  Regenerate
-                </>
-              )}
-            </button>
+            {canEdit && (
+              <button
+                onClick={handleGenerate}
+                disabled={!hasCriteria || generating}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {generating ? (
+                  <>
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    Generating...
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-3 h-3" />
+                    Regenerate
+                  </>
+                )}
+              </button>
+            )}
             {onNavigateToEvaluate && (
               <button
                 onClick={onNavigateToEvaluate}
@@ -175,23 +182,30 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
                   Generate scorers based on your charter.
                 </p>
               </div>
-              <button
-                onClick={handleGenerate}
-                disabled={!hasCriteria || generating}
-                className="flex items-center gap-2 px-5 py-2.5 text-sm font-medium bg-accent text-accent-foreground hover:opacity-90 transition-opacity disabled:opacity-50"
-              >
-                {generating ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    Generating...
-                  </>
-                ) : (
-                  <>
-                    <AIIcon width={16} height={16} />
-                    Generate scorers
-                  </>
-                )}
-              </button>
+              {canEdit && (
+                <button
+                  onClick={handleGenerate}
+                  disabled={!hasCriteria || generating}
+                  className="flex items-center gap-2 px-5 py-2.5 text-sm font-medium bg-accent text-accent-foreground hover:opacity-90 transition-opacity disabled:opacity-50"
+                >
+                  {generating ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Generating...
+                    </>
+                  ) : (
+                    <>
+                      <AIIcon width={16} height={16} />
+                      Generate scorers
+                    </>
+                  )}
+                </button>
+              )}
+              {!canEdit && (
+                <p className="text-xs text-fg-dim">
+                  No scorers yet. The project owner needs to generate them.
+                </p>
+              )}
               {!hasCriteria && (
                 <p className="text-xs text-fg-dim">
                   Build a charter first — scorers are derived from its criteria.

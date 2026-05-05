@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import secrets
 import uuid
 from datetime import datetime, timezone
 
@@ -224,6 +226,35 @@ async def _create_tables() -> None:
             ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS judge_model_used TEXT;
         """)
 
+        # Share tokens — every project ("session") can hand out viewer/editor
+        # links. The plaintext token is generated once at create time and
+        # surfaced to the caller exactly once; the row stores only the
+        # sha256(token) hash, so a DB read alone can't be turned into working
+        # share links. `token_preview` (first 8 chars + ellipsis) is captured
+        # at create time so the owner UI can still distinguish two tokens at
+        # a glance without ever re-exposing the secret.
+        # ON DELETE CASCADE matches the rest of the per-session children.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS share_tokens (
+                id            UUID PRIMARY KEY,
+                session_id    TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                token_hash    TEXT UNIQUE NOT NULL,
+                token_preview TEXT NOT NULL,
+                role          TEXT NOT NULL CHECK (role IN ('viewer','editor')),
+                label         TEXT,
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+                revoked_at    TIMESTAMPTZ
+            );
+        """)
+        await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_share_tokens_hash
+                ON share_tokens(token_hash);
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_share_tokens_session
+                ON share_tokens(session_id);
+        """)
+
 
 # --- Session CRUD ---
 
@@ -286,6 +317,16 @@ async def update_session(session_id: str, state: dict, conversation: list[dict])
             result["state"] = json.loads(result["state"])
         if isinstance(result["conversation"], str):
             result["conversation"] = json.loads(result["conversation"])
+
+        # Notify any open SSE subscribers that the session state changed.
+        # Local import avoids a circular import: sharing imports db at module
+        # load time. Best-effort — a publish failure must not undo the write.
+        try:
+            from .sharing import broadcaster
+            await broadcaster.publish(session_id, {"type": "state_changed"})
+        except Exception:  # noqa: BLE001
+            pass
+
         return result
 
 
@@ -359,6 +400,13 @@ async def update_session_name(session_id: str, name: str) -> dict:
         )
         if row is None:
             raise ValueError(f"Session {session_id} not found")
+        # Notify SSE subscribers — a viewer watching the project should see
+        # the rename live, not on next reload. Best-effort; never undo a write.
+        try:
+            from .sharing import broadcaster
+            await broadcaster.publish(session_id, {"type": "state_changed"})
+        except Exception:  # noqa: BLE001
+            pass
         return dict(row)
 
 
@@ -383,6 +431,12 @@ async def update_session_input(session_id: str, state: dict) -> dict:
             result["state"] = json.loads(result["state"])
         if isinstance(result["conversation"], str):
             result["conversation"] = json.loads(result["conversation"])
+        # Notify SSE subscribers so viewers see input edits without reloading.
+        try:
+            from .sharing import broadcaster
+            await broadcaster.publish(session_id, {"type": "state_changed"})
+        except Exception:  # noqa: BLE001
+            pass
         return result
 
 
@@ -808,6 +862,23 @@ def _parse_dataset_row(row) -> dict:
 
 # --- Example CRUD ---
 
+async def _broadcast_dataset_change(dataset_id: str) -> None:
+    """Resolve dataset_id → session_id and emit a state-changed event.
+
+    Called from the example/dataset write helpers so a viewer subscribed via
+    SSE sees row reviews, imports, and deletes live, not just on next reload.
+    Best-effort — a publish failure must never undo the underlying write.
+    """
+    try:
+        session_id = await get_session_id_for_dataset(dataset_id)
+        if not session_id:
+            return
+        from .sharing import broadcaster
+        await broadcaster.publish(session_id, {"type": "state_changed"})
+    except Exception:  # noqa: BLE001
+        pass
+
+
 async def create_example(
     dataset_id: str,
     feature_area: str,
@@ -834,7 +905,9 @@ async def create_example(
             json.dumps(coverage_tags or []), source, label, label_reason,
             should_trigger, is_adversarial,
         )
-        return _parse_example_row(row)
+        result = _parse_example_row(row)
+    await _broadcast_dataset_change(dataset_id)
+    return result
 
 
 async def bulk_create_examples(dataset_id: str, examples: list[dict]) -> list[dict]:
@@ -859,6 +932,8 @@ async def bulk_create_examples(dataset_id: str, examples: list[dict]) -> list[di
                 ex.get("is_adversarial"),
             )
             results.append(_parse_example_row(row))
+    if results:
+        await _broadcast_dataset_change(dataset_id)
     return results
 
 
@@ -930,14 +1005,27 @@ async def update_example(example_id: str, fields: dict) -> dict:
         )
         if row is None:
             raise ValueError(f"Example {example_id} not found")
-        return _parse_example_row(row)
+        parsed = _parse_example_row(row)
+    # Broadcast outside the connection so a slow subscriber can't hold the
+    # pool. dataset_id is a TEXT FK on the row we just returned.
+    dataset_id = parsed.get("dataset_id")
+    if dataset_id:
+        await _broadcast_dataset_change(str(dataset_id))
+    return parsed
 
 
 async def delete_example(example_id: str) -> bool:
     pool = await get_pool()
     async with pool.acquire() as conn:
+        # Capture dataset_id before delete so we can broadcast afterwards.
+        dataset_row = await conn.fetchrow(
+            "SELECT dataset_id FROM examples WHERE id = $1", example_id,
+        )
         result = await conn.execute("DELETE FROM examples WHERE id = $1", example_id)
-        return result == "DELETE 1"
+    deleted = result == "DELETE 1"
+    if deleted and dataset_row:
+        await _broadcast_dataset_change(str(dataset_row["dataset_id"]))
+    return deleted
 
 
 async def delete_examples_for_dataset(dataset_id: str) -> int:
@@ -954,9 +1042,12 @@ async def delete_examples_for_dataset(dataset_id: str) -> int:
         )
         # status is "DELETE <n>" — parse the count for the API response.
         try:
-            return int(status.split()[-1])
+            count = int(status.split()[-1])
         except (IndexError, ValueError):
-            return 0
+            count = 0
+    if count:
+        await _broadcast_dataset_change(dataset_id)
+    return count
 
 
 async def count_curated_examples(dataset_id: str) -> int:
@@ -1132,6 +1223,131 @@ async def get_judgements(
                 r["scores"] = json.loads(r["scores"])
             results.append(r)
         return results
+
+
+# --- Share token CRUD ---
+
+async def create_share_token(
+    session_id: str,
+    role: str,
+    label: str | None,
+) -> dict:
+    """Create a fresh share token for a session.
+
+    Returns the row including the plaintext token under the `token` key —
+    this is the **only** moment the plaintext is exposed. The DB only ever
+    stores `sha256(token)`; subsequent reads via `list_share_tokens` show
+    `token_preview` (first 8 chars + ellipsis). Caller is responsible for
+    surfacing the plaintext to the user immediately and never persisting it
+    elsewhere.
+    """
+    if role not in ("viewer", "editor"):
+        raise ValueError(f"role must be 'viewer' or 'editor' (got {role!r})")
+    token_id = str(uuid.uuid4())
+    # 32 bytes of entropy → ~43 char base64url string. Comfortable margin
+    # against guessing without bloating share URLs.
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    token_preview = token[:8] + "…"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO share_tokens (id, session_id, token_hash, token_preview, role, label)
+            VALUES ($1::uuid, $2, $3, $4, $5, $6)
+            RETURNING id, session_id, token_preview, role, label, created_at, revoked_at
+            """,
+            token_id, session_id, token_hash, token_preview, role, label,
+        )
+        result = dict(row)
+        # Plaintext token only exists in memory here — return it once so the
+        # caller can show it to the user. Never persisted in this dict's path.
+        result["token"] = token
+        return result
+
+
+async def list_share_tokens(session_id: str) -> list[dict]:
+    """Return active + revoked tokens for a session, plaintext redacted.
+
+    `token_preview` is captured at create time (first 8 chars + ellipsis) so
+    the owner can tell two tokens apart in the UI without the DB ever having
+    to store the plaintext. Sorted newest-first to match the rest of the
+    listing endpoints.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, session_id, token_preview, role, label, created_at, revoked_at
+            FROM share_tokens
+            WHERE session_id = $1
+            ORDER BY created_at DESC
+            """,
+            session_id,
+        )
+    return [dict(r) for r in rows]
+
+
+async def revoke_share_token(token_id: str, session_id: str) -> bool:
+    """Mark a token revoked. Idempotent — already-revoked → returns False.
+
+    Scoped by session_id so a token leaked from one project can't be revoked
+    via someone else's owner endpoint (defense-in-depth; the endpoint also
+    checks ownership before calling).
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        status = await conn.execute(
+            """
+            UPDATE share_tokens
+            SET revoked_at = now()
+            WHERE id = $1::uuid AND session_id = $2 AND revoked_at IS NULL
+            """,
+            token_id, session_id,
+        )
+        # asyncpg returns "UPDATE n"
+        try:
+            return int(status.split()[-1]) > 0
+        except (IndexError, ValueError):
+            return False
+
+
+async def resolve_share_token(token: str) -> dict | None:
+    """Look up an active token. Returns {session_id, role} or None.
+
+    Hashes the incoming plaintext and looks up by `token_hash`, so the DB
+    never sees the plaintext at rest. Returns None for both "doesn't exist"
+    and "revoked" — the calling layer (`sharing.resolve_access`) maps both to
+    a generic 403 to avoid leaking which leg of the lookup failed.
+    """
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT session_id, role
+            FROM share_tokens
+            WHERE token_hash = $1 AND revoked_at IS NULL
+            """,
+            token_hash,
+        )
+        return dict(row) if row else None
+
+
+async def get_session_id_for_dataset(dataset_id: str) -> str | None:
+    """Cheap session_id lookup for dataset-scoped endpoints.
+
+    The mutating dataset endpoints accept dataset_id in the path but auth on
+    session_id. Loading the whole dataset row just to read one column was
+    wasteful, so this helper exists for the auth dependency.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT session_id FROM datasets WHERE id = $1",
+            dataset_id,
+        )
+        return row["session_id"] if row else None
 
 
 # --- Eval run CRUD (persisted Braintrust eval runs) ---

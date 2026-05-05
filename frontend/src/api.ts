@@ -1,6 +1,8 @@
-import type { ActivityEvent, CreateSessionResponse, CreateSkillVersionRequest, EvalMode, EvalRunSummary, RunEvalRequest, SendMessageResponse, SessionState, SkillVersion, SuggestImprovementsResponse, Charter, Dataset, Example, GapAnalysis, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse, ProjectSummary, StoryGroup, ScorerDef } from './types'
+import type { ActivityEvent, CreateSessionResponse, CreateSkillVersionRequest, CreatedShareToken, EvalMode, EvalRunSummary, RunEvalRequest, SendMessageResponse, SessionState, ShareTokenSummary, SkillVersion, SuggestImprovementsResponse, Charter, Dataset, Example, GapAnalysis, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse, ProjectSummary, StoryGroup, ScorerDef } from './types'
+import { getShareToken, setAccessRole } from './shareToken'
 
-const BASE = import.meta.env.VITE_API_URL || '/api'
+export const API_BASE = import.meta.env.VITE_API_URL || '/api'
+const BASE = API_BASE
 
 // --- API Key management (localStorage) ---
 
@@ -70,6 +72,13 @@ function apiHeaders(extra?: Record<string, string>): Record<string, string> {
   if (key) {
     headers['X-Anthropic-Key'] = key
   }
+  // Share token: set when the user opened the project from a "?shareToken=…"
+  // URL. Backend resolves it to a viewer/editor role for this session; absent
+  // header → owner (the default before sharing existed).
+  const shareToken = getShareToken()
+  if (shareToken) {
+    headers['X-Share-Token'] = shareToken
+  }
   return headers
 }
 
@@ -86,6 +95,18 @@ export interface LLMBillingErrorDetail {
 }
 
 export const LLM_BILLING_EVENT = 'northstar:llm-billing'
+
+/**
+ * Global event fired when a write attempt is rejected because the current
+ * share token is read-only. A top-level banner / toast listens and shows a
+ * friendly message — components that triggered the call still receive a
+ * normal Error so their local catch can revert optimistic UI.
+ */
+export interface ShareForbiddenDetail {
+  message: string
+}
+
+export const SHARE_FORBIDDEN_EVENT = 'northstar:share-forbidden'
 
 async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
   let res: Response
@@ -136,6 +157,23 @@ async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
     }
     // Fall through to default Response handling for non-LLM 422s
     // (validation errors etc.).
+  }
+  if (res.status === 403) {
+    // Viewer attempted a write. Broadcast so a banner/toast can react, then
+    // throw a normal Error so the caller's catch path can still revert any
+    // optimistic state. The detail message is best-effort — server may
+    // simply have returned a JSON {detail} or nothing at all.
+    let body: { detail?: string } = {}
+    try { body = await res.clone().json() } catch { /* not JSON */ }
+    const message = body.detail || 'You have read-only access to this project.'
+    try {
+      window.dispatchEvent(
+        new CustomEvent<ShareForbiddenDetail>(SHARE_FORBIDDEN_EVENT, { detail: { message } }),
+      )
+    } catch {
+      // SSR or other env without window — non-fatal.
+    }
+    throw new Error(message)
   }
   if (res.status === 402) {
     // Provider rejected the call for billing reasons. Read the body once,
@@ -294,7 +332,51 @@ export async function getSession(
 ): Promise<{ session_id: string; state: SessionState; conversation: Array<{ role: string; content: string }> }> {
   const res = await apiFetch(`${BASE}/sessions/${sessionId}`)
   if (!res.ok) throw new Error(`Failed to get session: ${res.status}`)
+  const data = await res.json()
+  // Backend stamps _access on every authenticated session response based on
+  // the share-token header (or absence of one). Mirror it into the role
+  // pub/sub so panel-level edit gating can react without prop-drilling.
+  const access = data?.state?._access
+  if (access?.role) {
+    setAccessRole(sessionId, access.role)
+  }
+  return data
+}
+
+// --- Share tokens ---
+
+export async function createShareToken(
+  sessionId: string,
+  role: 'viewer' | 'editor',
+  label?: string,
+): Promise<CreatedShareToken> {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/share-tokens`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ role, label: label?.trim() || null }),
+  })
+  if (!res.ok) {
+    let detail = `Failed to create share token (${res.status})`
+    try {
+      const j = await res.json()
+      if (j?.detail) detail = j.detail
+    } catch { /* not JSON */ }
+    throw new Error(detail)
+  }
   return res.json()
+}
+
+export async function listShareTokens(sessionId: string): Promise<ShareTokenSummary[]> {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/share-tokens`)
+  if (!res.ok) throw new Error(`Failed to list share tokens: ${res.status}`)
+  return res.json()
+}
+
+export async function revokeShareToken(sessionId: string, tokenId: string): Promise<void> {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/share-tokens/${tokenId}`, {
+    method: 'DELETE',
+  })
+  if (!res.ok && res.status !== 204) throw new Error(`Failed to revoke share token: ${res.status}`)
 }
 
 export async function getActivity(

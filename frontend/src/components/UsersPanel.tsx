@@ -27,6 +27,9 @@ interface Props {
   rightBottom?: ReactNode;
   /** When set, expands bottom section to fill and caps Suggestions height. */
   rightBottomExpanded?: ReactNode;
+  /** Read-only when false: suggestions, footer CTA, and inputs all disabled.
+   *  Defaults to true. */
+  canEdit?: boolean;
 }
 
 export default function UsersPanel({
@@ -44,6 +47,7 @@ export default function UsersPanel({
   loading,
   rightBottom,
   rightBottomExpanded,
+  canEdit = true,
 }: Props) {
   // Track which roles have been committed (Enter pressed)
   const [committedRoles, setCommittedRoles] = useState<Set<number>>(new Set());
@@ -414,6 +418,7 @@ export default function UsersPanel({
       rightBottom={rightBottom}
       rightBottomExpanded={rightBottomExpanded}
       right={
+        canEdit ? (
         <SuggestionBox
           onRefresh={hasStories ? onStoryCommit : undefined}
           loading={storySuggestionsLoading}
@@ -449,19 +454,28 @@ export default function UsersPanel({
               ))
             : null}
         </SuggestionBox>
+        ) : undefined
       }
       footer={
-        <Button
-          size="big"
-          variant={nextVariant}
-          shortcut={<CmdReturnIcon />}
-          onClick={onNext}
-          disabled={nextDisabled}
-        >
-          {loading ? "Generating..." : nextLabel}
-        </Button>
+        canEdit ? (
+          <Button
+            size="big"
+            variant={nextVariant}
+            shortcut={<CmdReturnIcon />}
+            onClick={onNext}
+            disabled={nextDisabled}
+          >
+            {loading ? "Generating..." : nextLabel}
+          </Button>
+        ) : undefined
       }
     >
+      {/* Read-only mode: a top-level disabled fieldset disables every native
+          input/button beneath it. Visual cursor stays default. We deliberately
+          don't add a 'disabled' style — viewers should still see the content
+          legibly; this is just the safety net so stray clicks can't reach a
+          mutating handler. */}
+      <fieldset disabled={!canEdit} className="contents">
       {/* Initial role input — only when no roles committed yet */}
       {showInitialRoleInput && (
         <div>
@@ -640,6 +654,7 @@ export default function UsersPanel({
           )}
         </div>
       )}
+      </fieldset>
 
     </PanelLayout>
   );
