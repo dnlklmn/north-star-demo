@@ -1,6 +1,6 @@
 import { useRef, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
 import { ReturnKeyIcon, CmdReturnIcon } from "./ui/Icons";
 import type { StoryGroup, SuggestedStory } from "../types";
 import PanelLayout from "./PanelLayout";
@@ -41,6 +41,9 @@ interface Props {
   /** Content rendered above the user-stories body, inside the same
    *  PanelLayout. Used to host an embedded GoalsPanel on the combined tab. */
   preBody?: React.ReactNode;
+  /** Whether at least one non-empty business goal exists. Drives the
+   *  "Generate from business goals" button state in embedded mode. */
+  hasGoals?: boolean;
 }
 
 export default function UsersPanel({
@@ -64,6 +67,7 @@ export default function UsersPanel({
   secondaryDisabled,
   embedded = false,
   preBody,
+  hasGoals = false,
 }: Props) {
   // Track which roles have been committed (Enter pressed)
   const [committedRoles, setCommittedRoles] = useState<Set<number>>(new Set());
@@ -518,6 +522,26 @@ export default function UsersPanel({
       {preBody}
       {preBody && (
         <hr className="my-12 border-border-hint" />
+      )}
+      {embedded && (
+        <div className="flex items-center justify-between mb-6">
+          <h3 className="text-lg font-medium text-fg-contrast">
+            User stories
+          </h3>
+          {canEdit && (
+            <Button
+              size="small"
+              variant="neutral"
+              onClick={onStoryCommit}
+              disabled={!hasGoals || storySuggestionsLoading}
+            >
+              {storySuggestionsLoading ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : null}
+              Generate from business goals
+            </Button>
+          )}
+        </div>
       )}
       {/* Read-only mode: a top-level disabled fieldset disables every native
           input/button beneath it. Visual cursor stays default. We deliberately

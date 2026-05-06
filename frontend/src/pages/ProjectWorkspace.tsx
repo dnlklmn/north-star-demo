@@ -2020,6 +2020,7 @@ export default function ProjectWorkspace() {
           {(activeTab === "goals" || activeTab === "users") && (
             <UsersPanel
               embedded
+              hasGoals={nonEmptyGoals.length > 0}
               preBody={
                 <GoalsPanel
                   embedded
