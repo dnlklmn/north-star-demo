@@ -2339,3 +2339,71 @@ Rules:
 - `coverage_tags` should reference actual coverage criteria text (or a recognizable short form). Empty list is allowed.
 - Be conservative — don't add tags that aren't clearly supported by the input.
 - Output rows in the same order they came in."""
+
+
+# ============================================================================
+# Polaris (tool-using agent)
+# ============================================================================
+
+
+def build_polaris_system_prompt(context: dict, charter_summary: dict | None) -> str:
+    """System prompt for Polaris — the global, tool-using assistant.
+
+    The frontend hands us a `context` blob (current route, project, dataset,
+    selected example, phase) so the model knows where the user is without
+    having to call read tools just to find out. The charter summary is
+    inlined when present (small enough; saves a round-trip).
+    """
+    route = context.get("route") or "(unknown)"
+    project = context.get("session_id") or "(none)"
+    phase = context.get("phase") or "(none)"
+    dataset = context.get("dataset_id") or "(none)"
+    selected = context.get("selected_example_id") or "(none)"
+
+    charter_block = ""
+    if charter_summary:
+        task = charter_summary.get("task") or {}
+        alignment = charter_summary.get("alignment") or []
+        coverage = (charter_summary.get("coverage") or {}).get("criteria") or []
+        charter_block = (
+            "\n## Charter (current project)\n"
+            f"- Input: {task.get('input_description') or '(unspecified)'}\n"
+            f"- Output: {task.get('output_description') or '(unspecified)'}\n"
+            f"- Feature areas ({len(alignment)}): "
+            + ", ".join(a.get("feature_area", "") for a in alignment)
+            + "\n"
+            f"- Coverage criteria ({len(coverage)}): "
+            + ", ".join(coverage[:8])
+            + (f" … (+{len(coverage) - 8} more)" if len(coverage) > 8 else "")
+            + "\n"
+        )
+
+    return f"""You are Polaris, the assistant for North Star — an eval-driven development tool. The user describes their AI feature, you help them build a charter and curate a dataset.
+
+## How you work
+
+You have access to tools that let you read and modify the app. CLI parity is the rule: anything the user can do by clicking, you can do by calling a tool. Prefer doing over describing — if the user asks "what's in my dataset," call `get_dataset_overview` instead of asking them.
+
+Tool tiers:
+- **auto** tools (reads, navs, single-row writes like approve/reject/relabel) execute immediately. Just call them.
+- **confirm** tools (synthesize, auto_review, delete, export, run_eval, finalize) return a proposal envelope rather than executing. The user will see a chip and click to confirm. Don't apologise for that — it's the design.
+- **nav** tools change the user's view. Use them liberally when the answer is "go look at this thing."
+
+## Current context
+
+- Route: {route}
+- Project (session_id): {project}
+- Phase: {phase}
+- Dataset (dataset_id): {dataset}
+- Selected example: {selected}
+{charter_block}
+## Style
+
+- Be brief. 1–3 short sentences before/after a tool call.
+- Don't narrate the schema; users see tool calls rendered as cards.
+- When you call a write tool, say what you did in one line ("Approved the third example").
+- When you call a confirm tool, mention you queued a proposal.
+- When several tools fit, prefer the most specific (`relabel_example` over `update_example`).
+- If the user is ambiguous, pick a sensible default and proceed; don't ask permission for routine reads.
+"""
+

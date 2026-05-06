@@ -570,6 +570,166 @@ def _call_llm_cached(prefix: str, suffix: str, max_tokens: int = 4096) -> tuple[
     return text, metadata
 
 
+# --- Tool-use loop (Polaris) ---
+
+async def call_llm_with_tools(
+    system: str,
+    messages: list[dict],
+    tool_schemas: list[dict],
+    handler,
+    max_iters: int = 12,
+    max_tokens: int = 4096,
+) -> tuple[str, list[dict], list[dict]]:
+    """Run a tool-use conversation loop.
+
+    `handler(name, args)` is an async function that executes a tool call and
+    returns a JSON-serializable dict. By convention, results may carry a
+    sentinel that drives the UI:
+      - `{"_proposal": True, "tool": ..., "args": ..., "label": ..., "reason": ...}`
+        → confirm-tier short-circuit, frontend renders a confirmation chip.
+      - `{"_nav": True, "target": ..., "props": ...}`
+        → frontend dispatches a navigation/UI side effect.
+    Anything else is a regular result and is fed back to the model as JSON.
+
+    The loop appends each tool_use / tool_result pair to `messages` and
+    re-prompts until the model emits stop_reason=`end_turn` or hits
+    max_iters.
+
+    Returns (final_text, tool_log, llm_call_metadata).
+    `tool_log` is `[{name, args, result}]` in invocation order.
+    `llm_call_metadata` is one entry per Anthropic round-trip.
+    """
+    model = get_model()
+    creativity = get_creativity()
+    resolved_model = _resolve_model(model)
+    tool_log: list[dict] = []
+    llm_meta: list[dict] = []
+    final_text = ""
+    # Defensive copy — the loop appends to `messages`, and we don't want to
+    # surprise callers by mutating their list in place.
+    messages = list(messages)
+
+    # Cache the tool block — schema is identical every round.
+    tools_for_call = [
+        {**tool_schemas[0], "cache_control": {"type": "ephemeral"}},
+        *tool_schemas[1:],
+    ] if tool_schemas else []
+
+    for iter_num in range(max_iters):
+        start = time.time()
+        try:
+            # Wrap the sync SDK call in to_thread so the event loop isn't
+            # blocked across up to `max_iters` round-trips. Existing
+            # single-call wrappers (`_call_llm`, `_call_llm_cached`) call the
+            # SDK synchronously too, but those are one round-trip; this loop
+            # would starve other connections under any concurrency.
+            response = await asyncio.to_thread(
+                lambda: get_client().messages.create(
+                    model=resolved_model,
+                    max_tokens=max_tokens,
+                    temperature=creativity,
+                    system=system,
+                    tools=tools_for_call if tools_for_call else None,
+                    messages=messages,
+                )
+            )
+        except Exception as e:
+            logger.error(f"call_llm_with_tools FAILED iter={iter_num}: {type(e).__name__}: {e}")
+            if _is_billing_error(e):
+                raise LLMBillingError(str(e), provider=_current_provider()) from e
+            if _is_model_error(e):
+                raise LLMModelError(str(e), provider=_current_provider()) from e
+            if _is_auth_error(e):
+                raise LLMAuthError(str(e), provider=_current_provider()) from e
+            raise
+
+        elapsed_ms = int((time.time() - start) * 1000)
+        usage = response.usage
+        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        llm_meta.append({
+            "model": model,
+            "iteration": iter_num,
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cache_read_input_tokens": cache_read,
+            "latency_ms": elapsed_ms,
+            "stop_reason": response.stop_reason,
+        })
+
+        # Collect text + tool_use blocks from this turn.
+        text_chunks: list[str] = []
+        tool_uses: list[dict] = []
+        for block in response.content:
+            btype = getattr(block, "type", None)
+            if btype == "text":
+                text_chunks.append(block.text)
+            elif btype == "tool_use":
+                tool_uses.append({
+                    "id": block.id,
+                    "name": block.name,
+                    "input": dict(block.input) if block.input else {},
+                })
+
+        text_this_turn = "\n".join(t for t in text_chunks if t).strip()
+        if text_this_turn:
+            final_text = text_this_turn
+
+        if not tool_uses or response.stop_reason == "end_turn":
+            _bubble_io_to_parent_span(json.dumps(messages)[:8000], final_text)
+            break
+
+        # Append assistant turn (text + tool_uses) into history.
+        assistant_content: list[dict] = []
+        for chunk in text_chunks:
+            if chunk:
+                assistant_content.append({"type": "text", "text": chunk})
+        for tu in tool_uses:
+            assistant_content.append({
+                "type": "tool_use",
+                "id": tu["id"],
+                "name": tu["name"],
+                "input": tu["input"],
+            })
+        messages.append({"role": "assistant", "content": assistant_content})
+
+        # Execute each tool call and append a tool_result block.
+        tool_results: list[dict] = []
+        for tu in tool_uses:
+            try:
+                result = await handler(tu["name"], tu["input"])
+                is_error = False
+            except Exception as e:  # noqa: BLE001
+                logger.exception(f"tool {tu['name']} raised")
+                result = {"error": f"{type(e).__name__}: {e}"}
+                is_error = True
+            tool_log.append({"name": tu["name"], "args": tu["input"], "result": result})
+            # Truncate at structure boundary: if the JSON is huge we drop in a
+            # sentinel rather than feeding the model invalid JSON cut mid-key.
+            content_full = json.dumps(result, default=str)
+            if len(content_full) > 16000:
+                content = content_full[:15800] + '","_truncated":true}'
+                # Fallback in pathological cases — guarantee parseable JSON.
+                try:
+                    json.loads(content)
+                except json.JSONDecodeError:
+                    content = json.dumps({"_truncated": True, "preview": content_full[:1000]})
+            else:
+                content = content_full
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tu["id"],
+                "content": content,
+                "is_error": is_error,
+            })
+        messages.append({"role": "user", "content": tool_results})
+
+    else:
+        logger.warning(f"call_llm_with_tools: hit max_iters={max_iters}")
+        final_text = final_text or "(I made too many tool calls in a row and stopped to avoid looping. Try a more specific request.)"
+
+    return final_text, tool_log, llm_meta
+
+
 # --- LLM call wrappers ---
 
 @traced("discovery")

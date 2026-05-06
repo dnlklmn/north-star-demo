@@ -96,6 +96,10 @@ import SettingsPanel from "../components/SettingsPanel";
 import ShareModal from "../components/ShareModal";
 import { useProjectEvents, type SynthProgressEvent } from "../hooks/useProjectEvents";
 import { useShareToken } from "../hooks/useShareToken";
+import {
+  useRegisterPolarisContext,
+  useRegisterPolarisNav,
+} from "../polaris/usePolaris";
 
 type ActiveTab =
   | "skill"
@@ -318,6 +322,40 @@ export default function ProjectWorkspace() {
     window.addEventListener("northstar:open-settings", handler);
     return () => window.removeEventListener("northstar:open-settings", handler);
   }, []);
+
+  // --- Polaris bus wiring ---
+  // Tell the global Polaris provider about our current view so chat messages
+  // are sent with up-to-date routing info (session_id, dataset_id, phase).
+  // Pages own this — the provider doesn't try to derive it from the URL
+  // because the same URL maps to multiple tabs.
+  useRegisterPolarisContext({
+    session_id: sessionId || undefined,
+    dataset_id: dataset?.id || undefined,
+    phase: activeTab as string | undefined,
+  });
+  // Register handlers for nav targets that this page owns. The provider
+  // dispatches `home` / `project` itself (it owns react-router); everything
+  // else delegates to whichever page is mounted.
+  useRegisterPolarisNav("phase", (props) => {
+    const phase = props.phase as string | undefined;
+    if (!phase) return;
+    // The agent's nav_phase enum is kept in sync with ActiveTab in
+    // polaris_tools.py; cast is safe so long as that stays true.
+    setActiveTab(phase as ActiveTab);
+  });
+  useRegisterPolarisNav("coverage_map", () => setShowCoverageMap(true));
+  useRegisterPolarisNav("settings", () => setShowSettings(true));
+  useRegisterPolarisNav("share", () => setShowShareModal(true));
+  useRegisterPolarisNav("example", (props) => {
+    const id = props.example_id as string | undefined;
+    if (!id) return;
+    setActiveTab("dataset");
+    // ExampleReview owns the row-selection state. Broadcast so it can
+    // focus the row without lifting that state up to the page.
+    window.dispatchEvent(
+      new CustomEvent("polaris:select-example", { detail: { id } }),
+    );
+  });
 
   // Coverage map status comes from the gap analysis. Compute once per
   // gapAnalysis change so the dataset toolbar dot stays in sync.
@@ -600,6 +638,19 @@ export default function ProjectWorkspace() {
     if (!sessionId || !dataset) return;
     setCachedDataset(sessionId, dataset);
   }, [sessionId, dataset]);
+
+  // Polaris write tools mutate session/dataset state directly via the DB
+  // helpers, which broadcast over SSE — so the SSE listener above usually
+  // catches it. The custom event is a backup for screens that don't have an
+  // SSE subscription open (e.g. brief flicker between drawer open and SSE
+  // reconnect).
+  useEffect(() => {
+    const handler = () => {
+      handleLiveStateChange();
+    };
+    window.addEventListener("polaris:state-changed", handler);
+    return () => window.removeEventListener("polaris:state-changed", handler);
+  }, [handleLiveStateChange]);
 
   const status: AgentStatus = state.agent_status;
   const hasCharter = !!(

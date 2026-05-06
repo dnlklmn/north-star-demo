@@ -141,6 +141,19 @@ export default function ExampleReview({
   }
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [focusedCell, setFocusedCell] = useState<CellId>('status')
+
+  // Polaris nav: when the agent runs `nav_example`, ProjectWorkspace switches
+  // to the dataset tab and broadcasts the example id. We pick it up here so
+  // the row gets selected without lifting selection state out of this
+  // component.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ id: string }>).detail
+      if (detail?.id) setSelectedId(detail.id)
+    }
+    window.addEventListener('polaris:select-example', handler)
+    return () => window.removeEventListener('polaris:select-example', handler)
+  }, [])
   // Edit state carries both row id and which cell is being edited so only
   // that one cell becomes a textarea. The other cells stay read-only.
   const [editing, setEditing] = useState<{ id: string; cell: 'input' | 'output' } | null>(null)
