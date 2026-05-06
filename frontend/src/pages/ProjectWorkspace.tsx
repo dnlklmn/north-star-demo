@@ -182,10 +182,8 @@ export default function ProjectWorkspace() {
   const [storySuggestionsLoading, setStorySuggestionsLoading] = useState(false);
 
   // --- Goals "Add skill / Add prompt" banner ---
-  // Hidden after the user dismisses it OR once the session already has a
-  // skill body / is a prompt-eval (banner offer is moot). Per-session state,
-  // doesn't persist across reloads.
-  const [addSourceBannerDismissed, setAddSourceBannerDismissed] = useState(false);
+  // Always visible until the session has a skill body or is a prompt-eval
+  // (the banner offer becomes moot once a skill/prompt is in place).
 
   // --- Charter phase state ---
   const [activeCriteria, setActiveCriteria] = useState<string[]>([]);
@@ -1814,7 +1812,7 @@ export default function ProjectWorkspace() {
     : goalsDirty
       ? "Regenerate user stories"
       : "Go to user stories";
-  const goalsNextDisabled = nonEmptyGoals.length < 2;
+  const goalsNextDisabled = nonEmptyGoals.length < 1;
   // Only "Generate" (no stories yet) gets primary. Regenerate + Go to stay
   // neutral — re-running is safe + reversible, so we don't visually push it.
   const goalsNextVariant: "primary" | "neutral" =
@@ -1947,16 +1945,14 @@ export default function ProjectWorkspace() {
             />
           </SidebarGroup>
 
-          {(state.eval_mode === "triggered" || state.charter.task.skill_body) && (
-            <SidebarGroup>
-              <SidebarItem
-                label={isPromptEval ? "Prompt" : "Skill"}
-                icon={<GoalsIcon width={24} height={24} />}
-                active={activeTab === "skill"}
-                onClick={() => setActiveTab("skill")}
-              />
-            </SidebarGroup>
-          )}
+          <SidebarGroup>
+            <SidebarItem
+              label={isPromptEval ? "Prompt" : "Skill"}
+              icon={<GoalsIcon width={24} height={24} />}
+              active={activeTab === "skill"}
+              onClick={() => setActiveTab("skill")}
+            />
+          </SidebarGroup>
 
           <SidebarGroup>
             <SidebarItem
@@ -2059,6 +2055,16 @@ export default function ProjectWorkspace() {
                 setGoalsDirty(false);
                 setActiveTab("users");
               }}
+              secondaryLabel="Add user stories"
+              secondaryDisabled={goalsNextDisabled}
+              onSecondary={() => {
+                // "Add" navigates without triggering generation. Mark the
+                // first-visit auto-suggest as already done so the users
+                // tab opens with an empty composer instead of auto-fetching.
+                storyAutoSuggestedRef.current = true;
+                setGoalsDirty(false);
+                setActiveTab("users");
+              }}
               nextLabel={goalsNextLabel}
               nextVariant={goalsNextVariant}
               nextDisabled={goalsNextDisabled}
@@ -2068,7 +2074,6 @@ export default function ProjectWorkspace() {
               banner={
                 canEdit &&
                 urlSessionId &&
-                !addSourceBannerDismissed &&
                 !state.charter.task.skill_body &&
                 !isPromptEval ? (
                   <AddSourceBanner
@@ -2077,7 +2082,6 @@ export default function ProjectWorkspace() {
                     onPromptCreated={(newSessionId) => {
                       navigate(`/project/${newSessionId}?tab=goals`);
                     }}
-                    onDismiss={() => setAddSourceBannerDismissed(true)}
                   />
                 ) : undefined
               }

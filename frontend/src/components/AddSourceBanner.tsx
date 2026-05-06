@@ -1,8 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Loader2, Sparkles } from 'lucide-react'
 import Button from './ui/Button'
-import IconButton from './ui/IconButton'
-import { CloseIcon } from './ui/Icons'
 import {
   createPromptEvalSession,
   fetchSkillFromUrl,
@@ -17,7 +15,6 @@ interface Props {
   sessionId: string
   onSeeded: () => void | Promise<void>
   onPromptCreated: (newSessionId: string) => void
-  onDismiss?: () => void
 }
 
 type Mode = 'collapsed' | 'skill' | 'prompt'
@@ -33,7 +30,6 @@ export default function AddSourceBanner({
   sessionId,
   onSeeded,
   onPromptCreated,
-  onDismiss,
 }: Props) {
   const [mode, setMode] = useState<Mode>('collapsed')
 
@@ -198,17 +194,6 @@ export default function AddSourceBanner({
           >
             Add prompt
           </Button>
-          {onDismiss && (
-            <IconButton
-              tone="dim"
-              onClick={onDismiss}
-              aria-label="Dismiss"
-              title="Dismiss"
-              disabled={working}
-            >
-              <CloseIcon width={11} height={11} />
-            </IconButton>
-          )}
         </div>
       </div>
 

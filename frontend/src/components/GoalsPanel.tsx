@@ -28,6 +28,12 @@ interface Props {
   nextLabel: string;
   nextVariant: "primary" | "neutral";
   nextDisabled: boolean;
+  /** Secondary CTA shown next to the primary "Generate" button (e.g. "Add user
+   *  stories" — navigates to stories without auto-generating). Hidden when
+   *  not provided. */
+  secondaryLabel?: string;
+  onSecondary?: () => void;
+  secondaryDisabled?: boolean;
   /** Rendered in the right sidebar bottom slot (e.g. AI Assist) */
   rightBottom?: ReactNode;
   /** When set, expands bottom section to fill and caps Suggestions height. */
@@ -56,6 +62,9 @@ export default function GoalsPanel({
   rightBottomExpanded,
   canEdit = true,
   banner,
+  secondaryLabel,
+  onSecondary,
+  secondaryDisabled,
 }: Props) {
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
   const focusIndexRef = useRef<number | null>(null);
@@ -228,15 +237,27 @@ export default function GoalsPanel({
       }
       footer={
         canEdit ? (
-          <Button
-            size="big"
-            variant={nextVariant}
-            shortcut={<CmdReturnIcon />}
-            onClick={onNext}
-            disabled={nextDisabled}
-          >
-            {nextLabel}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              size="big"
+              variant={nextVariant}
+              shortcut={<CmdReturnIcon />}
+              onClick={onNext}
+              disabled={nextDisabled}
+            >
+              {nextLabel}
+            </Button>
+            {secondaryLabel && onSecondary && (
+              <Button
+                size="big"
+                variant="neutral"
+                onClick={onSecondary}
+                disabled={secondaryDisabled}
+              >
+                {secondaryLabel}
+              </Button>
+            )}
+          </div>
         ) : undefined
       }
     >
