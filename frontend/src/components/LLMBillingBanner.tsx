@@ -1,6 +1,10 @@
 import { useEffect, useState } from 'react'
-import { ExternalLink, X } from 'lucide-react'
-import { LLM_BILLING_EVENT, type LLMBillingErrorDetail } from '../api'
+import { ExternalLink, Key, X } from 'lucide-react'
+import {
+  LLM_BILLING_EVENT,
+  OPEN_SETTINGS_EVENT,
+  type LLMBillingErrorDetail,
+} from '../api'
 
 /**
  * Top-of-app banner that appears when the LLM provider rejects a call for
@@ -36,22 +40,55 @@ export default function LLMBillingBanner() {
   const providerLabel =
     detail.provider === 'openrouter' ? 'OpenRouter' : 'Anthropic'
 
+  // The user wants to know whose account is on the hook. When the call used
+  // the server's default key (no X-Anthropic-Key header), the user can't
+  // top up that account — but they CAN supply their own key. When the call
+  // used the user's own localStorage key, they go to the provider's
+  // billing page directly.
+  const keyContext = detail.usingDefaultKey
+    ? "server's default key"
+    : 'your key'
+
+  const openSettings = () => {
+    window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_EVENT))
+  }
+
   return (
     <div className="bg-danger/10 border-b border-danger/30 px-4 py-2 flex-shrink-0">
       <div className="flex items-center justify-center gap-3 text-sm max-w-3xl mx-auto">
         <span className="text-danger font-medium whitespace-nowrap">
           {providerLabel} billing issue
+          <span className="ml-1.5 text-danger/70 font-normal">
+            ({keyContext})
+          </span>
         </span>
         <span className="text-foreground truncate">{detail.message}</span>
-        <a
-          href={billingUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="inline-flex items-center gap-1 px-3 py-1 text-xs font-medium bg-accent text-accent-foreground hover:opacity-90 transition-opacity whitespace-nowrap"
+        {detail.usingDefaultKey ? (
+          <button
+            onClick={openSettings}
+            className="inline-flex items-center gap-1 px-3 py-1 text-xs font-medium bg-accent text-accent-foreground hover:opacity-90 transition-opacity whitespace-nowrap"
+          >
+            <Key className="w-3 h-3" />
+            Use your own key
+          </button>
+        ) : (
+          <a
+            href={billingUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 px-3 py-1 text-xs font-medium bg-accent text-accent-foreground hover:opacity-90 transition-opacity whitespace-nowrap"
+          >
+            Add credits
+            <ExternalLink className="w-3 h-3" />
+          </a>
+        )}
+        <button
+          onClick={openSettings}
+          className="inline-flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground whitespace-nowrap"
+          title="Open Settings to change your API key"
         >
-          Add credits
-          <ExternalLink className="w-3 h-3" />
-        </a>
+          Change key
+        </button>
         <button
           onClick={() => setDetail(null)}
           className="text-muted-foreground hover:text-foreground"

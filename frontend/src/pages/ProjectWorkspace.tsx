@@ -242,6 +242,15 @@ export default function ProjectWorkspace() {
     return () => window.removeEventListener("northstar:share-forbidden", handler);
   }, []);
 
+  // Open Settings on demand from outside the workspace (e.g. the global
+  // LLMBillingBanner's "Change key" button — it lives in App.tsx and can't
+  // reach our showSettings state directly).
+  useEffect(() => {
+    const handler = () => setShowSettings(true);
+    window.addEventListener("northstar:open-settings", handler);
+    return () => window.removeEventListener("northstar:open-settings", handler);
+  }, []);
+
   // Coverage map status comes from the gap analysis. Compute once per
   // gapAnalysis change so the dataset toolbar dot stays in sync.
   const coverageScore = computeCoverageScore(gapAnalysis);

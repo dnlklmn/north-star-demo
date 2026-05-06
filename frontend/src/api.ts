@@ -92,9 +92,22 @@ function apiHeaders(extra?: Record<string, string>): Record<string, string> {
 export interface LLMBillingErrorDetail {
   provider: string
   message: string
+  /** True when the failed request did not carry an X-Anthropic-Key header,
+   *  i.e. it relied on the server's default key. The banner uses this to
+   *  show "(server's default key)" vs "(your key)" so the user knows which
+   *  account to look at when topping up credits. */
+  usingDefaultKey: boolean
 }
 
 export const LLM_BILLING_EVENT = 'northstar:llm-billing'
+
+/**
+ * Global event a component dispatches when it wants to open the Settings
+ * panel from outside the project workspace (e.g. the LLMBillingBanner's
+ * "Change key" button). ProjectWorkspace listens and flips its
+ * showSettings state.
+ */
+export const OPEN_SETTINGS_EVENT = 'northstar:open-settings'
 
 /**
  * Global event fired when a write attempt is rejected because the current
@@ -183,9 +196,14 @@ async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
     try { body = await res.clone().json() } catch { /* not JSON */ }
     const provider = body.provider || 'anthropic'
     const message = body.detail || 'The LLM provider rejected the call for billing reasons.'
+    // The frontend can determine which key was in play locally — we sent
+    // the X-Anthropic-Key header iff the user has a key in localStorage.
+    const usingDefaultKey = !getApiKey()
     try {
       window.dispatchEvent(
-        new CustomEvent<LLMBillingErrorDetail>(LLM_BILLING_EVENT, { detail: { provider, message } }),
+        new CustomEvent<LLMBillingErrorDetail>(LLM_BILLING_EVENT, {
+          detail: { provider, message, usingDefaultKey },
+        }),
       )
     } catch {
       // SSR or other env without window — non-fatal.
