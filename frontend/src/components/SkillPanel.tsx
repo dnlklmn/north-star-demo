@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Eye, FileText, Github, History, Loader2, RotateCcw } from 'lucide-react'
+import { Eye, History, Loader2, RotateCcw } from 'lucide-react'
 import type { SkillVersion } from '../types'
 import {
   createSkillVersion,
@@ -20,8 +20,11 @@ import { parseSkillFrontmatter } from '../utils/skillFrontmatter'
 interface Props {
   sessionId: string
   skillBody: string
-  skillName: string | null
-  skillDescription: string | null
+  /** Currently unused in the trimmed UI — frontmatter parsing reads name +
+   *  description directly from the textarea body on Analyze. Kept on the
+   *  interface so the parent can still pass them without rewriting. */
+  skillName?: string | null
+  skillDescription?: string | null
   /** When the parent session has kind='prompt' the body describes a North Star
    *  internal prompt (e.g. build_generate_draft_prompt), not a user-authored
    *  skill. Editing changes the seed/charter signal but does NOT change what
@@ -48,9 +51,6 @@ interface Props {
    *  session state to pick up extracted goals/users/stories and unlocks
    *  downstream tabs. */
   onSeeded?: () => void
-  /** Called when the user clicks "Start from scratch" — parent has already
-   *  flipped the session to standard mode via api. */
-  onStartFromScratch?: () => void
   /** Called when the user clicks the post-seed primary CTA or presses Cmd+Enter. */
   onNext?: () => void
   /** Called by the "Don't have a skill or prompt yet?" banner — navigates to
@@ -78,8 +78,6 @@ interface Props {
 export default function SkillPanel({
   sessionId,
   skillBody,
-  skillName,
-  skillDescription,
   isPromptEval = false,
   promptSourcePath,
   promptBuilderName,
@@ -88,24 +86,15 @@ export default function SkillPanel({
   candidateVersionId,
   onCandidateChanged,
   onSeeded,
-  onStartFromScratch,
   onNext,
   onGoToGoals,
   canEdit = true,
 }: Props) {
   const [draft, setDraft] = useState(skillBody)
-  const [nameDraft, setNameDraft] = useState(skillName ?? '')
-  const [descriptionDraft, setDescriptionDraft] = useState(skillDescription ?? '')
   const [versions, setVersions] = useState<SkillVersion[]>([])
   const [notes, setNotes] = useState('')
   const [working, setWorking] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // Source-mode tabs — only shown before first Analyze. After there's a
-  // persisted version, the manual textarea is the only sensible view.
-  const [sourceMode, setSourceMode] = useState<'github' | 'manual'>('manual')
-  const [githubUrl, setGithubUrl] = useState('')
-  const [githubSource, setGithubSource] = useState<{ owner: string; repo: string; ref: string; path: string } | null>(null)
-  const [fetching, setFetching] = useState(false)
   const [diffVs, setDiffVs] = useState<{
     title: string
     subtitle?: string
@@ -115,17 +104,11 @@ export default function SkillPanel({
     newText: string
   } | null>(null)
 
-  // Sync drafts with external changes (e.g. EvaluatePanel just saved a new
+  // Sync draft with external changes (e.g. EvaluatePanel just saved a new
   // version, or Home just created a fresh blank session).
   useEffect(() => {
     setDraft(skillBody)
   }, [skillBody])
-  useEffect(() => {
-    setNameDraft(skillName ?? '')
-  }, [skillName])
-  useEffect(() => {
-    setDescriptionDraft(skillDescription ?? '')
-  }, [skillDescription])
 
   const refreshVersions = useCallback(async () => {
     try {
@@ -146,23 +129,34 @@ export default function SkillPanel({
   const canAnalyze = !hasVersions && draft.trim().length > 0
   const canSave = hasVersions && hasChanges
 
-  const handleFetchFromGithub = async () => {
-    const url = githubUrl.trim()
-    if (!url || fetching) return
-    setFetching(true)
-    setError(null)
-    try {
-      const result = await fetchSkillFromUrl(url)
-      // Populate the fields in-place on the GitHub tab — the user can review
-      // and tweak them without switching to "Enter manually".
-      setDraft(result.body)
-      if (result.name) setNameDraft(result.name)
-      if (result.description) setDescriptionDraft(result.description)
-      setGithubSource(result.source)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch SKILL.md from URL')
-    } finally {
-      setFetching(false)
+  // Resolve the textarea contents into a SKILL.md body + name + description.
+  // Handles three input shapes transparently:
+  //   - GitHub URL → fetch + parse frontmatter
+  //   - SKILL.md with frontmatter → strip + extract name/description
+  //   - Free-form markdown → use as-is, name/description left empty
+  const resolveDraft = async (): Promise<{
+    body: string
+    name?: string
+    description?: string
+  }> => {
+    const trimmed = draft.trim()
+    const isGithubUrl =
+      trimmed.startsWith('http') &&
+      (trimmed.includes('github.com') ||
+        trimmed.includes('raw.githubusercontent.com'))
+    if (isGithubUrl) {
+      const fetched = await fetchSkillFromUrl(trimmed)
+      return {
+        body: fetched.body,
+        name: fetched.name ?? undefined,
+        description: fetched.description ?? undefined,
+      }
+    }
+    const parsed = parseSkillFrontmatter(draft)
+    return {
+      body: parsed.body,
+      name: parsed.name,
+      description: parsed.description,
     }
   }
 
@@ -171,17 +165,18 @@ export default function SkillPanel({
     setWorking(true)
     setError(null)
     try {
-      const parsed = parseSkillFrontmatter(draft)
-      const finalName = nameDraft.trim() || parsed.name
-      const finalDescription = descriptionDraft.trim() || parsed.description
-      const finalBody = parsed.body
+      const { body, name, description } = await resolveDraft()
       await setSessionMode(sessionId, 'triggered')
       await seedFromSkill(sessionId, {
-        skill_body: finalBody,
-        skill_name: finalName || undefined,
-        skill_description: finalDescription || undefined,
+        skill_body: body,
+        skill_name: name,
+        skill_description: description,
       })
-      onSkillBodyChange(finalBody)
+      onSkillBodyChange(body)
+      // If the input was a GitHub URL, replace the textarea contents with the
+      // fetched body so version history shows the actual SKILL.md and not the
+      // URL the user pasted.
+      if (body !== draft) setDraft(body)
       await refreshVersions()
       onSeeded?.()
     } catch (err) {
@@ -190,22 +185,21 @@ export default function SkillPanel({
     } finally {
       setWorking(false)
     }
-  }, [canAnalyze, draft, nameDraft, descriptionDraft, sessionId, onSkillBodyChange, onSeeded, refreshVersions])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canAnalyze, draft, sessionId, onSkillBodyChange, onSeeded, refreshVersions])
 
   const handleRerunAnalysis = async () => {
     setWorking(true)
     setError(null)
     try {
-      const parsed = parseSkillFrontmatter(draft)
-      const finalName = nameDraft.trim() || parsed.name
-      const finalDescription = descriptionDraft.trim() || parsed.description
-      const finalBody = parsed.body
+      const { body, name, description } = await resolveDraft()
       await seedFromSkill(sessionId, {
-        skill_body: finalBody,
-        skill_name: finalName || undefined,
-        skill_description: finalDescription || undefined,
+        skill_body: body,
+        skill_name: name,
+        skill_description: description,
       })
-      onSkillBodyChange(finalBody)
+      onSkillBodyChange(body)
+      if (body !== draft) setDraft(body)
       await refreshVersions()
       onSeeded?.()
     } catch (err) {
@@ -256,15 +250,6 @@ export default function SkillPanel({
     return () => window.removeEventListener('keydown', handler);
   }, [canAnalyze, canSave, working, onNext, handleAnalyze, handleSave]);
 
-  const handleStartFromScratch = async () => {
-    try {
-      await setSessionMode(sessionId, 'standard')
-      onStartFromScratch?.()
-    } catch (err) {
-      console.error('Failed to switch to scratch mode:', err)
-    }
-  }
-
   const handleRestore = async (v: SkillVersion) => {
     if (!confirm(`Restore v${v.version} as active? Your current body stays in history.`)) return
     try {
@@ -282,47 +267,13 @@ export default function SkillPanel({
 
   const nextVersion = (activeVersion?.version ?? 0) + 1
 
-  // Fields block — name, description, body. Shared between the Manual tab
-  // and the post-fetch state of the GitHub tab, and always visible once a
-  // version is persisted.
+  // Fields block — single textarea. Name + description auto-detect from
+  // frontmatter on Analyze; we don't ask for them up-front.
   const fieldsBlock = (
     <>
-      {!isPromptEval && (
-        <section className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide block mb-1">
-              Skill name
-            </label>
-            <input
-              type="text"
-              placeholder="auto-detected from frontmatter"
-              value={nameDraft}
-              onChange={(e) => setNameDraft(e.target.value)}
-              className="w-full px-3 py-2 border border-border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-60"
-              disabled={working || !canEdit}
-              readOnly={!canEdit}
-            />
-          </div>
-          <div>
-            <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide block mb-1">
-              Description
-            </label>
-            <input
-              type="text"
-              placeholder="the routing signal — auto-detected from frontmatter"
-              value={descriptionDraft}
-              onChange={(e) => setDescriptionDraft(e.target.value)}
-              className="w-full px-3 py-2 border border-border bg-background text-sm focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-60"
-              disabled={working || !canEdit}
-              readOnly={!canEdit}
-            />
-          </div>
-        </section>
-      )}
-
       <section>
         <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide block mb-1">
-          {isPromptEval ? "Prompt template" : "SKILL.md body (with or without frontmatter)"}
+          {isPromptEval ? "Prompt template" : "Skill"}
         </label>
         <textarea
           value={draft}
@@ -330,7 +281,7 @@ export default function SkillPanel({
           placeholder={
             hasVersions
               ? 'Edit freely. Save creates a new version.'
-              : '---\nname: my-skill\ndescription: ...\n---\n\n# Instructions\n...'
+              : 'Paste GitHub link or start typing'
           }
           rows={24}
           className="w-full p-3 bg-background border border-border font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent"
@@ -420,15 +371,9 @@ export default function SkillPanel({
     </div>
   ) : undefined
 
-  // Show the fields in: (a) existing-version edits, (b) the Manual tab,
-  // (c) the GitHub tab AFTER a successful fetch, (d) viewers (canEdit=false)
-  // before any version exists — the source-mode tabs are hidden for them so
-  // they'd see an empty panel otherwise.
-  const showFields =
-    hasVersions ||
-    sourceMode === 'manual' ||
-    (sourceMode === 'github' && !!githubSource) ||
-    !canEdit
+  // Single textarea is always shown — there's no longer a tab bar to gate it
+  // behind. Kept as a const for consistency with the JSX below.
+  const showFields = true
 
   return (
     <PanelLayout
@@ -487,77 +432,6 @@ export default function SkillPanel({
             </span>
           </div>
         )}
-        {/* Source tabs only before the first analyze. Hidden for viewers —
-            they have no write actions, so seeding from GitHub or pasting a
-            new SKILL.md isn't actionable. */}
-        {!isPromptEval && !hasVersions && canEdit && (
-          <section>
-            <div className="flex items-stretch border-b border-border mb-3">
-              <button
-                onClick={() => setSourceMode('github')}
-                className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium whitespace-nowrap transition-colors ${
-                  sourceMode === 'github'
-                    ? 'text-foreground border-b-2 border-accent -mb-px'
-                    : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                <Github className="w-3.5 h-3.5" />
-                From GitHub
-              </button>
-              <button
-                onClick={() => setSourceMode('manual')}
-                className={`flex items-center gap-1.5 px-4 py-2 text-xs font-medium whitespace-nowrap transition-colors ${
-                  sourceMode === 'manual'
-                    ? 'text-foreground border-b-2 border-accent -mb-px'
-                    : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                <FileText className="w-3.5 h-3.5" />
-                Enter manually
-              </button>
-            </div>
-
-            {sourceMode === 'github' && (
-              <div className="flex flex-col gap-2">
-                <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
-                  GitHub URL
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={githubUrl}
-                    onChange={(e) => setGithubUrl(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') { e.preventDefault(); handleFetchFromGithub() }
-                    }}
-                    placeholder="https://github.com/owner/repo/blob/main/skills/foo/SKILL.md"
-                    disabled={fetching}
-                    className="flex-1 px-3 py-2 border border-border bg-background text-sm font-mono focus:outline-none focus:ring-1 focus:ring-accent"
-                  />
-                  <button
-                    onClick={handleFetchFromGithub}
-                    disabled={fetching || !githubUrl.trim()}
-                    className="inline-flex items-center gap-1.5 text-xs px-3 py-2 font-medium bg-accent text-accent-foreground hover:opacity-90 disabled:opacity-50"
-                  >
-                    {fetching ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Github className="w-3.5 h-3.5" />}
-                    Fetch
-                  </button>
-                </div>
-                <p className="text-[10px] text-muted-foreground">
-                  Paste a link to a SKILL.md file on GitHub. Public repos work without a token;
-                  add one in Settings to raise the rate limit or access private repos.
-                </p>
-                {githubSource && (
-                  <p className="text-[10px] text-success">
-                    Fetched from {githubSource.owner}/{githubSource.repo}@{githubSource.ref} — {githubSource.path}
-                  </p>
-                )}
-                {error && <p className="text-xs text-danger">{error}</p>}
-              </div>
-            )}
-          </section>
-        )}
-
         {showFields && fieldsBlock}
 
         {hasVersions && (
@@ -714,18 +588,6 @@ export default function SkillPanel({
           </section>
         )}
 
-        {!hasVersions && onStartFromScratch && canEdit && (
-          <div className="pt-6 border-t border-border flex items-center justify-center">
-            <button
-              type="button"
-              onClick={handleStartFromScratch}
-              disabled={working}
-              className="text-xs text-muted-foreground hover:text-foreground underline-offset-4 hover:underline disabled:opacity-50"
-            >
-              Start from scratch →
-            </button>
-          </div>
-        )}
       </div>
 
       {diffVs && (

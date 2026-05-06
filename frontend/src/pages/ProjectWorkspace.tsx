@@ -2121,12 +2121,6 @@ export default function ProjectWorkspace() {
                 await handleSessionSeeded();
                 setActiveTab("goals");
               }}
-              onStartFromScratch={() => {
-                // SkillPanel has already flipped the session to standard mode.
-                // Reflect locally + jump to Goals so the old flow takes over.
-                setState((prev) => ({ ...prev, eval_mode: "standard" }));
-                setActiveTab("goals");
-              }}
               onNext={() => setActiveTab("goals")}
               onGoToGoals={() => setActiveTab("goals")}
               canEdit={canEdit}
