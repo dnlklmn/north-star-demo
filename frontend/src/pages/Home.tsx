@@ -55,6 +55,14 @@ export default function Home() {
   const menuRef = useRef<HTMLDivElement>(null);
   const [showSettings, setShowSettings] = useState(false);
 
+  // Open Settings on demand from outside (LLMBillingBanner's "Change key"
+  // button dispatches northstar:open-settings).
+  useEffect(() => {
+    const handler = () => setShowSettings(true);
+    window.addEventListener("northstar:open-settings", handler);
+    return () => window.removeEventListener("northstar:open-settings", handler);
+  }, []);
+
   // Close the new-eval dropdown on outside click or Escape.
   useEffect(() => {
     if (!isMenuOpen) return;

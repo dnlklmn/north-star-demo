@@ -418,14 +418,19 @@ def _is_auth_error(err: Exception) -> bool:
 def _is_billing_error(err: Exception) -> bool:
     """Detect 'out of credits' / 'billing' style errors from Anthropic and
     OpenRouter. Both providers return 400-class errors with a textual body
-    we have to pattern-match on — no dedicated error class for this case."""
+    we have to pattern-match on — no dedicated error class for this case.
+
+    Needles are deliberately specific. The bare substring "billing" used to
+    live in this list and produced false positives — Anthropic error footers
+    sometimes mention "contact billing@anthropic.com" on unrelated failures,
+    which would surface to users as a misleading "billing issue" banner.
+    """
     msg = str(err).lower()
     needles = (
         "credit balance is too low",
         "credit_balance",
         "insufficient_credits",
         "insufficient credits",
-        "billing",
         "payment required",
         "out of credit",
     )
