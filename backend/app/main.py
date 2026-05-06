@@ -90,6 +90,8 @@ from .models import (
     SuggestResponse,
     SuggestStoriesRequest,
     SuggestStoriesResponse,
+    SuggestSkillRequest,
+    SuggestSkillResponse,
     SuggestRevisionsRequest,
     SynthesizeRequest,
     TaskDefinition,
@@ -106,6 +108,7 @@ from .tools import (
     call_suggest_goals,
     call_evaluate_goals,
     call_suggest_stories,
+    call_suggest_skill,
     call_validate_charter,
     call_generate_suggestions,
     call_synthesize_examples,
@@ -470,6 +473,48 @@ async def suggest_stories(req: SuggestStoriesRequest):
         return SuggestStoriesResponse(suggestions=suggestions)
     except Exception as e:
         logger.exception("Failed to suggest stories")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/suggest-skill", response_model=SuggestSkillResponse)
+async def suggest_skill(req: SuggestSkillRequest):
+    """Suggest SKILL.md content ideas given goals + stories + current draft.
+
+    Powers the right-rail SuggestionBox on the Skill tab. Returns an empty
+    list when no goals exist — the UI then shows the "Add goals to see
+    suggestions" empty state instead of calling the LLM with nothing.
+    """
+    non_empty_goals = [g for g in req.goals if g.strip()]
+    non_empty_stories = [
+        s for s in req.stories if s.get("who", "").strip() or s.get("what", "").strip()
+    ]
+    if not non_empty_goals:
+        return SuggestSkillResponse(suggestions=[])
+
+    try:
+        suggestions, call_meta = await call_suggest_skill(
+            non_empty_goals,
+            non_empty_stories,
+            req.current_body,
+        )
+        if req.session_id:
+            try:
+                await db.create_turn(
+                    session_id=req.session_id,
+                    turn_type="suggest_skill",
+                    input_snapshot={
+                        "goals": non_empty_goals,
+                        "stories": non_empty_stories,
+                        "current_body": req.current_body or "",
+                    },
+                    llm_calls=call_meta,
+                    parsed_output={"suggestions": suggestions},
+                )
+            except Exception:
+                logger.warning("suggest_skill turn-log failed", exc_info=True)
+        return SuggestSkillResponse(suggestions=suggestions)
+    except Exception as e:
+        logger.exception("Failed to suggest skill")
         raise HTTPException(status_code=500, detail=str(e))
 
 

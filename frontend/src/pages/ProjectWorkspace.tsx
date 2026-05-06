@@ -41,6 +41,7 @@ import {
   suggestGoals,
   evaluateGoals,
   suggestStories,
+  suggestSkill,
   createDataset,
   getDataset,
   synthesizeExamples,
@@ -184,6 +185,13 @@ export default function ProjectWorkspace() {
 
   // --- Story suggestion state ---
   const [storySuggestionsLoading, setStorySuggestionsLoading] = useState(false);
+
+  // --- Skill suggestion state (right rail on Skill tab) ---
+  const [skillSuggestions, setSkillSuggestions] = useState<string[]>([]);
+  const [skillSuggestionsLoading, setSkillSuggestionsLoading] = useState(false);
+  const [dismissedSkillSuggestions, setDismissedSkillSuggestions] = useState<
+    Set<string>
+  >(new Set());
 
   // --- Goals "Add skill / Add prompt" banner ---
   // Always visible until the session has a skill body or is a prompt-eval
@@ -631,6 +639,99 @@ export default function ProjectWorkspace() {
       setGoalSuggestionsLoading(false);
     }
   }, [urlSessionId]);
+
+  // --- Skill suggestion fetcher ---
+  const fetchSkillSuggestions = useCallback(async () => {
+    const nonEmptyGoalsList = goals.filter((g) => g.trim());
+    if (nonEmptyGoalsList.length === 0) {
+      setSkillSuggestions([]);
+      return;
+    }
+    const storiesPayload = storyGroups
+      .filter((g) => g.role.trim())
+      .flatMap((g) =>
+        g.stories
+          .filter((s) => s.what.trim())
+          .map((s) => ({ who: g.role, what: s.what, why: s.why ?? "" })),
+      );
+    setSkillSuggestionsLoading(true);
+    try {
+      const res = await suggestSkill(
+        nonEmptyGoalsList,
+        storiesPayload,
+        state.charter.task.skill_body || null,
+        urlSessionId ?? null,
+      );
+      setSkillSuggestions(
+        res.suggestions.filter((s) => !dismissedSkillSuggestions.has(s)),
+      );
+    } catch (err) {
+      console.error("Failed to fetch skill suggestions:", err);
+    } finally {
+      setSkillSuggestionsLoading(false);
+    }
+  }, [
+    goals,
+    storyGroups,
+    state.charter.task.skill_body,
+    urlSessionId,
+    dismissedSkillSuggestions,
+  ]);
+
+  // Auto-fetch skill suggestions on a 1.5s idle debounce when the user is on
+  // the Skill tab and at least one goal exists. Re-runs when goals or stories
+  // change so the right rail stays in sync with the upstream context.
+  const skillSuggestionsDebounceRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (hydrating) return;
+    if (activeTab !== "skill") return;
+    if (isPromptEval) return;
+    const nonEmptyGoalsList = goals.filter((g) => g.trim());
+    if (nonEmptyGoalsList.length === 0) {
+      setSkillSuggestions([]);
+      return;
+    }
+    if (skillSuggestionsDebounceRef.current) {
+      window.clearTimeout(skillSuggestionsDebounceRef.current);
+    }
+    skillSuggestionsDebounceRef.current = window.setTimeout(() => {
+      skillSuggestionsDebounceRef.current = null;
+      fetchSkillSuggestions();
+    }, 1500);
+    return () => {
+      if (skillSuggestionsDebounceRef.current) {
+        window.clearTimeout(skillSuggestionsDebounceRef.current);
+        skillSuggestionsDebounceRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, goals, storyGroups, hydrating, isPromptEval]);
+
+  const handleAcceptSkillSuggestion = useCallback(
+    (suggestion: string) => {
+      // Append the suggestion to the existing skill body as a new bullet so
+      // the user has a concrete starting point. Drops the suggestion from the
+      // local list once accepted.
+      const current = state.charter.task.skill_body || "";
+      const sep = current.endsWith("\n") || current === "" ? "" : "\n";
+      const next = `${current}${sep}\n- ${suggestion}\n`;
+      setState((prev) => ({
+        ...prev,
+        charter: {
+          ...prev.charter,
+          task: { ...prev.charter.task, skill_body: next },
+        },
+      }));
+      setSkillSuggestions((prev) => prev.filter((s) => s !== suggestion));
+      setDismissedSkillSuggestions((prev) => new Set(prev).add(suggestion));
+    },
+    [state.charter.task.skill_body],
+  );
+
+  const handleDismissSkillSuggestion = useCallback((suggestion: string) => {
+    setSkillSuggestions((prev) => prev.filter((s) => s !== suggestion));
+    setDismissedSkillSuggestions((prev) => new Set(prev).add(suggestion));
+  }, []);
 
   const fetchGoalFeedback = useCallback(
     async (currentGoals: string[]) => {
@@ -2124,6 +2225,12 @@ export default function ProjectWorkspace() {
               onNext={() => setActiveTab("goals")}
               onGoToGoals={() => setActiveTab("goals")}
               canEdit={canEdit}
+              hasGoals={nonEmptyGoals.length > 0}
+              skillSuggestions={skillSuggestions}
+              skillSuggestionsLoading={skillSuggestionsLoading}
+              onRefreshSkillSuggestions={fetchSkillSuggestions}
+              onAcceptSkillSuggestion={handleAcceptSkillSuggestion}
+              onDismissSkillSuggestion={handleDismissSkillSuggestion}
             />
           )}
 

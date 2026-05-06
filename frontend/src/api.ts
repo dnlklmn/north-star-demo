@@ -750,6 +750,26 @@ export async function suggestStories(
   return res.json()
 }
 
+export async function suggestSkill(
+  goals: string[],
+  stories: Array<{ who: string; what: string; why: string }>,
+  currentBody: string | null,
+  sessionId?: string | null,
+): Promise<{ suggestions: string[] }> {
+  const res = await apiFetch(`${BASE}/suggest-skill`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      goals,
+      stories,
+      current_body: currentBody ?? null,
+      session_id: sessionId ?? null,
+    }),
+  })
+  if (!res.ok) throw new Error(`Failed to suggest skill: ${res.status}`)
+  return res.json()
+}
+
 export async function finalizeCharter(
   sessionId: string
 ): Promise<{ charter_id: string; session_id: string; charter: Charter }> {

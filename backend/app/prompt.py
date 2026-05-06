@@ -789,6 +789,61 @@ Return ONLY valid JSON:
 }}"""
 
 
+def build_suggest_skill_prompt(
+    goals: list[str],
+    stories: list[dict],
+    current_body: str | None,
+) -> str:
+    """Prompt for suggesting SKILL.md content based on goals + stories.
+
+    Suggestions are short, actionable rule/section ideas the user can paste
+    or accept into their SKILL.md draft. We stay agnostic about the skill's
+    structure — output is just a list of plain-text strings, one per idea.
+    """
+    goals_text = "\n".join(f"- {g}" for g in goals if g.strip()) or "(none yet)"
+    if stories:
+        stories_text = "\n".join(
+            f"- As a {s.get('who','')}, I want to {s.get('what','')}"
+            f"{', so that ' + s.get('why','') if s.get('why') else ''}"
+            for s in stories
+            if s.get("who") or s.get("what")
+        ) or "(none yet)"
+    else:
+        stories_text = "(none yet)"
+    body_section = (
+        f"\nCurrent SKILL.md draft (de-dup against this — don't repeat rules already covered):\n```\n{current_body.strip()}\n```\n"
+        if current_body and current_body.strip()
+        else "\n(The user hasn't started writing the SKILL.md yet.)\n"
+    )
+
+    return f"""You are helping a product person draft a SKILL.md for an AI feature they're building. They've defined business goals and user stories; suggest 3-5 concrete things the SKILL.md should cover so the resulting AI behavior actually serves those goals and stories.
+
+Business goals:
+{goals_text}
+
+User stories:
+{stories_text}
+{body_section}
+Each suggestion should be:
+- A specific rule, section, instruction, or guardrail the SKILL.md should include
+- Phrased in 1-2 sentences max — this is a hint, not the final wording
+- Actionable: the user should be able to read it and immediately know what to add
+- Distinct from the others and from anything already in the current draft
+
+Examples of the right shape:
+- "Add an explicit format spec for the output: required fields, ordering, max length per field."
+- "Spell out what to do when the input is missing context (refuse vs. ask vs. infer) so the eval can grade refusals consistently."
+- "Define how the skill should handle adversarial inputs (prompt injection, off-topic asks) — at minimum, name the categories you want it to refuse."
+
+Return ONLY valid JSON:
+{{
+  "suggestions": [
+    "first suggestion",
+    "second suggestion"
+  ]
+}}"""
+
+
 def build_evaluate_goals_prompt(goals: list[str]) -> str:
     goals_text = "\n".join(f"{i+1}. {g}" for i, g in enumerate(goals) if g.strip())
 

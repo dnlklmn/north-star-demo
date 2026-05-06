@@ -13,6 +13,7 @@ import {
 } from '../api'
 import DiffModal from './DiffModal'
 import PanelLayout from './PanelLayout'
+import SuggestionBox, { SuggestionCard } from './SuggestionBox'
 import Button from './ui/Button'
 import { AIIcon, CmdReturnIcon } from './ui/Icons'
 import { parseSkillFrontmatter } from '../utils/skillFrontmatter'
@@ -60,6 +61,18 @@ interface Props {
   /** Read-only when false: Analyze / Save / Promote / Discard / Start-from-
    *  scratch all hide. Body textarea becomes read-only. Defaults to true. */
   canEdit?: boolean
+  /** Whether at least one non-empty business goal exists upstream. Drives the
+   *  Suggestions panel empty state on the right rail. */
+  hasGoals?: boolean
+  /** Skill-content suggestions to render in the right rail. */
+  skillSuggestions?: string[]
+  skillSuggestionsLoading?: boolean
+  /** Refresh handler for the right-rail Suggestions panel. */
+  onRefreshSkillSuggestions?: () => void
+  /** Accept handler — appends the suggestion to the draft body. */
+  onAcceptSkillSuggestion?: (suggestion: string) => void
+  /** Dismiss handler — drops the suggestion from the local list. */
+  onDismissSkillSuggestion?: (suggestion: string) => void
 }
 
 /**
@@ -89,6 +102,12 @@ export default function SkillPanel({
   onNext,
   onGoToGoals,
   canEdit = true,
+  hasGoals = false,
+  skillSuggestions = [],
+  skillSuggestionsLoading = false,
+  onRefreshSkillSuggestions,
+  onAcceptSkillSuggestion,
+  onDismissSkillSuggestion,
 }: Props) {
   const [draft, setDraft] = useState(skillBody)
   const [versions, setVersions] = useState<SkillVersion[]>([])
@@ -388,8 +407,37 @@ export default function SkillPanel({
             : 'Paste a SKILL.md or a GitHub link, then click Analyze.'
       }
       footer={footer}
+      right={
+        canEdit && !isPromptEval ? (
+          <SuggestionBox
+            onRefresh={hasGoals ? onRefreshSkillSuggestions : undefined}
+            loading={skillSuggestionsLoading}
+            emptyText={
+              hasGoals
+                ? "Press refresh to generate suggestions."
+                : "Add goals to see suggestions."
+            }
+          >
+            {skillSuggestions.length > 0
+              ? skillSuggestions.map((suggestion, i) => (
+                  <SuggestionCard
+                    key={i}
+                    onAccept={() =>
+                      onAcceptSkillSuggestion?.(suggestion)
+                    }
+                    onDismiss={() =>
+                      onDismissSkillSuggestion?.(suggestion)
+                    }
+                  >
+                    {suggestion}
+                  </SuggestionCard>
+                ))
+              : null}
+          </SuggestionBox>
+        ) : undefined
+      }
     >
-      <div className="max-w-3xl space-y-6">
+      <div className="space-y-6">
         {/* Skip-ahead banner — only relevant before the first version exists
             and on regular skill-eval projects (prompt-eval projects always
             have a synthetic skill body). Lets users go define goals + user

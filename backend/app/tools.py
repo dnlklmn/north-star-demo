@@ -831,6 +831,34 @@ async def call_evaluate_goals(goals: list[str]) -> tuple[list[dict], list[dict]]
     return feedback, [meta]
 
 
+@traced("suggest_skill")
+async def call_suggest_skill(
+    goals: list[str],
+    stories: list[dict],
+    current_body: str | None,
+) -> tuple[list[str], list[dict]]:
+    """Suggest SKILL.md content ideas. Returns (suggestions, call metadata list)."""
+    from .prompt import build_suggest_skill_prompt
+    await _refresh_settings()
+    prompt = build_suggest_skill_prompt(goals, stories, current_body)
+    text, meta = _call_llm(prompt, max_tokens=768)
+    data = _extract_json(text)
+    suggestions = [s for s in data.get("suggestions", []) if isinstance(s, str) and s.strip()]
+    try:
+        bubble_input = (
+            "Goals:\n" + ("\n".join(f"- {g}" for g in goals) or "(none)")
+            + "\n\nStories:\n"
+            + ("\n".join(
+                f"- As a {s.get('who','')}, I want to {s.get('what','')}" for s in stories
+            ) or "(none)")
+        )
+        bubble_output = "Skill suggestions:\n" + ("\n".join(f"- {s}" for s in suggestions) or "(none)")
+        _bubble_io_to_parent_span(bubble_input, bubble_output)
+    except Exception as e:
+        logger.warning(f"suggest_skill scorer payload bubble failed: {e}")
+    return suggestions, [meta]
+
+
 @traced("suggest_stories")
 async def call_suggest_stories(goals: list[str], stories: list[dict]) -> tuple[list[dict], list[dict]]:
     """Suggest additional user stories. Returns (suggestions, call metadata list)."""

@@ -623,6 +623,23 @@ class SuggestStoriesResponse(BaseModel):
     suggestions: list[dict] = Field(default_factory=list)  # each dict has who, what, why
 
 
+class SuggestSkillRequest(BaseModel):
+    """Ask the agent for skill-content ideas given goals + stories.
+
+    Powers the right-rail SuggestionBox on the Skill tab. The current draft
+    body is included so we can de-dup against rules already present and
+    avoid suggesting things the user has clearly already covered.
+    """
+    goals: list[str]
+    stories: list[dict] = Field(default_factory=list)  # each dict has who, what, why
+    current_body: Optional[str] = None
+    session_id: Optional[str] = None
+
+
+class SuggestSkillResponse(BaseModel):
+    suggestions: list[str] = Field(default_factory=list)
+
+
 class SuggestRevisionsRequest(BaseModel):
     example_ids: list[str] = Field(default_factory=list)
 
