@@ -26,13 +26,18 @@ export function useShareToken(sessionId?: string | null): { token: string | null
   }
   const [role, setRole] = useState<ShareRole | null>(getAccessRole())
 
+  // Sync to the current role whenever the session changes — derive during
+  // render rather than via setState-in-effect.
+  const [prevSessionId, setPrevSessionId] = useState(sessionId)
+  if (sessionId !== prevSessionId) {
+    setPrevSessionId(sessionId)
+    setRole(getAccessRole())
+  }
+
   useEffect(() => {
     if (sessionId !== undefined) {
       setActiveSessionId(sessionId ?? null)
     }
-    // Sync to current value on activation in case the role for this session
-    // was already resolved by a prior fetch.
-    setRole(getAccessRole())
     return subscribeAccessRole(setRole)
   }, [sessionId])
 

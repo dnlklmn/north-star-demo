@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { RotateCcw, Sparkles } from 'lucide-react'
 
 interface Props {
@@ -80,18 +80,21 @@ export default function RegenerateBanner({
   })
 
   // Re-read dismissal state whenever the storage key changes (tab switch,
-  // version change, session change).
-  useEffect(() => {
+  // version change, session change). Tracked via a previous-key sentinel and
+  // updated during render rather than via setState-in-effect.
+  const [prevStorageKey, setPrevStorageKey] = useState(storageKey)
+  if (storageKey !== prevStorageKey) {
+    setPrevStorageKey(storageKey)
     if (!storageKey) {
       setDismissed(false)
-      return
+    } else {
+      try {
+        setDismissed(localStorage.getItem(storageKey) === '1')
+      } catch {
+        setDismissed(false)
+      }
     }
-    try {
-      setDismissed(localStorage.getItem(storageKey) === '1')
-    } catch {
-      setDismissed(false)
-    }
-  }, [storageKey])
+  }
 
   const persistDismissal = () => {
     setDismissed(true)
@@ -105,13 +108,15 @@ export default function RegenerateBanner({
 
   // Auto-dismiss when a suggestions fetch completes (loading true → false).
   // Covers banner's "Update suggestions" button AND the in-panel refresh.
-  const prevLoading = useRef<boolean>(!!suggestionsLoading)
-  useEffect(() => {
-    if (prevLoading.current && !suggestionsLoading) {
+  // Detected during render using a previous-loading sentinel.
+  const loading = !!suggestionsLoading
+  const [prevLoading, setPrevLoading] = useState(loading)
+  if (loading !== prevLoading) {
+    setPrevLoading(loading)
+    if (prevLoading && !loading) {
       persistDismissal()
     }
-    prevLoading.current = !!suggestionsLoading
-  }, [suggestionsLoading]) // eslint-disable-line react-hooks/exhaustive-deps
+  }
 
   if (!activeVersion || !sourceVersion) {
     return null

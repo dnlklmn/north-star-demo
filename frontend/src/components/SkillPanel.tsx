@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Eye, FileText, Github, History, Loader2, RotateCcw } from 'lucide-react'
 import type { SkillVersion } from '../types'
 import {
@@ -122,44 +122,24 @@ export default function SkillPanel({
     setDescriptionDraft(skillDescription ?? '')
   }, [skillDescription])
 
-  const refreshVersions = async () => {
+  const refreshVersions = useCallback(async () => {
     try {
       const v = await listSkillVersions(sessionId)
       setVersions(v)
     } catch {
       // non-fatal
     }
-  }
+  }, [sessionId])
 
   useEffect(() => {
     refreshVersions()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId])
+  }, [refreshVersions])
 
   const activeVersion = versions[0]
   const hasVersions = versions.length > 0
   const hasChanges = draft !== skillBody
   const canAnalyze = !hasVersions && draft.trim().length > 0
   const canSave = hasVersions && hasChanges
-
-  // Cmd+Enter → next phase (Analyze / Save / Go to business goals)
-  useEffect(() => {
-    if (!onNext) return;
-    const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-        e.preventDefault();
-        if (canAnalyze && !working) {
-          handleAnalyze();
-        } else if (canSave && !working) {
-          handleSave();
-        } else {
-          onNext();
-        }
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [canAnalyze, canSave, working, onNext]);
 
   const handleFetchFromGithub = async () => {
     const url = githubUrl.trim()
@@ -181,7 +161,7 @@ export default function SkillPanel({
     }
   }
 
-  const handleAnalyze = async () => {
+  const handleAnalyze = useCallback(async () => {
     if (!canAnalyze) return
     setWorking(true)
     setError(null)
@@ -205,7 +185,7 @@ export default function SkillPanel({
     } finally {
       setWorking(false)
     }
-  }
+  }, [canAnalyze, draft, nameDraft, descriptionDraft, sessionId, onSkillBodyChange, onSeeded, refreshVersions])
 
   const handleRerunAnalysis = async () => {
     setWorking(true)
@@ -231,7 +211,7 @@ export default function SkillPanel({
     }
   }
 
-  const handleSave = async () => {
+  const handleSave = useCallback(async () => {
     if (!canSave) return
     setWorking(true)
     setError(null)
@@ -249,7 +229,27 @@ export default function SkillPanel({
     } finally {
       setWorking(false)
     }
-  }
+  }, [canSave, draft, notes, sessionId, onSkillBodyChange])
+
+  // Cmd+Enter → next phase (Analyze / Save / Go to business goals).
+  // Declared after the handlers so they're in scope as effect deps.
+  useEffect(() => {
+    if (!onNext) return;
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        if (canAnalyze && !working) {
+          handleAnalyze();
+        } else if (canSave && !working) {
+          handleSave();
+        } else {
+          onNext();
+        }
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [canAnalyze, canSave, working, onNext, handleAnalyze, handleSave]);
 
   const handleStartFromScratch = async () => {
     try {

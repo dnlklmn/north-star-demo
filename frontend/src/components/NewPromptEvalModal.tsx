@@ -33,11 +33,20 @@ export default function NewPromptEvalModal({
   const [sampleSize, setSampleSize] = useState<number>(30)
   const [loadError, setLoadError] = useState<string | null>(null)
 
+  // Reset state on open transitions during render rather than in an effect —
+  // the previous setState-in-effect produced an extra render every open.
+  const [prevIsOpen, setPrevIsOpen] = useState(isOpen)
+  if (isOpen !== prevIsOpen) {
+    setPrevIsOpen(isOpen)
+    if (isOpen) {
+      setLoadError(null)
+      setBody('')
+      setTargetId('')
+    }
+  }
+
   useEffect(() => {
     if (!isOpen) return
-    setLoadError(null)
-    setBody('')
-    setTargetId('')
     listPromptTargets()
       .then((list) => {
         setTargets(list)
@@ -57,10 +66,12 @@ export default function NewPromptEvalModal({
 
   // When the user picks a different target, reset the body to that target's
   // rendered prompt so they don't accidentally seed prompt A's body into
-  // prompt B's eval.
-  useEffect(() => {
+  // prompt B's eval. Derived during render rather than via an effect.
+  const [prevTargetId, setPrevTargetId] = useState(targetId)
+  if (targetId !== prevTargetId) {
+    setPrevTargetId(targetId)
     if (target?.prompt_text) setBody(target.prompt_text)
-  }, [targetId, target?.prompt_text])
+  }
 
   useEffect(() => {
     if (!isOpen) return

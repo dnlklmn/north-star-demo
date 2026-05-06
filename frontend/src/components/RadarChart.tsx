@@ -39,10 +39,8 @@ function pointsToString(points: Array<{ x: number; y: number }>): string {
 }
 
 export default function RadarChart({ dimensions, size = 200 }: Props) {
-  if (!dimensions || dimensions.length < 3) return null
-
   const filterId = useId()
-  const count = dimensions.length
+  const count = dimensions?.length ?? 0
   const labelMargin = 48
   const cx = size / 2
   const cy = size / 2
@@ -51,6 +49,7 @@ export default function RadarChart({ dimensions, size = 200 }: Props) {
   const outerPoints = useMemo(() => getPolygonPoints(cx, cy, radius, count), [cx, cy, radius, count])
 
   const dataPoints = useMemo(() => {
+    if (!dimensions || count < 1) return []
     const angleStep = (2 * Math.PI) / count
     const startAngle = -Math.PI / 2
     return dimensions.map((d, i) => {
@@ -60,6 +59,7 @@ export default function RadarChart({ dimensions, size = 200 }: Props) {
   }, [dimensions, cx, cy, radius, count])
 
   const labelPositions = useMemo(() => {
+    if (!dimensions || count < 1) return []
     const labelRadius = radius + 20
     const angleStep = (2 * Math.PI) / count
     const startAngle = -Math.PI / 2
@@ -75,6 +75,8 @@ export default function RadarChart({ dimensions, size = 200 }: Props) {
       return { ...pos, anchor, dy }
     })
   }, [dimensions, cx, cy, radius, count])
+
+  if (!dimensions || dimensions.length < 3) return null
 
   return (
     <div className="flex justify-center">

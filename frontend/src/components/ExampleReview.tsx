@@ -82,12 +82,13 @@ export default function ExampleReview({
   // review. Once nothing is pending, flip to "all" so the full list stays
   // visible rather than showing an empty state.
   const [filterStatus, setFilterStatus] = useState<string>('pending')
-  useEffect(() => {
-    const pending = examples.filter(e => e.review_status === 'pending').length
-    if (filterStatus === 'pending' && pending === 0 && examples.length > 0) {
-      setFilterStatus('')
-    }
-  }, [examples, filterStatus])
+  // Once nothing is pending, flip the filter to "all" so we don't sit on an
+  // empty list. Set during render rather than in an effect — this is the
+  // React-recommended pattern when state needs to follow derived data.
+  const pendingCount = examples.filter(e => e.review_status === 'pending').length
+  if (filterStatus === 'pending' && pendingCount === 0 && examples.length > 0) {
+    setFilterStatus('')
+  }
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [focusedCell, setFocusedCell] = useState<CellId>('status')
   // Edit state carries both row id and which cell is being edited so only
@@ -100,10 +101,10 @@ export default function ExampleReview({
   // Edit defaults to whichever of input/output is focused. If the focused
   // cell isn't one of those, fall back to input — the action button is in
   // 'outline' state for non-edit cells, but still works.
-  const beginEdit = (exampleId: string) => {
+  const beginEdit = useCallback((exampleId: string) => {
     const cell = focusedCell === 'output' ? 'output' : 'input'
     setEditing({ id: exampleId, cell })
-  }
+  }, [focusedCell])
 
   const featureAreas = charter.alignment.map(a => a.feature_area)
 
@@ -177,15 +178,14 @@ export default function ExampleReview({
     [groups],
   )
 
-  // Auto-select first example if none selected
-  useEffect(() => {
-    if (
-      orderedExamples.length > 0 &&
-      (!selectedId || !orderedExamples.find(e => e.id === selectedId))
-    ) {
-      setSelectedId(orderedExamples[0].id)
-    }
-  }, [orderedExamples, selectedId])
+  // Auto-select first example if none selected (or selected one was filtered out).
+  // Derive during render so we don't pay the extra render of a setState-in-effect.
+  if (
+    orderedExamples.length > 0 &&
+    (!selectedId || !orderedExamples.find(e => e.id === selectedId))
+  ) {
+    setSelectedId(orderedExamples[0].id)
+  }
 
   const selectedIndex = orderedExamples.findIndex(e => e.id === selectedId)
   const selectedExample = orderedExamples.find(e => e.id === selectedId)
@@ -282,7 +282,7 @@ export default function ExampleReview({
           break
       }
     },
-    [editingId, deleteConfirmId, selectedIndex, orderedExamples, selectedExample, focusedCell, onUpdateExample, onSuggestRevision],
+    [editingId, deleteConfirmId, selectedIndex, orderedExamples, selectedExample, focusedCell, onUpdateExample, onSuggestRevision, beginEdit],
   )
 
   useEffect(() => {
@@ -712,13 +712,17 @@ function ExampleRow({
     isSelected && focusedCell === cell ? 'bg-gray-150 bg-clip-content' : ''
   const [editInput, setEditInput] = useState(example.input)
   const [editOutput, setEditOutput] = useState(example.expected_output)
-  const [showRevision, setShowRevision] = useState(false)
-  const rowRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
+  // Track the source values we hydrated edit state from. When the parent
+  // updates the underlying example, reset the edit buffers. Derived during
+  // render to avoid a setState-in-effect cascade.
+  const [prevSource, setPrevSource] = useState({ input: example.input, output: example.expected_output })
+  if (prevSource.input !== example.input || prevSource.output !== example.expected_output) {
+    setPrevSource({ input: example.input, output: example.expected_output })
     setEditInput(example.input)
     setEditOutput(example.expected_output)
-  }, [example.input, example.expected_output])
+  }
+  const [showRevision, setShowRevision] = useState(false)
+  const rowRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (isSelected && rowRef.current) {

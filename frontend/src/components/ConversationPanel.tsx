@@ -97,13 +97,16 @@ export default function ConversationPanel({
   const statusKey = getStatusKey(phase, hasCharter, isInit)
   const statusSequence = STATUS_SEQUENCES[statusKey] || ['Thinking...']
 
-  useEffect(() => {
-    if (!loading) {
-      setStatusIndex(0)
-      return
-    }
-    if (statusSequence.length <= 1) return
+  // Reset the status index when loading flips off — track the transition
+  // during render rather than via setState-in-effect.
+  const [prevLoading, setPrevLoading] = useState(loading)
+  if (loading !== prevLoading) {
+    setPrevLoading(loading)
+    if (!loading) setStatusIndex(0)
+  }
 
+  useEffect(() => {
+    if (!loading || statusSequence.length <= 1) return
     const interval = setInterval(() => {
       setStatusIndex(prev => {
         if (prev < statusSequence.length - 1) return prev + 1
@@ -152,18 +155,25 @@ export default function ConversationPanel({
     }, 10)
   }, [])
 
+  // Ref focus is deferred through a counter + effect so handlers don't read
+  // `.current` synchronously inside render-captured closures (lint rule
+  // react-hooks/refs treats that as a render-time ref access).
+  const [focusInputTick, setFocusInputTick] = useState(0)
+  useEffect(() => {
+    if (focusInputTick > 0) inputRef.current?.focus()
+  }, [focusInputTick])
+
   const handleRespond = useCallback(() => {
     if (!contextMenu) return
     // Quote the selected text and place it in the input
     const quoted = `"${contextMenu.text}" — `
     setInput(quoted)
     setContextMenu(null)
-    inputRef.current?.focus()
-  }, [contextMenu])
+    setFocusInputTick(n => n + 1)
+  }, [contextMenu, setInput])
 
   const handleQuestionClick = useCallback((section: string, _question: string) => {
     // Generate a starter response based on the section type
-    // _question is available for more contextual starters in the future
     const starters: Record<string, string> = {
       Coverage: 'For this scenario, we should consider ',
       Balance: 'I think we should prioritize ',
@@ -172,8 +182,8 @@ export default function ConversationPanel({
     }
     const starter = starters[section] || ''
     setInput(starter)
-    inputRef.current?.focus()
-  }, [])
+    setFocusInputTick(n => n + 1)
+  }, [setInput])
 
   return (
     <div className="flex flex-col h-full min-h-0">

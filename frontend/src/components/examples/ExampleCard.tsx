@@ -1,7 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
 import type { Example } from '../../types'
-import Badge, { SOURCE_COLORS, LABEL_COLORS, REVIEW_COLORS } from './Badge'
-import { formatWithLineBreaks, KeyHint } from '../../lib/formatters'
+import Badge from './Badge'
+import { SOURCE_COLORS, LABEL_COLORS, REVIEW_COLORS } from './badgeColors'
+import { formatWithLineBreaks } from '../../lib/formatters'
+import { KeyHint } from '../../lib/KeyHint'
 
 interface ExampleCardProps {
   example: Example
@@ -26,13 +28,15 @@ export default function ExampleCard({
 }: ExampleCardProps) {
   const [editInput, setEditInput] = useState(example.input)
   const [editOutput, setEditOutput] = useState(example.expected_output)
+  const [prevSource, setPrevSource] = useState({ input: example.input, output: example.expected_output })
   const cardRef = useRef<HTMLDivElement>(null)
 
-  // Reset edit state when example changes
-  useEffect(() => {
+  // Reset edit state when example changes (derive during render).
+  if (prevSource.input !== example.input || prevSource.output !== example.expected_output) {
+    setPrevSource({ input: example.input, output: example.expected_output })
     setEditInput(example.input)
     setEditOutput(example.expected_output)
-  }, [example.input, example.expected_output])
+  }
 
   // Scroll into view when selected
   useEffect(() => {
