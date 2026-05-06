@@ -1798,25 +1798,25 @@ export default function ProjectWorkspace() {
 
   // --- Next-button state per panel ---
 
-  // Goals → User Stories. Same tri-state pattern as the other transitions:
-  //   * no stories yet         → "Generate user stories" (primary)
-  //   * stories exist, goals changed → "Regenerate user stories" (primary)
-  //   * stories exist, no changes    → "Go to user stories" (neutral)
-  // Stories can be agent-extracted from goals, user-authored, or both — but
-  // the CTA unifies on "Generate" for consistency with downstream steps.
+  // Goals → User Stories. Two button shapes depending on whether stories
+  // already exist:
+  //   * no stories yet → primary "Generate user stories" + neutral "Add user
+  //     stories" (Add navigates without auto-suggesting).
+  //   * stories exist  → primary "Go to user stories" + neutral "Regenerate
+  //     user stories". Goal-edit dirtiness is irrelevant; the user can pick
+  //     Regenerate explicitly when they want a fresh draft.
   const hasAnyStories = storyGroups.some(
     (g) => g.role.trim() && g.stories.some((s) => s.what.trim()),
   );
-  const goalsNextLabel = !hasAnyStories
-    ? "Generate user stories"
-    : goalsDirty
-      ? "Regenerate user stories"
-      : "Go to user stories";
+  const goalsNextLabel = hasAnyStories
+    ? "Go to user stories"
+    : "Generate user stories";
   const goalsNextDisabled = nonEmptyGoals.length < 1;
-  // Only "Generate" (no stories yet) gets primary. Regenerate + Go to stay
-  // neutral — re-running is safe + reversible, so we don't visually push it.
   const goalsNextVariant: "primary" | "neutral" =
-    !goalsNextDisabled && !hasAnyStories ? "primary" : "neutral";
+    !goalsNextDisabled ? "primary" : "neutral";
+  const goalsSecondaryLabel = hasAnyStories
+    ? "Regenerate user stories"
+    : "Add user stories";
 
   // User Stories → Charter. Three CTA states:
   //   * no charter yet           → "Generate charter" (primary)
@@ -2034,7 +2034,12 @@ export default function ProjectWorkspace() {
                 setState((prev) => ({ ...prev, eval_mode: "standard" }));
                 setActiveTab("goals");
               }}
-              onNext={() => setActiveTab("goals")}
+              onNext={() => {
+                // Skip the goals review step and go straight to a fresh
+                // charter from the extracted goals/users/stories. Users can
+                // still review goals/stories via the sidebar before this.
+                handleSubmitIntake();
+              }}
               canEdit={canEdit}
             />
           )}
@@ -2052,16 +2057,31 @@ export default function ProjectWorkspace() {
               goalFeedback={goalFeedback}
               goalFeedbackLoading={goalFeedbackLoading}
               onNext={() => {
+                // Primary CTA. With stories present this is "Go to user
+                // stories" — pure navigation, no regeneration. Without
+                // stories it's "Generate user stories" — navigate and let
+                // the Stories tab kick off its first-visit auto-suggest.
+                if (hasAnyStories) {
+                  storyAutoSuggestedRef.current = true;
+                }
                 setGoalsDirty(false);
                 setActiveTab("users");
               }}
-              secondaryLabel="Add user stories"
+              secondaryLabel={goalsSecondaryLabel}
               secondaryDisabled={goalsNextDisabled}
               onSecondary={() => {
-                // "Add" navigates without triggering generation. Mark the
-                // first-visit auto-suggest as already done so the users
-                // tab opens with an empty composer instead of auto-fetching.
-                storyAutoSuggestedRef.current = true;
+                if (hasAnyStories) {
+                  // "Regenerate" — re-fetch suggestions against current
+                  // goals + existing stories before navigating, so the
+                  // Stories tab has a fresh batch ready to review.
+                  fetchStorySuggestions(goals, storyGroups);
+                  storyAutoSuggestedRef.current = true;
+                } else {
+                  // "Add" navigates without triggering generation. Mark
+                  // first-visit auto-suggest as done so the Stories tab
+                  // opens with an empty composer.
+                  storyAutoSuggestedRef.current = true;
+                }
                 setGoalsDirty(false);
                 setActiveTab("users");
               }}

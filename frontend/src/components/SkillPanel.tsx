@@ -231,7 +231,7 @@ export default function SkillPanel({
     }
   }, [canSave, draft, notes, sessionId, onSkillBodyChange])
 
-  // Cmd+Enter → next phase (Analyze / Save / Go to business goals).
+  // Cmd+Enter → next action (Analyze / Save / Generate charter).
   // Declared after the handlers so they're in scope as effect deps.
   useEffect(() => {
     if (!onNext) return;
@@ -398,10 +398,9 @@ export default function SkillPanel({
         variant="neutral"
         onClick={handleRerunAnalysis}
         disabled={working}
-        shortcut={<CmdReturnIcon />}
       >
         {working ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
-        Rerun analysis
+        Regenerate goals and user stories
       </Button>
       <Button
         size="big"
@@ -409,7 +408,7 @@ export default function SkillPanel({
         onClick={onNext}
         shortcut={<CmdReturnIcon />}
       >
-        Go to Business Goals
+        Generate charter
       </Button>
     </div>
   ) : undefined

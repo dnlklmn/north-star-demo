@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Loader2, Sparkles } from 'lucide-react'
+import { Loader2 } from 'lucide-react'
 import Button from './ui/Button'
+import { AIIcon } from './ui/Icons'
 import {
   createPromptEvalSession,
   fetchSkillFromUrl,
@@ -161,7 +162,7 @@ export default function AddSourceBanner({
     <div className="bg-fill-neutral border border-border">
       {/* Header row — compact, single line on wide screens. */}
       <div className="flex items-center gap-3 px-3 py-2">
-        <Sparkles className="w-4 h-4 text-accent flex-shrink-0" />
+        <AIIcon className="text-fg-primary flex-shrink-0" />
         <p className="text-sm text-foreground flex-1 min-w-0">
           <span className="font-medium">
             Do you already have a prompt or a skill?
