@@ -22,6 +22,10 @@ interface Props {
   nextLabel: string;
   nextVariant: "primary" | "neutral";
   nextDisabled: boolean;
+  /** Secondary CTA shown next to the primary button. Hidden when not provided. */
+  secondaryLabel?: string;
+  onSecondary?: () => void;
+  secondaryDisabled?: boolean;
   loading: boolean;
   /** Rendered in the right sidebar bottom slot (e.g. AI Assist) */
   rightBottom?: ReactNode;
@@ -30,6 +34,13 @@ interface Props {
   /** Read-only when false: suggestions, footer CTA, and inputs all disabled.
    *  Defaults to true. */
   canEdit?: boolean;
+  /** Embed mode: re-titles the panel "Goals" and renders preBody (typically
+   *  GoalsPanel in embedded mode) above the user-stories content, so a single
+   *  PanelLayout owns the combined Goals + User Stories page. */
+  embedded?: boolean;
+  /** Content rendered above the user-stories body, inside the same
+   *  PanelLayout. Used to host an embedded GoalsPanel on the combined tab. */
+  preBody?: React.ReactNode;
 }
 
 export default function UsersPanel({
@@ -48,6 +59,11 @@ export default function UsersPanel({
   rightBottom,
   rightBottomExpanded,
   canEdit = true,
+  secondaryLabel,
+  onSecondary,
+  secondaryDisabled,
+  embedded = false,
+  preBody,
 }: Props) {
   // Track which roles have been committed (Enter pressed)
   const [committedRoles, setCommittedRoles] = useState<Set<number>>(new Set());
@@ -426,8 +442,12 @@ export default function UsersPanel({
 
   return (
     <PanelLayout
-      title="User Stories"
-      subtitle="Define your users and what they do"
+      title={embedded ? "Goals" : "User Stories"}
+      subtitle={
+        embedded
+          ? "Define your business goals and the user stories they enable."
+          : "Define your users and what they do"
+      }
       rightBottom={rightBottom}
       rightBottomExpanded={rightBottomExpanded}
       right={
@@ -471,18 +491,34 @@ export default function UsersPanel({
       }
       footer={
         canEdit ? (
-          <Button
-            size="big"
-            variant={nextVariant}
-            shortcut={<CmdReturnIcon />}
-            onClick={onNext}
-            disabled={nextDisabled}
-          >
-            {loading ? "Generating..." : nextLabel}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              size="big"
+              variant={nextVariant}
+              shortcut={<CmdReturnIcon />}
+              onClick={onNext}
+              disabled={nextDisabled}
+            >
+              {loading ? "Generating..." : nextLabel}
+            </Button>
+            {secondaryLabel && onSecondary && (
+              <Button
+                size="big"
+                variant="neutral"
+                onClick={onSecondary}
+                disabled={secondaryDisabled || loading}
+              >
+                {secondaryLabel}
+              </Button>
+            )}
+          </div>
         ) : undefined
       }
     >
+      {preBody}
+      {preBody && (
+        <hr className="my-12 border-border-hint" />
+      )}
       {/* Read-only mode: a top-level disabled fieldset disables every native
           input/button beneath it. Visual cursor stays default. We deliberately
           don't add a 'disabled' style — viewers should still see the content

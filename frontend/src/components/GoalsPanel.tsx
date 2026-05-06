@@ -43,6 +43,11 @@ interface Props {
   canEdit?: boolean;
   /** Optional banner rendered above the compose row (e.g. "Add skill / prompt"). */
   banner?: ReactNode;
+  /** Embed mode: skip the PanelLayout wrapper and render only the body
+   *  content. Used when this panel is composed inside a larger combined
+   *  page (e.g. the Goals + Stories tab). When embedded, the parent owns
+   *  the title, footer, and right rail. */
+  embedded?: boolean;
 }
 
 export default function GoalsPanel({
@@ -65,6 +70,7 @@ export default function GoalsPanel({
   secondaryLabel,
   onSecondary,
   secondaryDisabled,
+  embedded = false,
 }: Props) {
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
   const focusIndexRef = useRef<number | null>(null);
@@ -208,59 +214,8 @@ export default function GoalsPanel({
     setDragOverIndex(null);
   };
 
-  return (
-    <PanelLayout
-      title="Business Goals"
-      subtitle="List and prioritize your business goals"
-      rightBottom={rightBottom}
-      rightBottomExpanded={rightBottomExpanded}
-      right={
-        canEdit ? (
-          <SuggestionBox
-            onRefresh={nonEmptyGoals.length > 0 ? onGoalCommit : undefined}
-            loading={suggestionsLoading}
-            emptyText="Enter a business goal to see suggestions."
-          >
-            {goalSuggestions.length > 0
-              ? goalSuggestions.map((suggestion, i) => (
-                  <SuggestionCard
-                    key={i}
-                    onAccept={() => onAcceptGoalSuggestion(suggestion)}
-                    onDismiss={() => onDismissGoalSuggestion(suggestion)}
-                  >
-                    {suggestion}
-                  </SuggestionCard>
-                ))
-              : null}
-          </SuggestionBox>
-        ) : undefined
-      }
-      footer={
-        canEdit ? (
-          <div className="flex items-center gap-2">
-            <Button
-              size="big"
-              variant={nextVariant}
-              shortcut={<CmdReturnIcon />}
-              onClick={onNext}
-              disabled={nextDisabled}
-            >
-              {nextLabel}
-            </Button>
-            {secondaryLabel && onSecondary && (
-              <Button
-                size="big"
-                variant="neutral"
-                onClick={onSecondary}
-                disabled={secondaryDisabled}
-              >
-                {secondaryLabel}
-              </Button>
-            )}
-          </div>
-        ) : undefined
-      }
-    >
+  const body = (
+    <>
       {banner && <div className="mb-6">{banner}</div>}
 
       {/* Compose row — only shown when the user can actually edit. Viewers see
@@ -466,6 +421,77 @@ export default function GoalsPanel({
           );
         })}
       </div>
+    </>
+  );
+
+  if (embedded) {
+    return (
+      <section>
+        <h3 className="text-lg font-medium text-fg-contrast mb-1">
+          Business goals
+        </h3>
+        <p className="text-sm text-fg-dim mb-6">
+          List and prioritize your business goals.
+        </p>
+        {body}
+      </section>
+    );
+  }
+
+  return (
+    <PanelLayout
+      title="Business Goals"
+      subtitle="List and prioritize your business goals"
+      rightBottom={rightBottom}
+      rightBottomExpanded={rightBottomExpanded}
+      right={
+        canEdit ? (
+          <SuggestionBox
+            onRefresh={nonEmptyGoals.length > 0 ? onGoalCommit : undefined}
+            loading={suggestionsLoading}
+            emptyText="Enter a business goal to see suggestions."
+          >
+            {goalSuggestions.length > 0
+              ? goalSuggestions.map((suggestion, i) => (
+                  <SuggestionCard
+                    key={i}
+                    onAccept={() => onAcceptGoalSuggestion(suggestion)}
+                    onDismiss={() => onDismissGoalSuggestion(suggestion)}
+                  >
+                    {suggestion}
+                  </SuggestionCard>
+                ))
+              : null}
+          </SuggestionBox>
+        ) : undefined
+      }
+      footer={
+        canEdit ? (
+          <div className="flex items-center gap-2">
+            <Button
+              size="big"
+              variant={nextVariant}
+              shortcut={<CmdReturnIcon />}
+              onClick={onNext}
+              disabled={nextDisabled}
+            >
+              {nextLabel}
+            </Button>
+            {secondaryLabel && onSecondary && (
+              <Button
+                size="big"
+                variant="neutral"
+                onClick={onSecondary}
+                disabled={secondaryDisabled}
+              >
+                {secondaryLabel}
+              </Button>
+            )}
+          </div>
+        ) : undefined
+      }
+    >
+      {body}
     </PanelLayout>
   );
 }

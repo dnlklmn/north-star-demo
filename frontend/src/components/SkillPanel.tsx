@@ -14,7 +14,7 @@ import {
 import DiffModal from './DiffModal'
 import PanelLayout from './PanelLayout'
 import Button from './ui/Button'
-import { CmdReturnIcon } from './ui/Icons'
+import { AIIcon, CmdReturnIcon } from './ui/Icons'
 import { parseSkillFrontmatter } from '../utils/skillFrontmatter'
 
 interface Props {
@@ -51,8 +51,12 @@ interface Props {
   /** Called when the user clicks "Start from scratch" — parent has already
    *  flipped the session to standard mode via api. */
   onStartFromScratch?: () => void
-  /** Called when the user clicks "Go to business goals" or presses Cmd+Enter. */
+  /** Called when the user clicks the post-seed primary CTA or presses Cmd+Enter. */
   onNext?: () => void
+  /** Called by the "Don't have a skill or prompt yet?" banner — navigates to
+   *  the combined Goals tab so the user can define goals + user stories first.
+   *  When omitted, the banner is hidden. */
+  onGoToGoals?: () => void
   /** Read-only when false: Analyze / Save / Promote / Discard / Start-from-
    *  scratch all hide. Body textarea becomes read-only. Defaults to true. */
   canEdit?: boolean
@@ -86,6 +90,7 @@ export default function SkillPanel({
   onSeeded,
   onStartFromScratch,
   onNext,
+  onGoToGoals,
   canEdit = true,
 }: Props) {
   const [draft, setDraft] = useState(skillBody)
@@ -408,7 +413,7 @@ export default function SkillPanel({
         onClick={onNext}
         shortcut={<CmdReturnIcon />}
       >
-        Generate charter
+        Go to Goals
       </Button>
     </div>
   ) : undefined
@@ -438,6 +443,26 @@ export default function SkillPanel({
       footer={footer}
     >
       <div className="max-w-3xl space-y-6">
+        {/* Skip-ahead banner — only relevant before the first version exists
+            and on regular skill-eval projects (prompt-eval projects always
+            have a synthetic skill body). Lets users go define goals + user
+            stories first instead of pasting a SKILL.md. */}
+        {!isPromptEval && !hasVersions && canEdit && onGoToGoals && (
+          <div className="bg-fill-neutral border border-border p-4 flex items-center gap-3">
+            <AIIcon className="text-fg-primary flex-shrink-0" />
+            <p className="text-sm text-foreground flex-1 min-w-0">
+              <span className="font-medium">
+                Don't have a skill or a prompt yet?
+              </span>{' '}
+              <span className="text-muted-foreground">
+                Define your goals and user stories and we'll generate you one.
+              </span>
+            </p>
+            <Button size="small" variant="neutral" onClick={onGoToGoals}>
+              Go to Goals
+            </Button>
+          </div>
+        )}
         {isPromptEval && (promptSourcePath || promptBuilderName) && (
           <div className="text-xs text-muted-foreground bg-fill-neutral/30 border border-border p-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 items-baseline">
             {promptBuilderName && (

@@ -112,7 +112,7 @@ export default function Home() {
     setCreating(true);
     try {
       const res = await createSession({ name: "Untitled project" });
-      navigate(`/project/${res.session_id}?tab=goals`);
+      navigate(`/project/${res.session_id}?tab=skill`);
     } catch (err) {
       console.error("Failed to create project:", err);
       alert(`Error: ${err instanceof Error ? err.message : "Unknown error"}`);

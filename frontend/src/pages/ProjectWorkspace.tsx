@@ -59,7 +59,6 @@ import Button from "../components/ui/Button";
 import { uniqueProjectName } from "../utils/skillFrontmatter";
 import IconButton from "../components/ui/IconButton";
 import GoalsPanel from "../components/GoalsPanel";
-import AddSourceBanner from "../components/AddSourceBanner";
 import UsersPanel from "../components/UsersPanel";
 import CharterPanel from "../components/CharterPanel";
 import ScorersPanel from "../components/ScorersPanel";
@@ -152,7 +151,7 @@ export default function ProjectWorkspace() {
   const navigate = useNavigate();
 
   // --- Navigation ---
-  const [activeTab, setActiveTab] = useState<ActiveTab>("goals");
+  const [activeTab, setActiveTab] = useState<ActiveTab>("skill");
   const [showAssistant, setShowAssistant] = useState(false);
 
   // --- Project metadata ---
@@ -372,7 +371,7 @@ export default function ProjectWorkspace() {
            } else if (hasCharter) {
              setActiveTab("charter");
            } else if (hasSkillBody || isTriggered) {
-             setActiveTab("goals");
+             setActiveTab("skill");
            }
          } catch {
            // No dataset yet
@@ -383,9 +382,9 @@ export default function ProjectWorkspace() {
            } else if (hasCharter) {
              setActiveTab("charter");
            } else if (hasSkillBody || isTriggered) {
-             setActiveTab("goals");
+             setActiveTab("skill");
            } else if (s.input.story_groups && s.input.story_groups.length > 0) {
-             setActiveTab("users");
+             setActiveTab("goals");
            }
          }
 
@@ -449,7 +448,8 @@ export default function ProjectWorkspace() {
   // at run time, where the eval task replays the prompt builder instead
   // of running skill_body as a system prompt.
   const isPromptEval = state.kind === "prompt";
-  const usersAvailable = nonEmptyGoals.length >= 1;
+  // Goals tab is always reachable — it's where users enter their goals.
+  const usersAvailable = true;
   const charterAvailable = hasCharter || loading;
   const datasetAvailable = isPromptEval ? !!dataset : hasCharter;
   const scorersAvailable = hasCharter;
@@ -1805,39 +1805,19 @@ export default function ProjectWorkspace() {
   //   * stories exist  → primary "Go to user stories" + neutral "Regenerate
   //     user stories". Goal-edit dirtiness is irrelevant; the user can pick
   //     Regenerate explicitly when they want a fresh draft.
-  const hasAnyStories = storyGroups.some(
-    (g) => g.role.trim() && g.stories.some((s) => s.what.trim()),
-  );
-  const goalsNextLabel = hasAnyStories
-    ? "Go to user stories"
-    : "Generate user stories";
-  const goalsNextDisabled = nonEmptyGoals.length < 1;
-  const goalsNextVariant: "primary" | "neutral" =
-    !goalsNextDisabled ? "primary" : "neutral";
-  const goalsSecondaryLabel = hasAnyStories
-    ? "Regenerate user stories"
-    : "Add user stories";
-
-  // User Stories → Charter. Three CTA states:
+  // Combined Goals page → Charter. Three CTA states:
   //   * no charter yet           → "Generate charter" (primary)
   //   * charter exists, dirty    → "Regenerate charter" (primary)
   //   * charter exists, unchanged → "Go to charter" (neutral)
-  // "Dirty" here means goals OR stories have changed since the charter was
-  // last (re)generated, i.e. the previous steps are ahead of the charter.
   const upstreamDirty = storiesDirty || goalsDirty;
-  const storiesNextLabel = !hasCharter
+  const charterCtaLabel = !hasCharter
     ? "Generate charter"
     : upstreamDirty
       ? "Regenerate charter"
       : "Go to charter";
-  const storiesHasContent = storyGroups.some(
-    (g) => g.role.trim() && g.stories.some((s) => s.what.trim()),
-  );
-  const storiesNextDisabled = !storiesHasContent || loading;
-  // Same rule as Goals → Stories: primary only on first-time Generate;
-  // Regenerate + Go to are neutral.
-  const storiesNextVariant: "primary" | "neutral" =
-    !storiesNextDisabled && !hasCharter ? "primary" : "neutral";
+  const charterCtaDisabled = nonEmptyGoals.length < 1 || loading;
+  const charterCtaVariant: "primary" | "neutral" =
+    !charterCtaDisabled && !hasCharter ? "primary" : "neutral";
 
   return (
     <div className="h-full flex flex-col bg-bg-default text-fg-contrast">
@@ -1927,30 +1907,27 @@ export default function ProjectWorkspace() {
           {/* Nav groups */}
           <SidebarGroup hideTopDivider>
             <SidebarItem
-              label="Business Goals"
+              label={isPromptEval ? "Prompt" : "Skill"}
               icon={<GoalsIcon width={24} height={24} />}
-              active={activeTab === "goals"}
-              onClick={() => setActiveTab("goals")}
-              badge={
-                nonEmptyGoals.length > 0 ? `${nonEmptyGoals.length}` : undefined
-              }
-            />
-            <SidebarItem
-              label="User Stories"
-              icon={<UsersIcon width={24} height={24} />}
-              active={activeTab === "users"}
-              onClick={() => setActiveTab("users")}
-              disabled={!usersAvailable}
-              badge={totalStoryCount > 0 ? `${totalStoryCount}` : undefined}
+              active={activeTab === "skill"}
+              onClick={() => setActiveTab("skill")}
             />
           </SidebarGroup>
 
           <SidebarGroup>
             <SidebarItem
-              label={isPromptEval ? "Prompt" : "Skill"}
-              icon={<GoalsIcon width={24} height={24} />}
-              active={activeTab === "skill"}
-              onClick={() => setActiveTab("skill")}
+              label="Goals"
+              icon={<UsersIcon width={24} height={24} />}
+              active={activeTab === "goals" || activeTab === "users"}
+              onClick={() => setActiveTab("goals")}
+              disabled={!usersAvailable}
+              badge={
+                totalStoryCount > 0
+                  ? `${nonEmptyGoals.length}/${totalStoryCount}`
+                  : nonEmptyGoals.length > 0
+                    ? `${nonEmptyGoals.length}`
+                    : undefined
+              }
             />
           </SidebarGroup>
 
@@ -2034,84 +2011,37 @@ export default function ProjectWorkspace() {
                 setState((prev) => ({ ...prev, eval_mode: "standard" }));
                 setActiveTab("goals");
               }}
-              onNext={() => {
-                // Skip the goals review step and go straight to a fresh
-                // charter from the extracted goals/users/stories. Users can
-                // still review goals/stories via the sidebar before this.
-                handleSubmitIntake();
-              }}
+              onNext={() => setActiveTab("goals")}
+              onGoToGoals={() => setActiveTab("goals")}
               canEdit={canEdit}
             />
           )}
 
-          {activeTab === "goals" && (
-            <>
-          <GoalsPanel
-              goals={goals}
-              onGoalsChange={handleGoalsChange}
-              onGoalCommit={handleGoalCommit}
-              goalSuggestions={goalSuggestions}
-              onAcceptGoalSuggestion={handleAcceptGoalSuggestion}
-              onDismissGoalSuggestion={handleDismissGoalSuggestion}
-              suggestionsLoading={goalSuggestionsLoading}
-              goalFeedback={goalFeedback}
-              goalFeedbackLoading={goalFeedbackLoading}
-              onNext={() => {
-                // Primary CTA. With stories present this is "Go to user
-                // stories" — pure navigation, no regeneration. Without
-                // stories it's "Generate user stories" — navigate and let
-                // the Stories tab kick off its first-visit auto-suggest.
-                if (hasAnyStories) {
-                  storyAutoSuggestedRef.current = true;
-                }
-                setGoalsDirty(false);
-                setActiveTab("users");
-              }}
-              secondaryLabel={goalsSecondaryLabel}
-              secondaryDisabled={goalsNextDisabled}
-              onSecondary={() => {
-                if (hasAnyStories) {
-                  // "Regenerate" — re-fetch suggestions against current
-                  // goals + existing stories before navigating, so the
-                  // Stories tab has a fresh batch ready to review.
-                  fetchStorySuggestions(goals, storyGroups);
-                  storyAutoSuggestedRef.current = true;
-                } else {
-                  // "Add" navigates without triggering generation. Mark
-                  // first-visit auto-suggest as done so the Stories tab
-                  // opens with an empty composer.
-                  storyAutoSuggestedRef.current = true;
-                }
-                setGoalsDirty(false);
-                setActiveTab("users");
-              }}
-              nextLabel={goalsNextLabel}
-              nextVariant={goalsNextVariant}
-              nextDisabled={goalsNextDisabled}
-              rightBottom={showAssistant ? undefined : aiAssistButton}
-              rightBottomExpanded={showAssistant ? polarisPanel : undefined}
-              canEdit={canEdit}
-              banner={
-                canEdit &&
-                urlSessionId &&
-                !state.charter.task.skill_body &&
-                !isPromptEval ? (
-                  <AddSourceBanner
-                    sessionId={urlSessionId}
-                    onSeeded={handleSessionSeeded}
-                    onPromptCreated={(newSessionId) => {
-                      navigate(`/project/${newSessionId}?tab=goals`);
-                    }}
-                  />
-                ) : undefined
-              }
-            />
-            </>
-          )}
-
-          {activeTab === "users" && (
-            <>
+          {(activeTab === "goals" || activeTab === "users") && (
             <UsersPanel
+              embedded
+              preBody={
+                <GoalsPanel
+                  embedded
+                  goals={goals}
+                  onGoalsChange={handleGoalsChange}
+                  onGoalCommit={handleGoalCommit}
+                  goalSuggestions={goalSuggestions}
+                  onAcceptGoalSuggestion={handleAcceptGoalSuggestion}
+                  onDismissGoalSuggestion={handleDismissGoalSuggestion}
+                  suggestionsLoading={goalSuggestionsLoading}
+                  goalFeedback={goalFeedback}
+                  goalFeedbackLoading={goalFeedbackLoading}
+                  // Embedded → footer/right not rendered, but the prop is
+                  // required. Wire to the combined-page primary so the
+                  // values stay coherent with what the parent shows.
+                  onNext={() => handleSubmitIntake()}
+                  nextLabel={charterCtaLabel}
+                  nextVariant={charterCtaVariant}
+                  nextDisabled={charterCtaDisabled}
+                  canEdit={canEdit}
+                />
+              }
               storyGroups={storyGroups}
               onStoryGroupsChange={(groups) => {
                 setStoryGroups(groups);
@@ -2123,17 +2053,14 @@ export default function ProjectWorkspace() {
               onDismissStory={handleDismissStory}
               storySuggestionsLoading={storySuggestionsLoading}
               onNext={() => {
+                // Primary CTA on combined Goals page → next phase is Charter.
+                setGoalsDirty(false);
                 setStoriesDirty(false);
-                // "Go to charter" skips regeneration when nothing upstream
-                // changed. Otherwise generate/regenerate then navigate — the
-                // submit handler already switches tabs on success.
                 if (hasCharter && !upstreamDirty) {
                   setActiveTab("charter");
                   return;
                 }
                 if (hasCharter && upstreamDirty) {
-                  // Confirm before overwriting an existing charter — user
-                  // edits to criteria, alignment entries, etc. will be lost.
                   const ok = window.confirm(
                     "Regenerate the charter?\n\nThis replaces the current criteria, alignment entries, and rot signals with a fresh draft built from your goals and stories.",
                   );
@@ -2141,15 +2068,14 @@ export default function ProjectWorkspace() {
                 }
                 handleSubmitIntake();
               }}
-              nextLabel={storiesNextLabel}
-              nextVariant={storiesNextVariant}
-              nextDisabled={storiesNextDisabled}
+              nextLabel={charterCtaLabel}
+              nextVariant={charterCtaVariant}
+              nextDisabled={charterCtaDisabled}
               loading={loading}
               rightBottom={showAssistant ? undefined : aiAssistButton}
               rightBottomExpanded={showAssistant ? polarisPanel : undefined}
               canEdit={canEdit}
             />
-            </>
           )}
 
           {activeTab === "charter" && (
