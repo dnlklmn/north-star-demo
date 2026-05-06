@@ -44,6 +44,11 @@ interface Props {
   /** Whether at least one non-empty business goal exists. Drives the
    *  "Generate from business goals" button state in embedded mode. */
   hasGoals?: boolean;
+  /** Click handler for the "Generate from business goals" button.
+   *  Distinct from onStoryCommit — the latter fires on each typed story
+   *  for incremental suggestions, this one runs an explicit pass that
+   *  seeds storyGroups directly. */
+  onGenerateFromGoals?: () => void | Promise<void>;
 }
 
 export default function UsersPanel({
@@ -68,6 +73,7 @@ export default function UsersPanel({
   embedded = false,
   preBody,
   hasGoals = false,
+  onGenerateFromGoals,
 }: Props) {
   // Track which roles have been committed (Enter pressed)
   const [committedRoles, setCommittedRoles] = useState<Set<number>>(new Set());
@@ -532,7 +538,11 @@ export default function UsersPanel({
             <Button
               size="small"
               variant="neutral"
-              onClick={onStoryCommit}
+              onClick={() =>
+                onGenerateFromGoals
+                  ? onGenerateFromGoals()
+                  : onStoryCommit()
+              }
               disabled={!hasGoals || storySuggestionsLoading}
             >
               {storySuggestionsLoading ? (

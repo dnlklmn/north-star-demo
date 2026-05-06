@@ -398,18 +398,20 @@ export default function SkillPanel({
     </div>
   ) : onNext ? (
     <div className="flex items-center gap-2">
+      {hasVersions && (
+        <Button
+          size="big"
+          variant="neutral"
+          onClick={handleRerunAnalysis}
+          disabled={working}
+        >
+          {working ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+          Regenerate goals and user stories
+        </Button>
+      )}
       <Button
         size="big"
         variant="neutral"
-        onClick={handleRerunAnalysis}
-        disabled={working}
-      >
-        {working ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
-        Regenerate goals and user stories
-      </Button>
-      <Button
-        size="big"
-        variant="primary"
         onClick={onNext}
         shortcut={<CmdReturnIcon />}
       >

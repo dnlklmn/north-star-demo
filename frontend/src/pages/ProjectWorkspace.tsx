@@ -1,6 +1,11 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { ArrowRight as ArrowRightLucide, Loader2, Sparkles as SparklesIcon } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowRight as ArrowRightLucide,
+  Loader2,
+  Sparkles as SparklesIcon,
+} from "lucide-react";
 import {
   GearIcon,
   ChatBubbleIcon,
@@ -451,9 +456,16 @@ export default function ProjectWorkspace() {
   // Goals tab is always reachable — it's where users enter their goals.
   const usersAvailable = true;
   const charterAvailable = hasCharter || loading;
-  const datasetAvailable = isPromptEval ? !!dataset : hasCharter;
-  const scorersAvailable = hasCharter;
-  const evaluateAvailable = !!dataset;
+  // A skill body (or a prompt-eval, which has a synthetic skill_body) is the
+  // gate for everything downstream of the charter. Without one, you can't
+  // run a meaningful eval — there's nothing to evaluate against — so the
+  // dataset/scorers/evaluate tabs stay locked. Prompt-eval projects always
+  // have a synthetic body, so they're allowed through.
+  const hasSkillBody = !!state.charter.task.skill_body;
+  const skillReady = hasSkillBody || isPromptEval;
+  const datasetAvailable = skillReady && (isPromptEval ? !!dataset : hasCharter);
+  const scorersAvailable = skillReady && hasCharter;
+  const evaluateAvailable = skillReady && !!dataset;
 
   const [evalAutoRun, setEvalAutoRun] = useState(false);
   // Generation shortcuts on the Users tab. Independent spinners so the
@@ -579,6 +591,31 @@ export default function ProjectWorkspace() {
       scheduleSaveInput();
     }
   }, [goals, storyGroups, hydrating, sessionId, scheduleSaveInput]);
+
+  // Debounced auto-fetch of goal suggestions as the user types. First-fire
+  // happens as soon as any goal has at least one non-whitespace character;
+  // subsequent edits re-fire on a 1.5s idle. Keeps the right rail responsive
+  // without spamming the backend every keystroke.
+  const goalsTypingDebounceRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (hydrating) return;
+    const nonEmpty = goals.filter((g) => g.trim());
+    if (nonEmpty.length === 0) return;
+    if (goalsTypingDebounceRef.current) {
+      window.clearTimeout(goalsTypingDebounceRef.current);
+    }
+    goalsTypingDebounceRef.current = window.setTimeout(() => {
+      goalsTypingDebounceRef.current = null;
+      fetchGoalSuggestions(goals);
+    }, 1500);
+    return () => {
+      if (goalsTypingDebounceRef.current) {
+        window.clearTimeout(goalsTypingDebounceRef.current);
+        goalsTypingDebounceRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [goals, hydrating]);
 
   const fetchGoalSuggestions = useCallback(async (currentGoals: string[]) => {
     const nonEmpty = currentGoals.filter((g) => g.trim());
@@ -715,6 +752,76 @@ export default function ProjectWorkspace() {
   const handleStoryCommit = useCallback(() => {
     fetchStorySuggestions(goals, storyGroups);
   }, [goals, storyGroups, fetchStorySuggestions]);
+
+  // "Generate from business goals" — explicit user request to seed user
+  // stories from the current goals. Fetches suggestions AND auto-accepts
+  // the first few into storyGroups so the page actually populates with
+  // stories instead of leaving the work in the right rail.
+  const handleGenerateStoriesFromGoals = useCallback(async () => {
+    const nonEmpty = goals.filter((g) => g.trim());
+    if (nonEmpty.length === 0) return;
+    const existingStories = storyGroups
+      .filter((g) => g.role.trim())
+      .flatMap((g) =>
+        g.stories
+          .filter((s) => s.what.trim())
+          .map((s) => ({ who: g.role, what: s.what, why: s.why })),
+      );
+
+    setStorySuggestionsLoading(true);
+    try {
+      const res = await suggestStories(
+        nonEmpty,
+        existingStories,
+        urlSessionId ?? null,
+      );
+      const fresh = res.suggestions.map((s) => ({
+        who: s.who,
+        what: s.what,
+        why: s.why || "",
+      }));
+
+      // Auto-insert the first three suggestions directly into storyGroups,
+      // grouped by role. The remainder stays in the right-rail SuggestionBox
+      // so the user can still pick from them.
+      const TO_INSERT = 3;
+      const toInsert = fresh.slice(0, TO_INSERT);
+      const remainder = fresh.slice(TO_INSERT);
+
+      setStoryGroups((prev) => {
+        let next = prev;
+        for (const story of toInsert) {
+          const existingIdx = next.findIndex(
+            (g) => g.role.toLowerCase() === story.who.toLowerCase(),
+          );
+          if (existingIdx >= 0) {
+            next = [...next];
+            next[existingIdx] = {
+              ...next[existingIdx],
+              stories: [
+                ...next[existingIdx].stories,
+                { what: story.what, why: story.why },
+              ],
+            };
+          } else {
+            next = [
+              ...next,
+              {
+                role: story.who,
+                stories: [{ what: story.what, why: story.why }],
+              },
+            ];
+          }
+        }
+        return next;
+      });
+      setSuggestedStories(remainder);
+    } catch (err) {
+      console.error("Failed to generate stories from goals:", err);
+    } finally {
+      setStorySuggestionsLoading(false);
+    }
+  }, [goals, storyGroups, urlSessionId]);
 
   const storySuggestionDebounceRef = useRef<number | null>(null);
 
@@ -1809,13 +1916,16 @@ export default function ProjectWorkspace() {
   //   * no charter yet           → "Generate charter" (primary)
   //   * charter exists, dirty    → "Regenerate charter" (primary)
   //   * charter exists, unchanged → "Go to charter" (neutral)
+  // Goals only count once committed (Enter / Submit) — typing into the
+  // trailing draft input does NOT flip the button to primary.
   const upstreamDirty = storiesDirty || goalsDirty;
+  const committedGoalsCount = goals.slice(0, -1).filter((g) => g.trim()).length;
   const charterCtaLabel = !hasCharter
     ? "Generate charter"
     : upstreamDirty
       ? "Regenerate charter"
       : "Go to charter";
-  const charterCtaDisabled = nonEmptyGoals.length < 1 || loading;
+  const charterCtaDisabled = committedGoalsCount < 1 || loading;
   const charterCtaVariant: "primary" | "neutral" =
     !charterCtaDisabled && !hasCharter ? "primary" : "neutral";
 
@@ -1911,6 +2021,12 @@ export default function ProjectWorkspace() {
               icon={<GoalsIcon width={24} height={24} />}
               active={activeTab === "skill"}
               onClick={() => setActiveTab("skill")}
+              warning={!skillReady}
+              warningTitle={
+                isPromptEval
+                  ? "No prompt yet"
+                  : "No skill defined yet — paste or generate one before running evals."
+              }
             />
           </SidebarGroup>
 
@@ -1929,9 +2045,6 @@ export default function ProjectWorkspace() {
                     : undefined
               }
             />
-          </SidebarGroup>
-
-          <SidebarGroup>
             <SidebarItem
               label="Charter"
               icon={<CharterIcon width={24} height={24} />}
@@ -1939,6 +2052,9 @@ export default function ProjectWorkspace() {
               onClick={() => setActiveTab("charter")}
               disabled={!charterAvailable}
             />
+          </SidebarGroup>
+
+          <SidebarGroup>
             <SidebarItem
               label="Dataset"
               icon={<DatasetIcon width={24} height={24} />}
@@ -2021,6 +2137,7 @@ export default function ProjectWorkspace() {
             <UsersPanel
               embedded
               hasGoals={nonEmptyGoals.length > 0}
+              onGenerateFromGoals={handleGenerateStoriesFromGoals}
               preBody={
                 <GoalsPanel
                   embedded
@@ -2447,6 +2564,8 @@ function SidebarItem({
   disabled,
   badge,
   icon,
+  warning,
+  warningTitle,
 }: {
   label: string;
   active: boolean;
@@ -2454,6 +2573,8 @@ function SidebarItem({
   disabled?: boolean;
   badge?: string;
   icon?: React.ReactNode;
+  warning?: boolean;
+  warningTitle?: string;
 }) {
   return (
     <button
@@ -2469,6 +2590,15 @@ function SidebarItem({
     >
       {icon ?? <StarIcon />}
       <span className="truncate w-full">{label}</span>
+      {warning && (
+        <span
+          className="flex-shrink-0 inline-flex"
+          title={warningTitle ?? "Action required"}
+          aria-label={warningTitle ?? "Action required"}
+        >
+          <AlertTriangle className="w-4 h-4 text-warning" />
+        </span>
+      )}
       {badge && (
         <span
           className={`font-mono text-[10px] px-1.5 py-0.5 ml-2 ${
