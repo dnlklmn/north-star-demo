@@ -195,7 +195,36 @@ async def _get_project(ctx: ToolCtx, args: dict) -> dict:
         "has_charter": bool(charter.get("alignment") or charter.get("coverage", {}).get("criteria")),
         "n_alignment": len(charter.get("alignment") or []),
         "n_coverage_criteria": len((charter.get("coverage") or {}).get("criteria") or []),
+        "n_scorers": len(state.get("scorers") or []),
         "dataset_id": dataset["id"] if dataset else None,
+    }
+
+
+@tool(
+    "get_scorers",
+    "List the scorers configured for the current project — name, type, description, enabled flag.",
+    {"type": "object", "properties": {"session_id": {"type": "string"}}, "additionalProperties": False},
+    tier="auto",
+)
+async def _get_scorers(ctx: ToolCtx, args: dict) -> dict:
+    sid = args.get("session_id") or ctx.session_id
+    if not sid:
+        return {"error": "no session in context"}
+    row = await db.get_session(sid)
+    if not row:
+        return {"error": "session not found"}
+    scorers = (row.get("state") or {}).get("scorers") or []
+    return {
+        "count": len(scorers),
+        "scorers": [
+            {
+                "name": s.get("name"),
+                "type": s.get("type"),
+                "description": s.get("description"),
+                "enabled": s.get("enabled", True),
+            }
+            for s in scorers
+        ],
     }
 
 
@@ -959,6 +988,29 @@ async def _nav_share(ctx: ToolCtx, args: dict) -> dict:
 )
 async def _nav_eval_run(ctx: ToolCtx, args: dict) -> dict:
     return _nav("eval_run", {"run_id": args["run_id"]})
+
+
+@tool(
+    "set_dataset_filter",
+    "Apply filters to the dataset table in the UI (feature_area / label / review_status). "
+    "Use this when the user asks to filter, narrow, or focus the list — DO NOT call list_examples for filtering. "
+    "Pass an empty string for any field to clear it. Switches to the dataset tab as a side effect.",
+    {
+        "type": "object",
+        "properties": {
+            "feature_area": {"type": "string", "description": "Exact feature area name, or empty to clear."},
+            "label": {"type": "string", "enum": ["", "good", "bad", "unlabeled"]},
+            "review_status": {"type": "string", "enum": ["", "pending", "approved", "rejected", "needs_edit"]},
+        },
+        "additionalProperties": False,
+    },
+    tier="nav",
+)
+async def _set_dataset_filter(ctx: ToolCtx, args: dict) -> dict:
+    # Only forward keys the user actually specified — undefined ones leave
+    # the existing UI filter alone, while explicit "" means clear.
+    props = {k: v for k, v in args.items() if k in {"feature_area", "label", "review_status"}}
+    return _nav("dataset_filter", props)
 
 
 # ============================================================================

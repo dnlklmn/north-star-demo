@@ -356,6 +356,20 @@ export default function ProjectWorkspace() {
       new CustomEvent("polaris:select-example", { detail: { id } }),
     );
   });
+  useRegisterPolarisNav("dataset_filter", (props) => {
+    setActiveTab("dataset");
+    // Same event pattern as `example`: ExampleReview owns the filter state,
+    // we forward what the agent picked so the table re-renders.
+    window.dispatchEvent(
+      new CustomEvent("polaris:set-filter", {
+        detail: {
+          feature_area: props.feature_area as string | undefined,
+          label: props.label as string | undefined,
+          review_status: props.review_status as string | undefined,
+        },
+      }),
+    );
+  });
 
   // Coverage map status comes from the gap analysis. Compute once per
   // gapAnalysis change so the dataset toolbar dot stays in sync.
