@@ -159,7 +159,7 @@ export default function AddSourceBanner({
   const canSubmitSkill = skillInput.trim().length > 0 && !working
 
   return (
-    <div className="bg-fill-neutral border border-border">
+    <div className="bg-fill-primary/10 border border-fill-primary/30">
       {/* Header row — compact, single line on wide screens. */}
       <div className="flex items-center gap-3 px-3 py-2">
         <AIIcon className="text-fg-primary flex-shrink-0" />

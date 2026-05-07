@@ -41,6 +41,8 @@ interface Props {
   /** Content rendered above the user-stories body, inside the same
    *  PanelLayout. Used to host an embedded GoalsPanel on the combined tab. */
   preBody?: React.ReactNode;
+  /** Banner rendered above the page title (forwarded to PanelLayout). */
+  topBanner?: ReactNode;
   /** Whether at least one non-empty business goal exists. Drives the
    *  "Generate from business goals" button state in embedded mode. */
   hasGoals?: boolean;
@@ -49,6 +51,14 @@ interface Props {
    *  for incremental suggestions, this one runs an explicit pass that
    *  seeds storyGroups directly. */
   onGenerateFromGoals?: () => void | Promise<void>;
+  /** Goal-suggestion props — surfaced in the right rail above the
+   *  story-suggestion box when this panel is hosting the combined Goal
+   *  page (embedded mode). Ignored when embedded is false. */
+  goalSuggestions?: string[];
+  goalSuggestionsLoading?: boolean;
+  onAcceptGoalSuggestion?: (suggestion: string) => void;
+  onDismissGoalSuggestion?: (suggestion: string) => void;
+  onRefreshGoalSuggestions?: () => void;
 }
 
 export default function UsersPanel({
@@ -74,6 +84,12 @@ export default function UsersPanel({
   preBody,
   hasGoals = false,
   onGenerateFromGoals,
+  goalSuggestions = [],
+  goalSuggestionsLoading = false,
+  onAcceptGoalSuggestion,
+  onDismissGoalSuggestion,
+  onRefreshGoalSuggestions,
+  topBanner,
 }: Props) {
   // Track which roles have been committed (Enter pressed)
   const [committedRoles, setCommittedRoles] = useState<Set<number>>(new Set());
@@ -452,51 +468,83 @@ export default function UsersPanel({
 
   return (
     <PanelLayout
-      title={embedded ? "Goals" : "User Stories"}
+      title={embedded ? "Goal" : "User Stories"}
       subtitle={
         embedded
           ? "Define your business goals and the user stories they enable."
           : "Define your users and what they do"
       }
+      topBanner={topBanner}
       rightBottom={rightBottom}
       rightBottomExpanded={rightBottomExpanded}
       right={
         canEdit ? (
-        <SuggestionBox
-          onRefresh={hasStories ? onStoryCommit : undefined}
-          loading={storySuggestionsLoading}
-          emptyText={
-            hasStories
-              ? "Press Enter after a story to get suggestions"
-              : "Enter a business goal to see suggestions."
-          }
-        >
-          {suggestedStories.length > 0
-            ? suggestedStories.map((story, i) => (
-                <SuggestionCard
-                  key={i}
-                  onAccept={() => onAcceptStory(story)}
-                  onDismiss={() => onDismissStory(story)}
-                >
-                  <div className="flex flex-col gap-2">
-                    <span className="self-start bg-gray-150 text-fg-contrast text-base leading-[1.5] px-1">
-                      {story.who}
-                    </span>
-                    <div>
-                      <p className="text-base text-fg-contrast leading-[1.5]">
-                        {story.what}
-                      </p>
-                      {story.why && (
-                        <p className="text-base text-fg-dim leading-[1.5]">
-                          {story.why}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                </SuggestionCard>
-              ))
-            : null}
-        </SuggestionBox>
+          <div className="flex flex-col gap-8">
+            {/* Goal suggestions — only shown in embedded mode (combined Goal
+                page hosts both this and the User Stories editor). The
+                standalone Stories tab leaves goals to the dedicated Goals
+                tab and skips the box. */}
+            {embedded && (
+              <SuggestionBox
+                label="Goal suggestions"
+                onRefresh={hasGoals ? onRefreshGoalSuggestions : undefined}
+                loading={goalSuggestionsLoading}
+                emptyText="Enter a business goal to see suggestions."
+              >
+                {goalSuggestions.length > 0
+                  ? goalSuggestions.map((suggestion, i) => (
+                      <SuggestionCard
+                        key={i}
+                        onAccept={() =>
+                          onAcceptGoalSuggestion?.(suggestion)
+                        }
+                        onDismiss={() =>
+                          onDismissGoalSuggestion?.(suggestion)
+                        }
+                      >
+                        {suggestion}
+                      </SuggestionCard>
+                    ))
+                  : null}
+              </SuggestionBox>
+            )}
+            <SuggestionBox
+              label={embedded ? "Story suggestions" : "Suggestions"}
+              onRefresh={hasStories ? onStoryCommit : undefined}
+              loading={storySuggestionsLoading}
+              emptyText={
+                hasStories
+                  ? "Press Enter after a story to get suggestions"
+                  : "Enter a business goal to see suggestions."
+              }
+            >
+              {suggestedStories.length > 0
+                ? suggestedStories.map((story, i) => (
+                    <SuggestionCard
+                      key={i}
+                      onAccept={() => onAcceptStory(story)}
+                      onDismiss={() => onDismissStory(story)}
+                    >
+                      <div className="flex flex-col gap-2">
+                        <span className="self-start bg-gray-150 text-fg-contrast text-base leading-[1.5] px-1">
+                          {story.who}
+                        </span>
+                        <div>
+                          <p className="text-base text-fg-contrast leading-[1.5]">
+                            {story.what}
+                          </p>
+                          {story.why && (
+                            <p className="text-base text-fg-dim leading-[1.5]">
+                              {story.why}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    </SuggestionCard>
+                  ))
+                : null}
+            </SuggestionBox>
+          </div>
         ) : undefined
       }
       footer={

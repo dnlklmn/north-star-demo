@@ -2241,22 +2241,27 @@ export default function ProjectWorkspace() {
               embedded
               hasGoals={nonEmptyGoals.length > 0}
               onGenerateFromGoals={handleGenerateStoriesFromGoals}
+              goalSuggestions={goalSuggestions}
+              goalSuggestionsLoading={goalSuggestionsLoading}
+              onAcceptGoalSuggestion={handleAcceptGoalSuggestion}
+              onDismissGoalSuggestion={handleDismissGoalSuggestion}
+              onRefreshGoalSuggestions={handleGoalCommit}
+              topBanner={
+                canEdit &&
+                urlSessionId &&
+                !state.charter.task.skill_body &&
+                !isPromptEval ? (
+                  <AddSourceBanner
+                    sessionId={urlSessionId}
+                    onSeeded={handleSessionSeeded}
+                    onPromptCreated={(newSessionId) => {
+                      navigate(`/project/${newSessionId}?tab=goals`);
+                    }}
+                  />
+                ) : undefined
+              }
               preBody={
                 <>
-                  {canEdit &&
-                  urlSessionId &&
-                  !state.charter.task.skill_body &&
-                  !isPromptEval ? (
-                    <div className="mb-8">
-                      <AddSourceBanner
-                        sessionId={urlSessionId}
-                        onSeeded={handleSessionSeeded}
-                        onPromptCreated={(newSessionId) => {
-                          navigate(`/project/${newSessionId}?tab=goals`);
-                        }}
-                      />
-                    </div>
-                  ) : null}
                   <GoalsPanel
                     embedded
                     goals={goals}

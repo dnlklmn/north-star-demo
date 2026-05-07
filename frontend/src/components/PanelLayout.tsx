@@ -5,6 +5,10 @@ import { AIIcon } from "./ui/Icons";
 interface Props {
   title: string;
   subtitle?: string;
+  /** Banner rendered above the title inside the main column scroll area.
+   *  Used for cross-section offers (e.g. "Already have a skill?") that
+   *  shouldn't sit below the page heading. */
+  topBanner?: ReactNode;
   /** Bottom section of the main column, pinned below scrollable content (same style as sidebar bottom). */
   footer?: ReactNode;
   /** Right rail top section (e.g. RadarChart). Optional, shown with border-b when present. */
@@ -26,6 +30,7 @@ const MAX_RIGHT_WIDTH = 600;
 export default function PanelLayout({
   title,
   subtitle,
+  topBanner,
   footer,
   rightTop,
   right,
@@ -89,6 +94,7 @@ export default function PanelLayout({
       {/* Main column — stretches freely */}
       <div className="flex-1 min-w-0 relative">
         <div className="absolute inset-0 overflow-y-auto py-6">
+          {topBanner && <div className="mb-6">{topBanner}</div>}
           <h2 className="text-2xl font-medium text-fg-contrast">{title}</h2>
           {subtitle && (
             <p className="text-base text-fg-dim mt-1 mb-12">{subtitle}</p>
