@@ -475,28 +475,6 @@ export default function ProjectWorkspace() {
   }, [sessionId]);
   useProjectEvents(sessionId, handleLiveStateChange);
 
-  // Watchdog: while a generation is in flight, poll the session + dataset
-  // every 5s. Belt-and-braces against the SSE event AND the long-lived
-  // synth POST both getting lost (proxy timeout, throttled tab, etc.) —
-  // without this, the user has to refresh the page to see rows that have
-  // already landed in the DB.
-  useEffect(() => {
-    if (!sessionId) return;
-    const generating =
-      generatingDataset || generatingScorersShortcut || generatingBoth;
-    if (!generating) return;
-    const tick = window.setInterval(() => {
-      handleLiveStateChange();
-    }, 5000);
-    return () => window.clearInterval(tick);
-  }, [
-    sessionId,
-    generatingDataset,
-    generatingScorersShortcut,
-    generatingBoth,
-    handleLiveStateChange,
-  ]);
-
   const status: AgentStatus = state.agent_status;
   const hasCharter = !!(
     state.charter.coverage.criteria.length || state.charter.alignment.length
@@ -541,6 +519,30 @@ export default function ProjectWorkspace() {
   const [generatingDataset, setGeneratingDataset] = useState(false);
   const [generatingScorersShortcut, setGeneratingScorersShortcut] = useState(false);
   const [generatingBoth, setGeneratingBoth] = useState(false);
+
+  // Watchdog: while a generation is in flight, poll the session + dataset
+  // every 5s. Belt-and-braces against the SSE event AND the long-lived
+  // synth POST both getting lost (proxy timeout, throttled tab, etc.) —
+  // without this, the user has to refresh the page to see rows that have
+  // already landed in the DB. Lives down here (not next to useProjectEvents)
+  // because the generating* flags are declared further down — referencing
+  // them earlier hits a temporal-dead-zone ReferenceError on first render.
+  useEffect(() => {
+    if (!sessionId) return;
+    const generating =
+      generatingDataset || generatingScorersShortcut || generatingBoth;
+    if (!generating) return;
+    const tick = window.setInterval(() => {
+      handleLiveStateChange();
+    }, 5000);
+    return () => window.clearInterval(tick);
+  }, [
+    sessionId,
+    generatingDataset,
+    generatingScorersShortcut,
+    generatingBoth,
+    handleLiveStateChange,
+  ]);
 
   // --- Project name ---
   const startEditingName = () => {
