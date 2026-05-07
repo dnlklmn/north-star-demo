@@ -2339,7 +2339,12 @@ export default function ProjectWorkspace() {
                     // Embedded → footer/right not rendered, but the prop is
                     // required. Wire to the combined-page primary so the
                     // values stay coherent with what the parent shows.
-                    onNext={() => setActiveTab("skill")}
+                    onNext={() => {
+                      if (!skillReady && !isPromptEval) {
+                        void handleGenerateSkillFromGoals();
+                      }
+                      setActiveTab("skill");
+                    }}
                     nextLabel={goalNextLabel}
                     nextVariant={goalNextVariant}
                     nextDisabled={goalNextDisabled}
@@ -2358,10 +2363,16 @@ export default function ProjectWorkspace() {
               onDismissStory={handleDismissStory}
               storySuggestionsLoading={storySuggestionsLoading}
               onNext={() => {
-                // Primary CTA on the combined Goal page → next phase is the
-                // Skill tab. Charter generation lives on the Skill page.
+                // Primary CTA on the combined Goal page. Always navigates to
+                // the Skill tab. When no skill exists yet (and we're not a
+                // prompt-eval, which has a synthetic body), also kick off the
+                // backend pass that drafts a SKILL.md from goals + stories so
+                // the Skill page fills in once generation completes.
                 setGoalsDirty(false);
                 setStoriesDirty(false);
+                if (!skillReady && !isPromptEval) {
+                  void handleGenerateSkillFromGoals();
+                }
                 setActiveTab("skill");
               }}
               nextLabel={goalNextLabel}
@@ -2413,7 +2424,15 @@ export default function ProjectWorkspace() {
               canEdit={canEdit}
               skillReady={skillReady}
               isPromptEval={isPromptEval}
-              onGenerateSkill={() => setActiveTab("skill")}
+              onGenerateSkill={() => {
+                // Mirror the Goal-page CTA: navigate to Skill and, when
+                // there's no skill yet, kick off generation in flight so the
+                // textarea fills in once the LLM call completes.
+                if (!skillReady && !isPromptEval) {
+                  void handleGenerateSkillFromGoals();
+                }
+                setActiveTab("skill");
+              }}
             />
             </>
           )}
