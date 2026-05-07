@@ -22,6 +22,11 @@ import NewSkillEvalModal from "../components/NewSkillEvalModal";
 import NewPromptEvalModal from "../components/NewPromptEvalModal";
 import SettingsPanel from "../components/SettingsPanel";
 import { GearIcon, StarIcon } from "../components/ui/Icons";
+import {
+  evictSession,
+  getCachedSessionsList,
+  setCachedSessionsList,
+} from "../utils/projectCache";
 
 function relativeTime(dateStr: string): string {
   const date = new Date(dateStr);
@@ -46,8 +51,12 @@ function statusBadge(project: ProjectSummary): string | null {
 
 export default function Home() {
   const navigate = useNavigate();
-  const [projects, setProjects] = useState<ProjectSummary[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Seed from in-memory cache so a return-trip to Home renders instantly.
+  // The fresh listSessions() call still fires in the background and swaps
+  // the result in once it lands.
+  const cachedList = getCachedSessionsList();
+  const [projects, setProjects] = useState<ProjectSummary[]>(cachedList ?? []);
+  const [loading, setLoading] = useState(cachedList === null);
   const [creating, setCreating] = useState(false);
   const [isNewSkillModalOpen, setIsNewSkillModalOpen] = useState(false);
   const [isNewPromptModalOpen, setIsNewPromptModalOpen] = useState(false);
@@ -86,6 +95,7 @@ export default function Home() {
     try {
       const res = await listSessions();
       setProjects(res.sessions);
+      setCachedSessionsList(res.sessions);
     } catch (err) {
       console.error("Failed to load projects:", err);
     } finally {
@@ -218,7 +228,15 @@ export default function Home() {
     if (!confirm("Delete this project? This cannot be undone.")) return;
     try {
       await deleteSession(projectId);
-      setProjects((prev) => prev.filter((p) => p.id !== projectId));
+      setProjects((prev) => {
+        const next = prev.filter((p) => p.id !== projectId);
+        setCachedSessionsList(next);
+        return next;
+      });
+      // Drop the project's cached state + dataset so a fresh project that
+      // happens to reuse the id (extremely unlikely, but still) doesn't
+      // get the dead row's data.
+      evictSession(projectId);
     } catch (err) {
       console.error("Failed to delete project:", err);
     }

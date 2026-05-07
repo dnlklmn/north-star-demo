@@ -71,6 +71,12 @@ import {
 import Button from "../components/ui/Button";
 import { uniqueProjectName } from "../utils/skillFrontmatter";
 import { getAutoGenerateSuggestions } from "../utils/uiPrefs";
+import {
+  getCachedDataset,
+  getCachedSession,
+  setCachedDataset,
+  setCachedSession,
+} from "../utils/projectCache";
 import IconButton from "../components/ui/IconButton";
 import GoalsPanel from "../components/GoalsPanel";
 import AddSourceBanner from "../components/AddSourceBanner";
@@ -327,131 +333,176 @@ export default function ProjectWorkspace() {
   const activityCursorRef = useRef<string | null>(null);
   const seenActivityIdsRef = useRef<Set<string>>(new Set());
 
-  // --- Hydration: load existing session from DB ---
+  // --- Hydration: cache-first, background refresh ---
+  //
+  // Render order on mount:
+  //   1. If a cached SessionRecord (and optionally Dataset) exists for
+  //      this id, apply them synchronously and clear `hydrating` so the
+  //      page draws instantly.
+  //   2. Always issue a parallel `getSession` + `getDataset` refresh in
+  //      the background. When each lands, write to the cache and re-apply
+  //      so any server-side change since the last visit shows up.
+  //
+  // `tabSetRef` makes the tab-determination logic (which is sticky to
+  // first apply only) safe to re-run on background refreshes — the user's
+  // current tab won't get stomped when fresh data lands seconds later.
+  const tabSetRef = useRef(false);
   useEffect(() => {
     if (!urlSessionId) {
       setHydrating(false);
       return;
     }
+    tabSetRef.current = false;
+    let cancelled = false;
 
-    const hydrate = async () => {
-      try {
-        const session = await getSession(urlSessionId);
-        const s = session.state as SessionState;
-        setSessionId(urlSessionId);
-        setState(s);
-        setMessages(
-          session.conversation?.map((m: { role: string; content: string }) => ({
-            role: m.role as "user" | "assistant",
-            content: m.content,
-          })) || [],
-        );
+    type SessionRecord = Awaited<ReturnType<typeof getSession>>;
 
-        // Restore structured goals/stories if available
-        if (s.input.goals && s.input.goals.length > 0) {
-          setGoals([...s.input.goals, ""]);
-        } else if (s.input.business_goals) {
-          setGoals([
-            ...s.input.business_goals.split("\n").filter((g) => g.trim()),
-            "",
-          ]);
-        }
+    const applySession = (session: SessionRecord) => {
+      if (cancelled) return;
+      const s = session.state as SessionState;
+      setSessionId(urlSessionId);
+      setState(s);
+      setMessages(
+        session.conversation?.map((m: { role: string; content: string }) => ({
+          role: m.role as "user" | "assistant",
+          content: m.content,
+        })) || [],
+      );
 
-        if (s.input.story_groups && s.input.story_groups.length > 0) {
-          setStoryGroups(s.input.story_groups as StoryGroup[]);
-        }
-
-        // Restore project name
-        if ((session as { name?: string }).name)
-          setProjectName((session as { name?: string }).name!);
-
-        // Restore scorers
-        if (s.scorers && s.scorers.length > 0) {
-          setScorers(s.scorers);
-        }
-
-         // Determine active tab
-         const hasCharter = !!(
-           s.charter.coverage.criteria.length || s.charter.alignment.length
-         );
-         const hasSkillBody = !!s.charter.task.skill_body;
-         const isTriggered = s.eval_mode === "triggered";
-         const isPromptEval = s.kind === "prompt";
-
-         // Check for ?tab= query param (e.g. ?tab=goals from Home modal).
-         // Read directly from window.location so this effect only re-runs on
-         // urlSessionId change — adding searchParams to the dep list would
-         // re-hydrate on every tab toggle (the user can change tabs after
-         // load, which updates searchParams).
-         const tabParam = new URLSearchParams(window.location.search).get("tab");
-          const validTabs: ActiveTab[] = ["skill", "goals", "users", "charter", "dataset", "scorers", "evaluate"];
-         const tabFromUrl = validTabs.includes(tabParam as ActiveTab) ? tabParam as ActiveTab : null;
-
-         // Try to load dataset. For skill-mode sessions that haven't built a
-         // charter yet, land on the Skill tab so the user sees what they just
-         // pasted — not the empty goals screen. Brand-new triggered sessions
-         // (no skill body yet) also land on Skill so the paste form is the
-         // first thing the user sees.
-         try {
-           let ds = await getDataset(urlSessionId);
-           // For prompt-eval projects, opportunistically pull any new turns
-           // landed since the last visit so the dataset stays current. The
-           // backend tags new rows with "new" in coverage_tags so the UI can
-           // badge them. Failure is non-fatal — we just show what we have.
-           if (isPromptEval) {
-             try {
-               const result = await refreshDatasetFromTurns(ds.id);
-               if (result.added > 0) {
-                 ds = await getDataset(urlSessionId);
-               }
-             } catch (err) {
-               console.warn("auto-refresh from turns failed:", err);
-             }
-           }
-           setDataset(ds);
-           if (tabFromUrl) {
-             setActiveTab(tabFromUrl);
-           } else if (isPromptEval) {
-             // Prompt-eval projects always land on the Prompt tab so the
-             // user reads the synthetic description before scrolling through
-             // the auto-seeded INPUT and on into Charter / Scorers.
-             setActiveTab("skill");
-           } else if (ds.examples?.length > 0) {
-             setActiveTab("dataset");
-           } else if (hasCharter) {
-             setActiveTab("charter");
-           } else if (hasSkillBody || isTriggered) {
-             setActiveTab("goals");
-           }
-         } catch {
-           // No dataset yet
-           if (tabFromUrl) {
-             setActiveTab(tabFromUrl);
-           } else if (isPromptEval) {
-             setActiveTab("skill");
-           } else if (hasCharter) {
-             setActiveTab("charter");
-           } else if (hasSkillBody || isTriggered) {
-             setActiveTab("goals");
-           } else if (s.input.story_groups && s.input.story_groups.length > 0) {
-             setActiveTab("goals");
-           }
-         }
-
-        if (s.input.business_goals || s.input.user_stories) {
-          setSavedInput({
-            goals: s.input.business_goals || "",
-            stories: s.input.user_stories || "",
-          });
-        }
-      } catch (err) {
-        console.error("Failed to load project:", err);
-        navigate("/", { replace: true });
-      } finally {
-        setHydrating(false);
+      if (s.input.goals && s.input.goals.length > 0) {
+        setGoals([...s.input.goals, ""]);
+      } else if (s.input.business_goals) {
+        setGoals([
+          ...s.input.business_goals.split("\n").filter((g) => g.trim()),
+          "",
+        ]);
+      }
+      if (s.input.story_groups && s.input.story_groups.length > 0) {
+        setStoryGroups(s.input.story_groups as StoryGroup[]);
+      }
+      if ((session as { name?: string }).name) {
+        setProjectName((session as { name?: string }).name!);
+      }
+      if (s.scorers && s.scorers.length > 0) {
+        setScorers(s.scorers);
+      }
+      if (s.input.business_goals || s.input.user_stories) {
+        setSavedInput({
+          goals: s.input.business_goals || "",
+          stories: s.input.user_stories || "",
+        });
       }
     };
-    hydrate();
+
+    const applyDataset = (ds: Dataset | null) => {
+      if (cancelled) return;
+      if (ds) setDataset(ds);
+    };
+
+    const decideInitialTab = (
+      session: SessionRecord,
+      ds: Dataset | null,
+    ) => {
+      if (cancelled || tabSetRef.current) return;
+      tabSetRef.current = true;
+      const s = session.state as SessionState;
+      const hasCharter = !!(
+        s.charter.coverage.criteria.length || s.charter.alignment.length
+      );
+      const hasSkillBody = !!s.charter.task.skill_body;
+      const isTriggered = s.eval_mode === "triggered";
+      const isPromptEval = s.kind === "prompt";
+      // ?tab= overrides every other rule. Read fresh from window.location
+      // so this only fires on real session changes, not tab toggles.
+      const tabParam = new URLSearchParams(window.location.search).get("tab");
+      const validTabs: ActiveTab[] = [
+        "skill", "goals", "users", "charter", "dataset", "scorers", "evaluate",
+      ];
+      const tabFromUrl = validTabs.includes(tabParam as ActiveTab)
+        ? (tabParam as ActiveTab)
+        : null;
+      if (tabFromUrl) {
+        setActiveTab(tabFromUrl);
+        return;
+      }
+      if (isPromptEval) {
+        setActiveTab("skill");
+        return;
+      }
+      if (ds && (ds.examples?.length || 0) > 0) {
+        setActiveTab("dataset");
+        return;
+      }
+      if (hasCharter) {
+        setActiveTab("charter");
+        return;
+      }
+      if (hasSkillBody || isTriggered) {
+        setActiveTab("goals");
+        return;
+      }
+      if (s.input.story_groups && s.input.story_groups.length > 0) {
+        setActiveTab("goals");
+      }
+    };
+
+    // (1) Cache-first paint.
+    const cachedSession = getCachedSession(urlSessionId);
+    const cachedDataset = getCachedDataset(urlSessionId);
+    if (cachedSession) {
+      applySession(cachedSession as SessionRecord);
+      if (cachedDataset) applyDataset(cachedDataset);
+      decideInitialTab(cachedSession as SessionRecord, cachedDataset);
+      setHydrating(false);
+    }
+
+    // (2) Background refresh — always run, even on cache hit.
+    const refresh = async () => {
+      try {
+        const [session, dataset] = await Promise.allSettled([
+          getSession(urlSessionId),
+          getDataset(urlSessionId),
+        ]);
+        if (cancelled) return;
+        if (session.status === "rejected") {
+          console.error("Failed to load project:", session.reason);
+          if (!cachedSession) navigate("/", { replace: true });
+          return;
+        }
+        const sessionValue = session.value;
+        applySession(sessionValue as SessionRecord);
+        setCachedSession(urlSessionId, sessionValue as SessionRecord);
+
+        let datasetValue: Dataset | null = null;
+        if (dataset.status === "fulfilled") {
+          datasetValue = dataset.value;
+          // Prompt-eval auto-refresh: pull any new turns landed since the
+          // last visit. Failure is non-fatal — we just show what we have.
+          const isPromptEval =
+            (sessionValue.state as SessionState).kind === "prompt";
+          if (isPromptEval) {
+            try {
+              const result = await refreshDatasetFromTurns(datasetValue.id);
+              if (result.added > 0 && !cancelled) {
+                datasetValue = await getDataset(urlSessionId);
+              }
+            } catch (err) {
+              console.warn("auto-refresh from turns failed:", err);
+            }
+          }
+          applyDataset(datasetValue);
+          if (datasetValue) setCachedDataset(urlSessionId, datasetValue);
+        }
+        decideInitialTab(sessionValue as SessionRecord, datasetValue);
+      } finally {
+        if (!cancelled) setHydrating(false);
+      }
+    };
+    refresh();
+
+    return () => {
+      cancelled = true;
+    };
   }, [urlSessionId, navigate]);
 
   // --- Live updates: re-fetch session + dataset on SSE state_changed ---
@@ -463,12 +514,16 @@ export default function ProjectWorkspace() {
     try {
       const session = await getSession(sessionId);
       setState(session.state as SessionState);
+      // Keep the in-memory cache in sync so a return-trip to this project
+      // (after navigating away and back) renders fresh data instantly.
+      setCachedSession(sessionId, session);
     } catch (err) {
       console.warn("Live refetch (session) failed:", err);
     }
     try {
       const ds = await getDataset(sessionId);
       setDataset(ds);
+      setCachedDataset(sessionId, ds);
     } catch {
       // No dataset yet, or fetch failed — non-fatal.
     }
