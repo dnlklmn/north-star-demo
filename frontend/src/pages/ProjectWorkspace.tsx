@@ -475,6 +475,28 @@ export default function ProjectWorkspace() {
   }, [sessionId]);
   useProjectEvents(sessionId, handleLiveStateChange);
 
+  // Watchdog: while a generation is in flight, poll the session + dataset
+  // every 5s. Belt-and-braces against the SSE event AND the long-lived
+  // synth POST both getting lost (proxy timeout, throttled tab, etc.) —
+  // without this, the user has to refresh the page to see rows that have
+  // already landed in the DB.
+  useEffect(() => {
+    if (!sessionId) return;
+    const generating =
+      generatingDataset || generatingScorersShortcut || generatingBoth;
+    if (!generating) return;
+    const tick = window.setInterval(() => {
+      handleLiveStateChange();
+    }, 5000);
+    return () => window.clearInterval(tick);
+  }, [
+    sessionId,
+    generatingDataset,
+    generatingScorersShortcut,
+    generatingBoth,
+    handleLiveStateChange,
+  ]);
+
   const status: AgentStatus = state.agent_status;
   const hasCharter = !!(
     state.charter.coverage.criteria.length || state.charter.alignment.length
@@ -1770,22 +1792,31 @@ export default function ProjectWorkspace() {
   const runGenerateDataset = useCallback(async () => {
     if (!sessionId) return;
     await ensureCharter();
-    // Use the existing handleGenerateDataset below (defined later in file).
-    // We can't forward-reference a useCallback so inline the work:
+    let ds = dataset;
+    if (!ds) {
+      await createDataset(sessionId);
+      ds = await getDataset(sessionId);
+      setDataset(ds);
+    }
+    let synthError: unknown = null;
     try {
-      let ds = dataset;
-      if (!ds) {
-        await createDataset(sessionId);
-        ds = await getDataset(sessionId);
-        setDataset(ds);
-      }
       await synthesizeExamples(ds.id);
+    } catch (err) {
+      // Synth POST may fail with a network/timeout/proxy error even
+      // when the backend has actually persisted rows. Capture the
+      // error so we still rethrow downstream (the shortcut handler
+      // wants it for telemetry), but DON'T skip the refetch — the
+      // dataset on disk is the source of truth.
+      synthError = err;
+      console.error("Shortcut: generate dataset failed", err);
+    }
+    try {
       const fresh = await getDataset(sessionId);
       setDataset(fresh);
-    } catch (err) {
-      console.error("Shortcut: generate dataset failed", err);
-      throw err;
+    } catch (refreshErr) {
+      console.warn("Failed to refetch dataset after synth:", refreshErr);
     }
+    if (synthError) throw synthError;
   }, [sessionId, dataset, ensureCharter]);
 
   const runGenerateScorers = useCallback(async () => {
