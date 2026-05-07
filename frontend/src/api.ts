@@ -122,26 +122,52 @@ export interface ShareForbiddenDetail {
 export const SHARE_FORBIDDEN_EVENT = 'northstar:share-forbidden'
 
 async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
-  let res: Response
-  try {
-    res = await fetch(url, {
+  // Cold-start auto-retry: GETs (and OPTIONS) are idempotent so a single
+  // retry after a short wait absorbs a Render free-tier dyno wake-up
+  // (~30s) without surfacing the error. Mutations (POST/PATCH/DELETE)
+  // stay manual to avoid duplicate side effects — the user is shown the
+  // retry message and can re-click. We retry once only; back-to-back
+  // failures still surface so a real outage isn't masked.
+  const method = (init?.method || "GET").toUpperCase()
+  const idempotent = method === "GET" || method === "HEAD" || method === "OPTIONS"
+  const fetchOnce = () =>
+    fetch(url, {
       ...init,
       headers: {
         ...apiHeaders(),
         ...(init?.headers as Record<string, string> || {}),
       },
     })
+
+  let res: Response
+  try {
+    res = await fetchOnce()
   } catch (err) {
     // Browsers throw a generic `TypeError: Failed to fetch` for any
     // network-level failure (DNS, CORS, blocked, server cold-starting on
-    // free-tier hosting, offline). Translate into something actionable so
-    // the user knows whether to retry or check their connection.
-    if (err instanceof TypeError) {
+    // free-tier hosting, offline).
+    if (err instanceof TypeError && idempotent) {
+      // Wait long enough for Render's free dyno to finish spinning up
+      // before retrying. Anything shorter would just hit the same cold
+      // server and burn a retry slot on it.
+      await new Promise((r) => setTimeout(r, 8000))
+      try {
+        res = await fetchOnce()
+      } catch (retryErr) {
+        if (retryErr instanceof TypeError) {
+          throw new Error(
+            "Couldn't reach the server. The backend may be cold-starting (give it ~30s) or your connection dropped — try again.",
+          )
+        }
+        throw retryErr
+      }
+    } else if (err instanceof TypeError) {
       throw new Error(
         "Couldn't reach the server. The backend may be cold-starting (give it ~30s) or your connection dropped — try again.",
       )
+    } else {
+      throw err
     }
-    throw err
   }
   if (res.status === 401) {
     let body: { detail?: string; provider?: string; error?: string } = {}

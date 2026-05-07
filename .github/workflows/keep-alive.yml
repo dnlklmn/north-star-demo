@@ -1,0 +1,35 @@
+name: Keep Render dyno warm
+
+# Render's free tier spins down a dyno after ~15 minutes of inactivity.
+# A cold start then takes 30-60s, which surfaces as "Couldn't reach the
+# server" errors in the frontend until the wake completes. This workflow
+# pings /health every 5 minutes so the dyno never gets a chance to idle
+# down. Costs essentially nothing (curl, no compute), and keeps the
+# free-tier 750hr/mo budget covered for a single always-on service.
+#
+# Disable by deleting this file or removing the schedule trigger if the
+# project is hosted somewhere with no idle-down behavior.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  # Manual trigger so we can verify the workflow works without waiting
+  # for the next scheduled run.
+  workflow_dispatch:
+
+# Concurrency: skip overlapping runs. If the previous ping hasn't finished
+# (very unlikely for a curl, but possible during a Render outage) we don't
+# stack pings — just keep the cadence.
+concurrency:
+  group: keep-alive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ping /health
+        run: |
+          curl --fail --silent --show-error --max-time 60 \
+            https://north-star-demo.onrender.com/health
