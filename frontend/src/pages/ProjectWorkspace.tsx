@@ -65,6 +65,7 @@ import Button from "../components/ui/Button";
 import { uniqueProjectName } from "../utils/skillFrontmatter";
 import IconButton from "../components/ui/IconButton";
 import GoalsPanel from "../components/GoalsPanel";
+import AddSourceBanner from "../components/AddSourceBanner";
 import UsersPanel from "../components/UsersPanel";
 import CharterPanel from "../components/CharterPanel";
 import ScorersPanel from "../components/ScorersPanel";
@@ -157,7 +158,7 @@ export default function ProjectWorkspace() {
   const navigate = useNavigate();
 
   // --- Navigation ---
-  const [activeTab, setActiveTab] = useState<ActiveTab>("skill");
+  const [activeTab, setActiveTab] = useState<ActiveTab>("goals");
   const [showAssistant, setShowAssistant] = useState(false);
 
   // --- Project metadata ---
@@ -213,8 +214,11 @@ export default function ProjectWorkspace() {
   );
 
   // --- Dirty tracking: has a section changed since the next section was last touched? ---
-  const [goalsDirty, setGoalsDirty] = useState(false);
-  const [storiesDirty, setStoriesDirty] = useState(false);
+  // Setters are still wired so future "stale upstream" UX can read these
+  // again; the read-side consumer (the regenerate-charter confirm prompt)
+  // moved off the Goal page. Underscore prefix silences no-unused-vars.
+  const [, setGoalsDirty] = useState(false);
+  const [, setStoriesDirty] = useState(false);
   // Charter-edit → downstream stale. Flip true when the charter changes after
   // hydration; flip false after a successful (re)generation of that artifact.
   // Client-side only — survives tab switches within the session but not a
@@ -384,7 +388,7 @@ export default function ProjectWorkspace() {
            } else if (hasCharter) {
              setActiveTab("charter");
            } else if (hasSkillBody || isTriggered) {
-             setActiveTab("skill");
+             setActiveTab("goals");
            }
          } catch {
            // No dataset yet
@@ -395,7 +399,7 @@ export default function ProjectWorkspace() {
            } else if (hasCharter) {
              setActiveTab("charter");
            } else if (hasSkillBody || isTriggered) {
-             setActiveTab("skill");
+             setActiveTab("goals");
            } else if (s.input.story_groups && s.input.story_groups.length > 0) {
              setActiveTab("goals");
            }
@@ -2013,22 +2017,15 @@ export default function ProjectWorkspace() {
   //   * stories exist  → primary "Go to user stories" + neutral "Regenerate
   //     user stories". Goal-edit dirtiness is irrelevant; the user can pick
   //     Regenerate explicitly when they want a fresh draft.
-  // Combined Goals page → Charter. Three CTA states:
-  //   * no charter yet           → "Generate charter" (primary)
-  //   * charter exists, dirty    → "Regenerate charter" (primary)
-  //   * charter exists, unchanged → "Go to charter" (neutral)
-  // Goals only count once committed (Enter / Submit) — typing into the
-  // trailing draft input does NOT flip the button to primary.
-  const upstreamDirty = storiesDirty || goalsDirty;
+  // Combined Goal page → next phase is now Skill (not Charter). Charter
+  // generation lives on the Skill page. Goals only count once committed
+  // (Enter / Submit) — typing into the trailing draft input does NOT flip
+  // the button to primary.
   const committedGoalsCount = goals.slice(0, -1).filter((g) => g.trim()).length;
-  const charterCtaLabel = !hasCharter
-    ? "Generate charter"
-    : upstreamDirty
-      ? "Regenerate charter"
-      : "Go to charter";
-  const charterCtaDisabled = committedGoalsCount < 1 || loading;
-  const charterCtaVariant: "primary" | "neutral" =
-    !charterCtaDisabled && !hasCharter ? "primary" : "neutral";
+  const goalNextLabel = isPromptEval ? "Go to prompt" : "Go to skill";
+  const goalNextDisabled = committedGoalsCount < 1 || loading;
+  const goalNextVariant: "primary" | "neutral" =
+    !goalNextDisabled ? "primary" : "neutral";
 
   return (
     <div className="h-full flex flex-col bg-bg-default text-fg-contrast">
@@ -2115,25 +2112,10 @@ export default function ProjectWorkspace() {
             )}
           </div>
 
-          {/* Nav groups */}
+          {/* Nav groups — entry order: Goal → Skill/Prompt → Charter. */}
           <SidebarGroup hideTopDivider>
             <SidebarItem
-              label={isPromptEval ? "Prompt" : "Skill"}
-              icon={<SkillIcon width={24} height={24} />}
-              active={activeTab === "skill"}
-              onClick={() => setActiveTab("skill")}
-              warning={!skillReady}
-              warningTitle={
-                isPromptEval
-                  ? "No prompt yet"
-                  : "No skill defined yet — paste or generate one before running evals."
-              }
-            />
-          </SidebarGroup>
-
-          <SidebarGroup>
-            <SidebarItem
-              label="Purpose"
+              label="Goal"
               icon={<GoalsIcon width={24} height={24} />}
               active={activeTab === "goals" || activeTab === "users"}
               onClick={() => setActiveTab("goals")}
@@ -2144,6 +2126,18 @@ export default function ProjectWorkspace() {
                   : nonEmptyGoals.length > 0
                     ? `${nonEmptyGoals.length}`
                     : undefined
+              }
+            />
+            <SidebarItem
+              label={isPromptEval ? "Prompt" : "Skill"}
+              icon={<SkillIcon width={24} height={24} />}
+              active={activeTab === "skill"}
+              onClick={() => setActiveTab("skill")}
+              warning={!skillReady}
+              warningTitle={
+                isPromptEval
+                  ? "No prompt yet"
+                  : "No skill defined yet — paste or generate one before running evals."
               }
             />
             <SidebarItem
@@ -2254,11 +2248,25 @@ export default function ProjectWorkspace() {
                   // Embedded → footer/right not rendered, but the prop is
                   // required. Wire to the combined-page primary so the
                   // values stay coherent with what the parent shows.
-                  onNext={() => handleSubmitIntake()}
-                  nextLabel={charterCtaLabel}
-                  nextVariant={charterCtaVariant}
-                  nextDisabled={charterCtaDisabled}
+                  onNext={() => setActiveTab("skill")}
+                  nextLabel={goalNextLabel}
+                  nextVariant={goalNextVariant}
+                  nextDisabled={goalNextDisabled}
                   canEdit={canEdit}
+                  banner={
+                    canEdit &&
+                    urlSessionId &&
+                    !state.charter.task.skill_body &&
+                    !isPromptEval ? (
+                      <AddSourceBanner
+                        sessionId={urlSessionId}
+                        onSeeded={handleSessionSeeded}
+                        onPromptCreated={(newSessionId) => {
+                          navigate(`/project/${newSessionId}?tab=goals`);
+                        }}
+                      />
+                    ) : undefined
+                  }
                 />
               }
               storyGroups={storyGroups}
@@ -2272,24 +2280,15 @@ export default function ProjectWorkspace() {
               onDismissStory={handleDismissStory}
               storySuggestionsLoading={storySuggestionsLoading}
               onNext={() => {
-                // Primary CTA on combined Goals page → next phase is Charter.
+                // Primary CTA on the combined Goal page → next phase is the
+                // Skill tab. Charter generation lives on the Skill page.
                 setGoalsDirty(false);
                 setStoriesDirty(false);
-                if (hasCharter && !upstreamDirty) {
-                  setActiveTab("charter");
-                  return;
-                }
-                if (hasCharter && upstreamDirty) {
-                  const ok = window.confirm(
-                    "Regenerate the charter?\n\nThis replaces the current criteria, alignment entries, and rot signals with a fresh draft built from your goals and stories.",
-                  );
-                  if (!ok) return;
-                }
-                handleSubmitIntake();
+                setActiveTab("skill");
               }}
-              nextLabel={charterCtaLabel}
-              nextVariant={charterCtaVariant}
-              nextDisabled={charterCtaDisabled}
+              nextLabel={goalNextLabel}
+              nextVariant={goalNextVariant}
+              nextDisabled={goalNextDisabled}
               loading={loading}
               rightBottom={showAssistant ? undefined : aiAssistButton}
               rightBottomExpanded={showAssistant ? polarisPanel : undefined}
@@ -2334,6 +2333,9 @@ export default function ProjectWorkspace() {
                 scorers.length === 0 ? "missing" : scorersStale ? "stale" : "fresh"
               }
               canEdit={canEdit}
+              skillReady={skillReady}
+              isPromptEval={isPromptEval}
+              onGenerateSkill={() => setActiveTab("skill")}
             />
             </>
           )}

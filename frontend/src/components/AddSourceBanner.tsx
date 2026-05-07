@@ -165,11 +165,11 @@ export default function AddSourceBanner({
         <AIIcon className="text-fg-primary flex-shrink-0" />
         <p className="text-sm text-foreground flex-1 min-w-0">
           <span className="font-medium">
-            Do you already have a prompt or a skill?
+            Already have a skill or a prompt?
           </span>{' '}
           <span className="text-muted-foreground">
-            North Star can generate goals and user stories from it that you can
-            then review.
+            Add it now and we'll generate a set of goals and user stories for
+            you.
           </span>
         </p>
         <div className="flex items-center gap-2 flex-shrink-0">

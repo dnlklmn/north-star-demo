@@ -76,6 +76,15 @@ interface Props {
    *  CTAs. Pass `role !== 'viewer'` from the parent. Defaults to true so older
    *  callers keep their existing behavior. */
   canEdit?: boolean;
+  /** Whether the project has a skill body (or synthetic prompt body for
+   *  prompt-eval). When false, the footer collapses to a single "Generate
+   *  skill" / "Generate prompt" CTA so the user is pushed to define one
+   *  before reaching dataset/scorers. */
+  skillReady?: boolean;
+  /** Drives the "Generate skill" vs "Generate prompt" label. */
+  isPromptEval?: boolean;
+  /** Click handler for the "Generate skill" / "Generate prompt" CTA. */
+  onGenerateSkill?: () => void;
 }
 
 type CharterTab = "task" | "coverage" | "balance" | "alignment" | "rot" | "safety";
@@ -111,6 +120,9 @@ export default function CharterPanel({
   datasetState = "missing",
   scorersState = "missing",
   canEdit = true,
+  skillReady = true,
+  isPromptEval = false,
+  onGenerateSkill,
 }: Props) {
   // Strip every edit handler when canEdit is false so the inner sub-components
   // (CriteriaEditor, AlignmentEditor, TaskEditor, suggestion cards, shortcut
@@ -261,7 +273,11 @@ export default function CharterPanel({
       rightBottom={rightBottom}
       rightBottomExpanded={rightBottomExpanded}
       footer={
-        onGenerateDataset || onGenerateScorers || onGenerateBoth ? (
+        !skillReady && canEdit && onGenerateSkill ? (
+          <Button size="big" variant="primary" onClick={onGenerateSkill}>
+            {isPromptEval ? "Generate prompt" : "Generate skill"}
+          </Button>
+        ) : onGenerateDataset || onGenerateScorers || onGenerateBoth ? (
           <ChartersGenerateSplitButton
             datasetState={datasetState}
             scorersState={scorersState}
