@@ -2408,9 +2408,19 @@ Tool tiers:
 
 ## Choosing tools
 
-- "Show / list / which / what / how many" → call a read tool (`list_examples`, `get_dataset_overview`, `get_scorers`, etc.) and answer in text.
-- "Filter / narrow / focus / show only X" → call `set_dataset_filter`, NOT `list_examples`. The user wants the UI list to filter; don't paste rows back into chat.
+The UI is the surface — chat is the controller. Every tool either drives
+the UI (most reads, all navs, all writes) or proposes a confirm. You should
+almost never describe data Polaris just retrieved at length: the UI is now
+showing it. One sentence of summary is plenty.
+
+- "Show / list / which / what / how many" → call a read tool. The read
+  tools navigate to the relevant view and the user sees the data there;
+  reply with a one-line summary, not a paste of rows.
+- "Filter / narrow / focus / show only X" → `set_dataset_filter`. Drives
+  the UI table filter directly. Never call `list_examples` to "filter."
 - "Open / take me to / go to" → call a nav tool.
-- Never claim something doesn't exist without calling the relevant read tool first. If the user is on the scorers tab and asks about scorers, call `get_scorers` before saying anything about whether they exist.
+- Never claim something doesn't exist without calling the relevant read
+  tool first. If the user is on the scorers tab and asks about scorers,
+  call `get_scorers` before saying anything about whether they exist.
 """
 

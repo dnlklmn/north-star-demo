@@ -202,7 +202,7 @@ async def _get_project(ctx: ToolCtx, args: dict) -> dict:
 
 @tool(
     "get_scorers",
-    "List the scorers configured for the current project — name, type, description, enabled flag.",
+    "Open the scorers tab and list the scorers — name, type, description, enabled flag. UI navigates so the user sees them.",
     {"type": "object", "properties": {"session_id": {"type": "string"}}, "additionalProperties": False},
     tier="auto",
 )
@@ -215,6 +215,7 @@ async def _get_scorers(ctx: ToolCtx, args: dict) -> dict:
         return {"error": "session not found"}
     scorers = (row.get("state") or {}).get("scorers") or []
     return {
+        **_nav("phase", {"phase": "scorers"}),
         "count": len(scorers),
         "scorers": [
             {
@@ -230,7 +231,7 @@ async def _get_scorers(ctx: ToolCtx, args: dict) -> dict:
 
 @tool(
     "get_charter",
-    "Return the full charter (task, alignment, coverage, balance, rot).",
+    "Open the charter view and return the charter (task, alignment, coverage, balance, rot). UI navigates to the charter tab so the user sees what you're describing.",
     {"type": "object", "properties": {"session_id": {"type": "string"}}, "additionalProperties": False},
     tier="auto",
 )
@@ -241,7 +242,8 @@ async def _get_charter(ctx: ToolCtx, args: dict) -> dict:
     row = await db.get_session(sid)
     if not row:
         return {"error": "session not found"}
-    return row.get("state", {}).get("charter", {})
+    charter = row.get("state", {}).get("charter", {})
+    return {**_nav("phase", {"phase": "charter"}), "charter": charter}
 
 
 @tool(
@@ -257,12 +259,11 @@ async def _get_dataset_overview(ctx: ToolCtx, args: dict) -> dict:
     # Read the cached stats from the dataset row instead of recomputing —
     # `update_dataset_stats` writes to the row and triggers an SSE broadcast,
     # which is wrong for a tool the agent calls liberally to peek at state.
-    # Stats are kept fresh by every mutation path that already calls
-    # `update_dataset_stats`, so the cache is only stale between writes.
     ds = await db.get_dataset(did)
     if not ds:
         return {"error": "dataset not found"}
     return {
+        **_nav("phase", {"phase": "dataset"}),
         "dataset_id": did,
         "version": ds.get("version"),
         "stats": ds.get("stats") or {},
@@ -303,6 +304,11 @@ async def _list_examples(ctx: ToolCtx, args: dict) -> dict:
     limit = min(int(args.get("limit") or 20), 100)
     rows = rows[:limit]
     return {
+        # Open the dataset tab so the user can see the rows in the UI rather
+        # than relying on the chat reply for the list. Filters provided here
+        # are only used server-side for the count summary; to actually drive
+        # the UI filter, prefer set_dataset_filter.
+        **_nav("phase", {"phase": "dataset"}),
         "count": len(rows),
         "examples": [
             {
@@ -333,7 +339,11 @@ async def _get_example(ctx: ToolCtx, args: dict) -> dict:
         return {"error": "no dataset in context"}
     rows = await db.get_examples(did)
     row = next((r for r in rows if r["id"] == args["example_id"]), None)
-    return row or {"error": "example not found"}
+    if not row:
+        return {"error": "example not found"}
+    # Open the example panel so the user is looking at the same row Polaris
+    # describes. Frontend handler switches to dataset tab + selects the row.
+    return {**_nav("example", {"example_id": row["id"]}), "example": row}
 
 
 @tool(
@@ -361,7 +371,13 @@ async def _get_coverage_gaps(ctx: ToolCtx, args: dict) -> dict:
                 empty.append({"criterion": criterion, "feature_area": fa})
             elif n == 1:
                 underfilled.append({"criterion": criterion, "feature_area": fa, "count": n})
-    return {"coverage_matrix": matrix, "empty_cells": empty, "underfilled_cells": underfilled}
+    return {
+        # Open the coverage map so the user sees the cells visually.
+        **_nav("coverage_map", {}),
+        "coverage_matrix": matrix,
+        "empty_cells": empty,
+        "underfilled_cells": underfilled,
+    }
 
 
 @tool(
@@ -375,6 +391,9 @@ async def _get_eval_runs(ctx: ToolCtx, args: dict) -> dict:
         return {"error": "no session in context"}
     rows = await db.list_eval_runs(ctx.session_id, limit=int(args.get("limit") or 5))
     return {
+        # Open the evaluate tab so eval runs are visible in their own list,
+        # not just summarized in chat.
+        **_nav("phase", {"phase": "evaluate"}),
         "runs": [
             {
                 "id": r["id"],
@@ -384,7 +403,7 @@ async def _get_eval_runs(ctx: ToolCtx, args: dict) -> dict:
                 "summary": r.get("summary"),
             }
             for r in rows
-        ]
+        ],
     }
 
 
@@ -395,7 +414,8 @@ async def _get_eval_runs(ctx: ToolCtx, args: dict) -> dict:
     tier="auto",
 )
 async def _get_settings(ctx: ToolCtx, args: dict) -> dict:
-    return await db.get_settings() or {}
+    settings = await db.get_settings() or {}
+    return {**_nav("settings", {}), "settings": settings}
 
 
 @tool(
