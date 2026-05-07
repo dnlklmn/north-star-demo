@@ -1,4 +1,10 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   ArrowRight as ArrowRightLucide,
@@ -62,7 +68,10 @@ import {
   listSessions,
 } from "../api";
 import Button from "../components/ui/Button";
-import { uniqueProjectName } from "../utils/skillFrontmatter";
+import {
+  parseSkillFrontmatter,
+  uniqueProjectName,
+} from "../utils/skillFrontmatter";
 import IconButton from "../components/ui/IconButton";
 import GoalsPanel from "../components/GoalsPanel";
 import AddSourceBanner from "../components/AddSourceBanner";
@@ -740,6 +749,36 @@ export default function ProjectWorkspace() {
   // --- Generate full SKILL.md from goals + stories ---
   const [generatingSkillFromGoals, setGeneratingSkillFromGoals] =
     useState(false);
+  // Snapshot of the goals + stories that produced the current skill body.
+  // Drives the Generate / Regenerate button visibility on the Skill page:
+  //   - null         → never generated → show "Generate from goals"
+  //   - matches now  → fresh           → hide button
+  //   - differs      → upstream changed → show "Regenerate from goals"
+  const [generatedSkillSig, setGeneratedSkillSig] = useState<string | null>(
+    null,
+  );
+  const currentGoalsSig = useMemo(
+    () =>
+      JSON.stringify({
+        goals: goals.map((g) => g.trim()).filter(Boolean),
+        story_groups: storyGroups
+          .filter((g) => g.role.trim())
+          .map((g) => ({
+            role: g.role.trim(),
+            stories: g.stories
+              .filter((s) => s.what.trim())
+              .map((s) => ({
+                what: s.what.trim(),
+                why: (s.why || "").trim(),
+              })),
+          })),
+      }),
+    [goals, storyGroups],
+  );
+  const skillFromGoalsFresh =
+    generatedSkillSig !== null && generatedSkillSig === currentGoalsSig;
+  const skillFromGoalsStale =
+    generatedSkillSig !== null && generatedSkillSig !== currentGoalsSig;
   const handleGenerateSkillFromGoals = useCallback(async () => {
     if (!urlSessionId) return;
     if (state.charter.task.skill_body?.trim()) {
@@ -748,16 +787,62 @@ export default function ProjectWorkspace() {
       );
       if (!ok) return;
     }
+    // Capture the sig at request time so a stale sig from a future race
+    // doesn't accidentally hide the button if goals change during the call.
+    const sigAtRequest = currentGoalsSig;
     setGeneratingSkillFromGoals(true);
     try {
       const res = await generateSkillFromGoals(urlSessionId);
+      // Pull name + description out of the freshly-generated frontmatter so
+      // the Skill metadata fields populate without waiting for Analyze.
+      const parsed = parseSkillFrontmatter(res.body);
       setState((prev) => ({
         ...prev,
         charter: {
           ...prev.charter,
-          task: { ...prev.charter.task, skill_body: res.body },
+          task: {
+            ...prev.charter.task,
+            skill_body: res.body,
+            skill_name: parsed.name ?? prev.charter.task.skill_name ?? null,
+            skill_description:
+              parsed.description ??
+              prev.charter.task.skill_description ??
+              null,
+          },
         },
       }));
+      setGeneratedSkillSig(sigAtRequest);
+
+      // Rename the project to the skill name when the current name is still
+      // a generic default. Dedupe against other projects with a " 2",
+      // " 3"... suffix so two projects with the same skill don't collide.
+      const desiredBase = parsed.name?.trim();
+      if (desiredBase) {
+        const currentName = projectName.trim();
+        const isDefault =
+          !currentName ||
+          currentName === "Untitled project" ||
+          currentName === "Untitled skill eval" ||
+          currentName === "Skill eval";
+        if (isDefault) {
+          try {
+            const list = await listSessions();
+            const taken = new Set(
+              list.sessions
+                .filter((p) => p.id !== urlSessionId)
+                .map((p) => p.name?.trim())
+                .filter(Boolean) as string[],
+            );
+            const candidate = uniqueProjectName(desiredBase, taken);
+            if (candidate && candidate !== currentName) {
+              await updateSessionName(urlSessionId, candidate);
+              setProjectName(candidate);
+            }
+          } catch (err) {
+            console.error("Failed to rename project after generate:", err);
+          }
+        }
+      }
     } catch (err) {
       console.error("Failed to generate skill from goals:", err);
       alert(
@@ -766,7 +851,12 @@ export default function ProjectWorkspace() {
     } finally {
       setGeneratingSkillFromGoals(false);
     }
-  }, [urlSessionId, state.charter.task.skill_body]);
+  }, [
+    urlSessionId,
+    state.charter.task.skill_body,
+    currentGoalsSig,
+    projectName,
+  ]);
 
   const fetchGoalFeedback = useCallback(
     async (currentGoals: string[]) => {
@@ -1053,6 +1143,33 @@ export default function ProjectWorkspace() {
       if (session.state.input?.story_groups) {
         setStoryGroups(session.state.input.story_groups as StoryGroup[]);
       }
+      // If the user had a fresh generation tracked, Analyze just re-extracted
+      // goals/stories from the same skill body — refresh the signature to the
+      // new shape so the Skill page doesn't immediately show "Regenerate
+      // from goals" for what was, semantically, no upstream change.
+      setGeneratedSkillSig((prev) => {
+        if (prev === null) return prev;
+        const goalsList = (session.state.input?.goals ?? [])
+          .map((g) => g.trim())
+          .filter(Boolean);
+        const storyGroupsList = (
+          (session.state.input?.story_groups ?? []) as StoryGroup[]
+        )
+          .filter((g) => g.role.trim())
+          .map((g) => ({
+            role: g.role.trim(),
+            stories: g.stories
+              .filter((s) => s.what.trim())
+              .map((s) => ({
+                what: s.what.trim(),
+                why: (s.why || "").trim(),
+              })),
+          }));
+        return JSON.stringify({
+          goals: goalsList,
+          story_groups: storyGroupsList,
+        });
+      });
 
       const desiredBase = session.state.charter?.task?.skill_name?.trim();
       const currentName = (session as { name?: string }).name?.trim();
@@ -2294,8 +2411,11 @@ export default function ProjectWorkspace() {
               onRefreshSkillSuggestions={fetchSkillSuggestions}
               onAcceptSkillSuggestion={handleAcceptSkillSuggestion}
               onDismissSkillSuggestion={handleDismissSkillSuggestion}
-              onGenerateFromGoals={handleGenerateSkillFromGoals}
+              onGenerateFromGoals={
+                skillFromGoalsFresh ? undefined : handleGenerateSkillFromGoals
+              }
               generatingFromGoals={generatingSkillFromGoals}
+              regenerateFromGoals={skillFromGoalsStale}
             />
           )}
 

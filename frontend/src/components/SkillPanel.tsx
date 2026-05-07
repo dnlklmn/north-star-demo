@@ -71,10 +71,16 @@ interface Props {
   onDismissSkillSuggestion?: (suggestion: string) => void
   /** "Generate from goals" / "Regenerate from goals" handler — fires the
    *  backend pass that produces a full SKILL.md draft from the session's
-   *  goals and stories. Shown as a header-row button when provided. */
+   *  goals and stories. Shown as a header-row button when provided.
+   *  When omitted (e.g. parent has a fresh generation matching current
+   *  goals), the button is hidden entirely. */
   onGenerateFromGoals?: () => void | Promise<void>
   /** Drives the disabled state on the title-row generate button. */
   generatingFromGoals?: boolean
+  /** When true, label reads "Regenerate from goals" instead of "Generate
+   *  from goals". Set by the parent when an earlier generation exists but
+   *  the upstream goals/stories have changed since. */
+  regenerateFromGoals?: boolean
 }
 
 /**
@@ -111,6 +117,7 @@ export default function SkillPanel({
   onDismissSkillSuggestion,
   onGenerateFromGoals,
   generatingFromGoals = false,
+  regenerateFromGoals = false,
 }: Props) {
   const [draft, setDraft] = useState(skillBody)
   const [versions, setVersions] = useState<SkillVersion[]>([])
@@ -396,9 +403,10 @@ export default function SkillPanel({
   const showFields = true
 
   // Header-row CTA: fire a backend pass that drafts a SKILL.md from the
-  // session's goals + stories. Hidden for prompt-eval and viewer mode.
-  // Label flips between Generate and Regenerate based on whether there's
-  // already content in the textarea.
+  // session's goals + stories. Hidden for prompt-eval, viewer mode, no
+  // goals, or when the parent has flagged the current draft as a fresh
+  // generation matching the upstream signature (onGenerateFromGoals
+  // omitted in that case). Label flips on regenerateFromGoals.
   const titleAction =
     canEdit && !isPromptEval && onGenerateFromGoals && hasGoals ? (
       <Button
@@ -410,7 +418,7 @@ export default function SkillPanel({
         {generatingFromGoals ? (
           <Loader2 className="w-4 h-4 animate-spin" />
         ) : null}
-        {draft.trim() ? "Regenerate from goals" : "Generate from goals"}
+        {regenerateFromGoals ? "Regenerate from goals" : "Generate from goals"}
       </Button>
     ) : undefined
 
