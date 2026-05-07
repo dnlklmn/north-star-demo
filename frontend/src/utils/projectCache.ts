@@ -59,3 +59,36 @@ export function evictSession(sessionId: string): void {
   sessionCache.delete(sessionId)
   datasetCache.delete(sessionId)
 }
+
+/** Patch just the `state` slot on a cached SessionRecord. Cheap helper for
+ *  every callsite that mutates state via a setState((prev) => ...) — the
+ *  cached SessionRecord stays in sync with React state, so a navigate-away-
+ *  and-back round-trip doesn't briefly paint pre-edit data while the
+ *  background SessionGet refresh is still in flight. No-op when the session
+ *  isn't cached yet (first-mount apply will populate it). */
+export function patchCachedSessionState(
+  sessionId: string,
+  next: SessionState,
+): void {
+  const cached = sessionCache.get(sessionId)
+  if (!cached) return
+  sessionCache.set(sessionId, { ...cached, state: next })
+}
+
+/** Update the `name` field on the cached SessionRecord and the matching
+ *  entry in the cached sessions list. Called when the project is renamed
+ *  so a return trip to Home shows the new name immediately. */
+export function patchCachedSessionName(
+  sessionId: string,
+  name: string,
+): void {
+  const cached = sessionCache.get(sessionId)
+  if (cached) {
+    sessionCache.set(sessionId, { ...cached, name })
+  }
+  if (sessionsListCache.value) {
+    sessionsListCache.value = sessionsListCache.value.map((p) =>
+      p.id === sessionId ? { ...p, name } : p,
+    )
+  }
+}

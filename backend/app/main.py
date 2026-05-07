@@ -523,32 +523,6 @@ async def suggest_skill(req: SuggestSkillRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _parse_skill_frontmatter(raw: str) -> tuple[str | None, str | None, str]:
-    """Mirror of frontend/utils/skillFrontmatter.parseSkillFrontmatter.
-
-    Pulls `name` + `description` out of leading ``--- … ---`` YAML-ish
-    frontmatter and returns ``(name, description, body_without_frontmatter)``.
-    Returns ``(None, None, raw)`` when no frontmatter is present.
-    """
-    import re
-
-    match = re.match(r"^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$", raw)
-    if not match:
-        return None, None, raw
-    front, body = match.group(1), match.group(2)
-
-    def pick(key: str) -> str | None:
-        for line in front.splitlines():
-            stripped = line.strip()
-            if stripped.lower().startswith(f"{key}:"):
-                value = ":".join(stripped.split(":")[1:]).strip()
-                value = value.strip("'").strip('"').strip()
-                return value or None
-        return None
-
-    return pick("name"), pick("description"), body
-
-
 @app.post(
     "/sessions/{session_id}/generate-skill-from-goals",
     response_model=GenerateSkillFromGoalsResponse,

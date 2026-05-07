@@ -25,6 +25,7 @@ import { GearIcon, StarIcon } from "../components/ui/Icons";
 import {
   evictSession,
   getCachedSessionsList,
+  patchCachedSessionName,
   setCachedSessionsList,
 } from "../utils/projectCache";
 
@@ -207,6 +208,7 @@ export default function Home() {
             const desired = uniqueProjectName(skillName, taken);
             if (desired) {
               await updateSessionName(sessionRes.session_id, desired);
+              patchCachedSessionName(sessionRes.session_id, desired);
             }
           } catch (err) {
             console.error("Failed to auto-rename project:", err);

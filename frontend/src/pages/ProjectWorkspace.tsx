@@ -74,6 +74,8 @@ import { getAutoGenerateSuggestions } from "../utils/uiPrefs";
 import {
   getCachedDataset,
   getCachedSession,
+  patchCachedSessionName,
+  patchCachedSessionState,
   setCachedDataset,
   setCachedSession,
 } from "../utils/projectCache";
@@ -530,6 +532,20 @@ export default function ProjectWorkspace() {
   }, [sessionId]);
   useProjectEvents(sessionId, handleLiveStateChange);
 
+  // Mirror React state → in-memory cache. Every setState((prev) => …) call
+  // (charter edits, scorer toggles, skill body updates, etc.) trips this
+  // effect, so the cached SessionRecord stays in lock-step without each
+  // handler having to remember to update the cache. Same for dataset.
+  useEffect(() => {
+    if (!sessionId) return;
+    if (state === EMPTY_STATE) return;
+    patchCachedSessionState(sessionId, state);
+  }, [sessionId, state]);
+  useEffect(() => {
+    if (!sessionId || !dataset) return;
+    setCachedDataset(sessionId, dataset);
+  }, [sessionId, dataset]);
+
   const status: AgentStatus = state.agent_status;
   const hasCharter = !!(
     state.charter.coverage.criteria.length || state.charter.alignment.length
@@ -608,7 +624,11 @@ export default function ProjectWorkspace() {
   const saveName = async () => {
     setEditingName(false);
     if (sessionId && projectName.trim()) {
-      updateSessionName(sessionId, projectName.trim()).catch((err) => {
+      const trimmed = projectName.trim();
+      // Patch the cache before the network round-trip so a Home navigation
+      // before the response lands shows the new name immediately.
+      patchCachedSessionName(sessionId, trimmed);
+      updateSessionName(sessionId, trimmed).catch((err) => {
         console.error("Failed to save project name:", err);
       });
     }
@@ -964,6 +984,7 @@ export default function ProjectWorkspace() {
             if (candidate && candidate !== currentName) {
               await updateSessionName(urlSessionId, candidate);
               setProjectName(candidate);
+              patchCachedSessionName(urlSessionId, candidate);
             }
           } catch (err) {
             console.error("Failed to rename project after generate:", err);
