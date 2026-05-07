@@ -2,6 +2,13 @@ import { useState, useEffect } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import Home from './pages/Home'
 import ProjectWorkspace from './pages/ProjectWorkspace'
+import DocsOverview from './pages/docs/Overview'
+import DocsConcepts from './pages/docs/Concepts'
+import DocsGettingStarted from './pages/docs/GettingStarted'
+import DocsWorkspace from './pages/docs/Workspace'
+import DocsAgent from './pages/docs/Agent'
+import DocsEvals from './pages/docs/Evals'
+import DocsReference from './pages/docs/Reference'
 import { checkHealth, hasApiKey } from './api'
 import ApiKeyBanner from './components/ApiKeyBanner'
 import LLMBillingBanner from './components/LLMBillingBanner'
@@ -28,6 +35,13 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/project/:sessionId" element={<ProjectWorkspace />} />
+          <Route path="/docs" element={<DocsOverview />} />
+          <Route path="/docs/concepts" element={<DocsConcepts />} />
+          <Route path="/docs/getting-started" element={<DocsGettingStarted />} />
+          <Route path="/docs/workspace" element={<DocsWorkspace />} />
+          <Route path="/docs/agent" element={<DocsAgent />} />
+          <Route path="/docs/evals" element={<DocsEvals />} />
+          <Route path="/docs/reference" element={<DocsReference />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </div>
