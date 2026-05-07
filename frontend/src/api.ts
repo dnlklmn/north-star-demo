@@ -856,13 +856,28 @@ export async function updateExample(
   exampleId: string,
   fields: Partial<Example>
 ): Promise<Example> {
-  const res = await apiFetch(`${BASE}/datasets/${datasetId}/examples/${exampleId}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(fields),
-  })
-  if (!res.ok) throw new Error(`Failed to update example: ${res.status}`)
-  return res.json()
+  // Hard timeout — without this an unresponsive backend leaves the user
+  // staring at a spinner forever. 15s is generous for a single PATCH;
+  // anything slower is a hung process or a stuck connection pool.
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 15000)
+  try {
+    const res = await apiFetch(`${BASE}/datasets/${datasetId}/examples/${exampleId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(fields),
+      signal: controller.signal,
+    })
+    if (!res.ok) throw new Error(`Failed to update example: ${res.status}`)
+    return res.json()
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error('Request timed out (15s). Backend may be unresponsive — try restarting.')
+    }
+    throw err
+  } finally {
+    clearTimeout(timeout)
+  }
 }
 
 export async function addExample(

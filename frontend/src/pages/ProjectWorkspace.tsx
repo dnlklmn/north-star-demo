@@ -1993,12 +1993,51 @@ export default function ProjectWorkspace() {
   const handleUpdateExample = useCallback(
     async (exampleId: string, fields: Partial<Example>) => {
       if (!dataset) return;
+      // Snapshot the pre-update example so we can roll back on failure.
+      // Optimistic update first — the UI reflects the change instantly even
+      // if the PATCH is slow or the backend is unresponsive. The SSE event
+      // (or the awaited response below) overwrites it with the canonical
+      // server version when the round trip completes.
+      const prev = dataset.examples?.find((e) => e.id === exampleId);
+      setDataset((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          examples: current.examples.map((e) =>
+            e.id === exampleId ? { ...e, ...fields } : e,
+          ),
+        };
+      });
       try {
-        await apiUpdateExample(dataset.id, exampleId, fields);
-        const fullDs = await getDataset(dataset.session_id);
-        setDataset(fullDs);
+        const updated = await apiUpdateExample(dataset.id, exampleId, fields);
+        setDataset((current) => {
+          if (!current) return current;
+          return {
+            ...current,
+            examples: current.examples.map((e) =>
+              e.id === exampleId ? updated : e,
+            ),
+          };
+        });
       } catch (err) {
         console.error("Failed to update example:", err);
+        // Roll back to the pre-update row so the UI doesn't lie about a
+        // change that never landed. Surface the error so the user knows
+        // why their click did nothing.
+        if (prev) {
+          setDataset((current) => {
+            if (!current) return current;
+            return {
+              ...current,
+              examples: current.examples.map((e) =>
+                e.id === exampleId ? prev : e,
+              ),
+            };
+          });
+        }
+        alert(
+          `Couldn't save the change — ${err instanceof Error ? err.message : "unknown error"}. The backend may be unresponsive.`,
+        );
       }
     },
     [dataset],
@@ -2007,12 +2046,27 @@ export default function ProjectWorkspace() {
   const handleDeleteExample = useCallback(
     async (exampleId: string) => {
       if (!dataset) return;
+      // Optimistic remove — same pattern as handleUpdateExample. SSE
+      // refresh + the awaited DELETE response are both belt-and-braces.
+      const prevExamples = dataset.examples;
+      setDataset((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          examples: current.examples.filter((e) => e.id !== exampleId),
+        };
+      });
       try {
         await apiDeleteExample(dataset.id, exampleId);
-        const fullDs = await getDataset(dataset.session_id);
-        setDataset(fullDs);
       } catch (err) {
         console.error("Failed to delete example:", err);
+        // Roll back so the row reappears.
+        setDataset((current) =>
+          current ? { ...current, examples: prevExamples } : current,
+        );
+        alert(
+          `Couldn't delete the row — ${err instanceof Error ? err.message : "unknown error"}. The backend may be unresponsive.`,
+        );
       }
     },
     [dataset],
