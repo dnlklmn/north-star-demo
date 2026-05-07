@@ -198,6 +198,14 @@ export function DatasetIcon(props: Props) {
     </Base>
   );
 }
+/** Cursor / pointer with a ribbon — used for the Skill / Prompt nav item. */
+export function SkillIcon(props: Props) {
+  return (
+    <Base viewBox="0 0 24 24" {...props}>
+      <path d="M12.5023 3C12.7838 3 13.0543 3.11202 13.2534 3.31094L20.6891 10.7466C21.1035 11.1614 21.1037 11.834 20.6891 12.2487L17.9431 14.9946C17.5284 15.4093 16.8558 15.4091 16.441 14.9946L14.3665 12.9202L6.73858 20.5496C6.13793 21.1502 5.16419 21.1501 4.56347 20.5496L3.45037 19.4365C2.84998 18.8357 2.84977 17.862 3.45037 17.2614L11.0783 9.63197L9.00533 7.55901C8.8064 7.35986 8.69438 7.08943 8.69438 6.80794V4.06202C8.69444 3.47554 9.16995 3.00012 9.75641 3H12.5023Z" />
+    </Base>
+  );
+}
 export function ScorerIcon(props: Props) {
   return (
     <Base viewBox="0 0 16 16" {...props}>

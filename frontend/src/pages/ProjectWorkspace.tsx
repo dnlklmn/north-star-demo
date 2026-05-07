@@ -13,7 +13,7 @@ import {
   AIIcon,
   StarIcon,
   GoalsIcon,
-  UsersIcon,
+  SkillIcon,
   CharterIcon,
   DatasetIcon,
   ScorerIcon,
@@ -2119,7 +2119,7 @@ export default function ProjectWorkspace() {
           <SidebarGroup hideTopDivider>
             <SidebarItem
               label={isPromptEval ? "Prompt" : "Skill"}
-              icon={<GoalsIcon width={24} height={24} />}
+              icon={<SkillIcon width={24} height={24} />}
               active={activeTab === "skill"}
               onClick={() => setActiveTab("skill")}
               warning={!skillReady}
@@ -2133,8 +2133,8 @@ export default function ProjectWorkspace() {
 
           <SidebarGroup>
             <SidebarItem
-              label="Goals"
-              icon={<UsersIcon width={24} height={24} />}
+              label="Purpose"
+              icon={<GoalsIcon width={24} height={24} />}
               active={activeTab === "goals" || activeTab === "users"}
               onClick={() => setActiveTab("goals")}
               disabled={!usersAvailable}
