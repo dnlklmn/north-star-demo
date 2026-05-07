@@ -18,6 +18,8 @@ import {
   setDefaultBraintrustProject,
   setDefaultJudgeModel,
 } from '../utils/evalDefaults'
+import IconButton from './ui/IconButton'
+import { CloseIcon } from './ui/Icons'
 
 interface SettingsPanelProps {
   onClose: () => void
@@ -99,8 +101,14 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   const bucket = settings ? creativityBucket(settings.creativity) : 'strict'
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-      <div className="bg-surface-raised border border-border shadow-xl w-full max-w-md mx-4">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      onClick={onClose}
+    >
+      <div
+        className="bg-surface-raised border border-border shadow-xl w-full max-w-md mx-4"
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Header with tabs */}
         <div className="flex items-center justify-between px-5 py-3 border-b border-border">
           <div className="flex items-center gap-4">
@@ -121,12 +129,9 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
               App
             </button>
           </div>
-          <button
-            onClick={onClose}
-            className="text-muted-foreground hover:text-foreground text-lg leading-none"
-          >
-            x
-          </button>
+          <IconButton tone="dim" onClick={onClose} title="Close" aria-label="Close">
+            <CloseIcon />
+          </IconButton>
         </div>
 
         <div className="p-5 space-y-5">
