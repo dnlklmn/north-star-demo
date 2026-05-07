@@ -752,7 +752,7 @@ export async function suggestStories(
 
 export async function generateSkillFromGoals(
   sessionId: string,
-): Promise<{ body: string }> {
+): Promise<{ body: string; name: string | null; description: string | null }> {
   const res = await apiFetch(
     `${BASE}/sessions/${sessionId}/generate-skill-from-goals`,
     {

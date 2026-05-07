@@ -654,6 +654,8 @@ class GenerateSkillFromGoalsRequest(BaseModel):
 
 class GenerateSkillFromGoalsResponse(BaseModel):
     body: str
+    name: Optional[str] = None
+    description: Optional[str] = None
 
 
 class SuggestRevisionsRequest(BaseModel):

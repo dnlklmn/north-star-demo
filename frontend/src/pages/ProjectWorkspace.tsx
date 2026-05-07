@@ -68,10 +68,7 @@ import {
   listSessions,
 } from "../api";
 import Button from "../components/ui/Button";
-import {
-  parseSkillFrontmatter,
-  uniqueProjectName,
-} from "../utils/skillFrontmatter";
+import { uniqueProjectName } from "../utils/skillFrontmatter";
 import IconButton from "../components/ui/IconButton";
 import GoalsPanel from "../components/GoalsPanel";
 import AddSourceBanner from "../components/AddSourceBanner";
@@ -793,9 +790,11 @@ export default function ProjectWorkspace() {
     setGeneratingSkillFromGoals(true);
     try {
       const res = await generateSkillFromGoals(urlSessionId);
-      // Pull name + description out of the freshly-generated frontmatter so
-      // the Skill metadata fields populate without waiting for Analyze.
-      const parsed = parseSkillFrontmatter(res.body);
+      // Backend strips frontmatter and persists body + name + description
+      // on the session, then returns all three. Mirror them locally so the
+      // Skill page renders immediately (the SSE refetch that follows the
+      // _save_state call will overwrite anyway, but doing it here avoids a
+      // visible flicker).
       setState((prev) => ({
         ...prev,
         charter: {
@@ -803,11 +802,9 @@ export default function ProjectWorkspace() {
           task: {
             ...prev.charter.task,
             skill_body: res.body,
-            skill_name: parsed.name ?? prev.charter.task.skill_name ?? null,
+            skill_name: res.name ?? prev.charter.task.skill_name ?? null,
             skill_description:
-              parsed.description ??
-              prev.charter.task.skill_description ??
-              null,
+              res.description ?? prev.charter.task.skill_description ?? null,
           },
         },
       }));
@@ -816,7 +813,7 @@ export default function ProjectWorkspace() {
       // Rename the project to the skill name when the current name is still
       // a generic default. Dedupe against other projects with a " 2",
       // " 3"... suffix so two projects with the same skill don't collide.
-      const desiredBase = parsed.name?.trim();
+      const desiredBase = res.name?.trim();
       if (desiredBase) {
         const currentName = projectName.trim();
         const isDefault =

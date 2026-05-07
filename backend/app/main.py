@@ -521,6 +521,32 @@ async def suggest_skill(req: SuggestSkillRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _parse_skill_frontmatter(raw: str) -> tuple[str | None, str | None, str]:
+    """Mirror of frontend/utils/skillFrontmatter.parseSkillFrontmatter.
+
+    Pulls `name` + `description` out of leading ``--- … ---`` YAML-ish
+    frontmatter and returns ``(name, description, body_without_frontmatter)``.
+    Returns ``(None, None, raw)`` when no frontmatter is present.
+    """
+    import re
+
+    match = re.match(r"^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$", raw)
+    if not match:
+        return None, None, raw
+    front, body = match.group(1), match.group(2)
+
+    def pick(key: str) -> str | None:
+        for line in front.splitlines():
+            stripped = line.strip()
+            if stripped.lower().startswith(f"{key}:"):
+                value = ":".join(stripped.split(":")[1:]).strip()
+                value = value.strip("'").strip('"').strip()
+                return value or None
+        return None
+
+    return pick("name"), pick("description"), body
+
+
 @app.post(
     "/sessions/{session_id}/generate-skill-from-goals",
     response_model=GenerateSkillFromGoalsResponse,
@@ -532,12 +558,13 @@ async def generate_skill_from_goals(
 ):
     """Generate a full SKILL.md body from the session's goals + stories.
 
-    Returns just the body — the frontend pastes it into the textarea
-    and Analyze still has to be triggered explicitly. We don't persist
-    a skill version here so the user can review before committing.
+    Persists the resulting body + name + description on the session so a
+    reload (or any SSE state-change refetch) sees them. The frontend
+    still has to call Analyze if it wants to re-seed goals/stories from
+    the new body — this endpoint just fills the Skill page.
     """
     require_writer(access)
-    state, _ = await _load_state(session_id)
+    state, conversation = await _load_state(session_id)
     goals = [g for g in (state.input.goals or []) if g and g.strip()]
     stories = []
     for g in (state.input.story_groups or []):
@@ -559,12 +586,24 @@ async def generate_skill_from_goals(
     project_name = (project or {}).get("name") if project else None
 
     try:
-        body, call_meta = await call_generate_skill_from_goals(
+        raw_body, call_meta = await call_generate_skill_from_goals(
             goals, stories, project_name
         )
     except Exception as e:
         logger.exception("Failed to generate skill from goals")
         raise HTTPException(status_code=500, detail=str(e))
+
+    name, description, stripped_body = _parse_skill_frontmatter(raw_body)
+    # Persist on the session so reload + SSE refetches see the body. We
+    # store the stripped body so it matches the seedFromSkill convention
+    # (skill_body never carries frontmatter); name/description sit
+    # alongside on the task object.
+    state.charter.task.skill_body = stripped_body
+    if name:
+        state.charter.task.skill_name = name
+    if description:
+        state.charter.task.skill_description = description
+    await _save_state(session_id, state, conversation)
 
     try:
         await db.create_turn(
@@ -572,12 +611,16 @@ async def generate_skill_from_goals(
             turn_type="generate_skill_from_goals",
             input_snapshot={"goals": goals, "stories": stories},
             llm_calls=call_meta,
-            parsed_output={"body": body},
+            parsed_output={"body": stripped_body, "name": name, "description": description},
         )
     except Exception:
         logger.warning("generate_skill_from_goals turn-log failed", exc_info=True)
 
-    return GenerateSkillFromGoalsResponse(body=body)
+    return GenerateSkillFromGoalsResponse(
+        body=stripped_body,
+        name=name,
+        description=description,
+    )
 
 
 @app.post("/sessions", response_model=CreateSessionResponse)
