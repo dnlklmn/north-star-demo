@@ -91,6 +91,12 @@ interface Props {
   /** Whether the project already has a charter. Drives the primary CTA
    *  label between "Generate charter" and "Regenerate charter". */
   hasCharter?: boolean
+  /** Fired the moment the user clicks the "Generate / Regenerate charter"
+   *  button, before any backend work starts. The parent uses this to
+   *  navigate to the Charter tab immediately so the spinner shows there
+   *  while the seed + submit-intake passes run, instead of leaving the
+   *  user staring at the Skill page for ~10s. */
+  onBeforeAnalyze?: () => void
 }
 
 /**
@@ -130,6 +136,7 @@ export default function SkillPanel({
   regenerateFromGoals = false,
   autoGenerateSuggestions = true,
   hasCharter = false,
+  onBeforeAnalyze,
 }: Props) {
   const [draft, setDraft] = useState(skillBody)
   const [versions, setVersions] = useState<SkillVersion[]>([])
@@ -203,6 +210,10 @@ export default function SkillPanel({
 
   const handleAnalyze = useCallback(async () => {
     if (!canAnalyze) return
+    // Tell the parent we're starting *before* any await so it can navigate
+    // to Charter and flip the loading state. The user sees the spinner
+    // there immediately instead of waiting on the Skill page.
+    onBeforeAnalyze?.()
     setWorking(true)
     setError(null)
     try {
@@ -227,7 +238,7 @@ export default function SkillPanel({
       setWorking(false)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canAnalyze, draft, sessionId, onSkillBodyChange, onSeeded, refreshVersions])
+  }, [canAnalyze, draft, sessionId, onSkillBodyChange, onSeeded, refreshVersions, onBeforeAnalyze])
 
   const handleRerunAnalysis = async () => {
     setWorking(true)

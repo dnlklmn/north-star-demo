@@ -2446,6 +2446,15 @@ export default function ProjectWorkspace() {
                 const s = await getSession(urlSessionId);
                 setState(s.state as SessionState);
               }}
+              onBeforeAnalyze={() => {
+                // Snap the user to the Charter tab the moment they click
+                // "Generate charter" so the spinner shows up there
+                // instead of the Skill page sitting silent during the
+                // ~10s seed call. Flip loading too so the overlay
+                // renders without waiting for handleSubmitIntake.
+                setActiveTab("charter");
+                setLoading(true);
+              }}
               onSeeded={async () => {
                 // Re-hydrate session state so the freshly-extracted
                 // goals/users/stories land in local state, then push
@@ -2458,14 +2467,17 @@ export default function ProjectWorkspace() {
               onNext={() => {
                 // Post-seed primary CTA — user clicks "Generate charter"
                 // / "Regenerate charter" again. Confirms before
-                // overwriting an existing charter, then re-runs the
-                // intake pass which navigates to Charter on success.
+                // overwriting an existing charter, then jumps to
+                // Charter immediately (so the spinner is visible there)
+                // and re-runs the intake pass.
                 if (hasCharter) {
                   const ok = window.confirm(
                     "Regenerate the charter?\n\nThis replaces the current criteria, alignment entries, and rot signals with a fresh draft built from your goals and stories.",
                   );
                   if (!ok) return;
                 }
+                setActiveTab("charter");
+                setLoading(true);
                 handleSubmitIntake();
               }}
               canEdit={canEdit}
@@ -2619,6 +2631,16 @@ export default function ProjectWorkspace() {
                   void handleGenerateSkillFromGoals();
                 }
                 setActiveTab("skill");
+              }}
+              hasCharter={hasCharter}
+              onGenerateCharter={() => {
+                // User landed on an empty Charter page directly (e.g. via
+                // sidebar after the skill was generated) — let them kick
+                // off the intake pass right here. Same handler as the
+                // Skill page CTA; loading is already reflected by the
+                // panel's own overlay.
+                setLoading(true);
+                handleSubmitIntake();
               }}
             />
             </>
