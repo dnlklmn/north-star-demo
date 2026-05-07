@@ -1,7 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
-  AlertTriangle,
   ArrowRight as ArrowRightLucide,
   Loader2,
   Sparkles as SparklesIcon,
@@ -2040,13 +2039,51 @@ export default function ProjectWorkspace() {
     <div className="h-full flex flex-col bg-bg-default text-fg-contrast">
       {/* Top bar */}
       <header className="h-16 flex items-center justify-between px-4 flex-shrink-0 border-b border-border-hint">
-        <IconButton
-          tone="contrast"
-          onClick={() => navigate("/")}
-          title="All projects"
-        >
-          <StarIcon />
-        </IconButton>
+        <div className="flex items-center gap-4 min-w-0">
+          <IconButton
+            tone="contrast"
+            onClick={() => navigate("/")}
+            title="All projects"
+          >
+            <StarIcon />
+          </IconButton>
+          {/* Inline project title — editable in place. Lives here so users
+              can rename without scrolling the sidebar, and stays visible on
+              every tab. */}
+          <div className="flex items-center gap-2 min-w-0">
+            {editingName ? (
+              <input
+                ref={nameInputRef}
+                type="text"
+                value={projectName}
+                onChange={(e) => setProjectName(e.target.value)}
+                onBlur={saveName}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") saveName();
+                }}
+                className="text-sm font-medium text-fg-contrast bg-transparent border-b border-border-primary outline-none min-w-0"
+              />
+            ) : (
+              <button
+                onClick={startEditingName}
+                className="text-sm font-medium text-fg-contrast hover:text-fg-primary truncate min-w-0 text-left transition-colors"
+                title="Click to rename"
+              >
+                {projectName}
+              </button>
+            )}
+            {!hasCharter && (
+              <span className="font-mono text-xs text-fg-dim bg-fill-neutral px-1.5 py-0.5 flex-shrink-0">
+                Draft
+              </span>
+            )}
+            {isPromptEval && (
+              <span className="font-mono text-xs text-fg-dim bg-fill-neutral px-1.5 py-0.5 flex-shrink-0">
+                prompt
+              </span>
+            )}
+          </div>
+        </div>
         <div className="flex items-center gap-3">
           {role === "owner" && sessionId && (
             <Button
@@ -2091,36 +2128,6 @@ export default function ProjectWorkspace() {
       <div className="flex-1 flex min-h-0 gap-6">
         {/* Left sidebar */}
         <nav className="w-56 flex-shrink-0 px-4 py-6 overflow-y-auto border-r border-border-hint">
-          {/* Project header */}
-          <div className="flex items-center gap-2 mb-6 px-2">
-            {editingName ? (
-              <input
-                ref={nameInputRef}
-                type="text"
-                value={projectName}
-                onChange={(e) => setProjectName(e.target.value)}
-                onBlur={saveName}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") saveName();
-                }}
-                className="text-sm font-medium text-fg-contrast bg-transparent border-b border-border-primary outline-none min-w-0 flex-1"
-              />
-            ) : (
-              <button
-                onClick={startEditingName}
-                className="text-sm font-medium text-fg-contrast hover:text-fg-primary truncate min-w-0 text-left transition-colors"
-                title="Click to rename"
-              >
-                {projectName}
-              </button>
-            )}
-            {!hasCharter && (
-              <span className="font-mono text-xs text-fg-dim bg-fill-neutral px-1.5 py-0.5 flex-shrink-0">
-                Draft
-              </span>
-            )}
-          </div>
-
           {/* Nav groups — entry order: Goal → Skill/Prompt → Charter. */}
           <SidebarGroup hideTopDivider>
             <SidebarItem
@@ -2129,6 +2136,7 @@ export default function ProjectWorkspace() {
               active={activeTab === "goals" || activeTab === "users"}
               onClick={() => setActiveTab("goals")}
               disabled={!usersAvailable}
+              disabledReason="Goal is the entry tab — it should always be available."
               badge={
                 totalStoryCount > 0
                   ? `${nonEmptyGoals.length}/${totalStoryCount}`
@@ -2142,12 +2150,6 @@ export default function ProjectWorkspace() {
               icon={<SkillIcon width={24} height={24} />}
               active={activeTab === "skill"}
               onClick={() => setActiveTab("skill")}
-              warning={!skillReady}
-              warningTitle={
-                isPromptEval
-                  ? "No prompt yet"
-                  : "No skill defined yet — paste or generate one before running evals."
-              }
             />
             <SidebarItem
               label="Charter"
@@ -2155,6 +2157,8 @@ export default function ProjectWorkspace() {
               active={activeTab === "charter"}
               onClick={() => setActiveTab("charter")}
               disabled={!charterAvailable}
+              loading={loading && !hasCharter}
+              disabledReason="Charter generates after you submit your goals and user stories."
             />
           </SidebarGroup>
 
@@ -2165,6 +2169,14 @@ export default function ProjectWorkspace() {
               active={activeTab === "dataset"}
               onClick={() => setActiveTab("dataset")}
               disabled={!datasetAvailable}
+              loading={generatingDataset || generatingBoth}
+              disabledReason={
+                !skillReady
+                  ? `Add a ${isPromptEval ? "prompt" : "skill"} first — the dataset evaluates against it.`
+                  : !hasCharter
+                    ? "Generate the charter first; the dataset is built from its criteria."
+                    : undefined
+              }
             />
             <SidebarItem
               label="Scorers"
@@ -2172,6 +2184,14 @@ export default function ProjectWorkspace() {
               active={activeTab === "scorers"}
               onClick={() => setActiveTab("scorers")}
               disabled={!scorersAvailable}
+              loading={generatingScorersShortcut || generatingBoth}
+              disabledReason={
+                !skillReady
+                  ? `Add a ${isPromptEval ? "prompt" : "skill"} first — scorers grade its output.`
+                  : !hasCharter
+                    ? "Generate the charter first; scorers map to its criteria."
+                    : undefined
+              }
             />
           </SidebarGroup>
 
@@ -2182,6 +2202,13 @@ export default function ProjectWorkspace() {
               active={activeTab === "evaluate"}
               onClick={() => setActiveTab("evaluate")}
               disabled={!evaluateAvailable}
+              disabledReason={
+                !skillReady
+                  ? `Add a ${isPromptEval ? "prompt" : "skill"} to run evaluations against.`
+                  : !dataset
+                    ? "Generate the dataset first."
+                    : undefined
+              }
             />
           </SidebarGroup>
         </nav>
@@ -2682,8 +2709,8 @@ function SidebarItem({
   disabled,
   badge,
   icon,
-  warning,
-  warningTitle,
+  loading,
+  disabledReason,
 }: {
   label: string;
   active: boolean;
@@ -2691,13 +2718,17 @@ function SidebarItem({
   disabled?: boolean;
   badge?: string;
   icon?: React.ReactNode;
-  warning?: boolean;
-  warningTitle?: string;
+  /** When true, render a spinner in the trailing slot (e.g. while the
+   *  artifact behind this nav item is being generated). */
+  loading?: boolean;
+  /** When this item is disabled, surfaced as a hover tooltip explaining why. */
+  disabledReason?: string;
 }) {
   return (
     <button
       onClick={onClick}
       disabled={disabled}
+      title={disabled ? disabledReason : undefined}
       className={`flex gap-2.5 items-center justify-between px-2 py-2 text-base text-left transition-colors ${
         active
           ? "bg-fill-primary/10 text-fg-primary font-bold [&_svg]:text-fg-primary"
@@ -2708,16 +2739,10 @@ function SidebarItem({
     >
       {icon ?? <StarIcon />}
       <span className="truncate w-full">{label}</span>
-      {warning && (
-        <span
-          className="flex-shrink-0 inline-flex"
-          title={warningTitle ?? "Action required"}
-          aria-label={warningTitle ?? "Action required"}
-        >
-          <AlertTriangle className="w-4 h-4 text-warning" />
-        </span>
+      {loading && (
+        <Loader2 className="w-4 h-4 text-fg-dim animate-spin flex-shrink-0" />
       )}
-      {badge && (
+      {!loading && badge && (
         <span
           className={`font-mono text-[10px] px-1.5 py-0.5 ml-2 ${
             active ? "bg-fill-primary/20 text-fg-primary" : "bg-fill-neutral text-fg-dim"

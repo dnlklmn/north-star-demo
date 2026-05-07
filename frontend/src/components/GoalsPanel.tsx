@@ -314,14 +314,14 @@ export default function GoalsPanel({
                 <div className="bg-fill-neutral">
                   {/* Goal row — amber border, no fill */}
                   <div
-                    className="flex items-center justify-between gap-1 px-4 h-[72px] border border-[#533E1D] group"
+                    className="flex items-center justify-between gap-1 px-4 py-4 min-h-[72px] border border-[#533E1D] group"
                     draggable={dragEnabled}
                     onDragStart={() => handleDragStart(i)}
                     onDragOver={(e) => handleDragOver(i, e)}
                     onDrop={() => handleDrop(i)}
                     onDragEnd={handleDragEnd}
                   >
-                    <span className="text-base font-medium text-gray-900 flex-1 min-w-0 truncate">
+                    <span className="text-base font-medium text-gray-900 flex-1 min-w-0 whitespace-pre-wrap break-words">
                       {goal}
                     </span>
                     <div
@@ -381,7 +381,7 @@ export default function GoalsPanel({
               {dropIndicator}
               <div
                 onClick={canEdit ? () => startEdit(i, goal) : undefined}
-                className={`flex items-center justify-between gap-1 group px-4 h-[72px] bg-fill-neutral ${
+                className={`flex items-center justify-between gap-1 group px-4 py-4 min-h-[72px] bg-fill-neutral ${
                   canEdit ? "cursor-pointer" : "cursor-default"
                 }`}
                 draggable={canEdit && dragEnabled}
@@ -390,7 +390,7 @@ export default function GoalsPanel({
                 onDrop={() => handleDrop(i)}
                 onDragEnd={handleDragEnd}
               >
-                <span className="text-base font-medium text-gray-900 flex-1 min-w-0 truncate">
+                <span className="text-base font-medium text-gray-900 flex-1 min-w-0 whitespace-pre-wrap break-words">
                   {goal}
                 </span>
                 {canEdit && (
