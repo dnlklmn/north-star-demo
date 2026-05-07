@@ -2022,7 +2022,16 @@ export default function ProjectWorkspace() {
   // (Enter / Submit) — typing into the trailing draft input does NOT flip
   // the button to primary.
   const committedGoalsCount = goals.slice(0, -1).filter((g) => g.trim()).length;
-  const goalNextLabel = isPromptEval ? "Go to prompt" : "Go to skill";
+  // Without a skill body the next-phase action is "Generate" — same target
+  // tab, but the verb signals there's still a missing artifact upstream of
+  // the charter. Once a skill exists we drop back to "Go to" navigation.
+  const goalNextLabel = isPromptEval
+    ? skillReady
+      ? "Go to prompt"
+      : "Generate prompt"
+    : skillReady
+      ? "Go to skill"
+      : "Generate skill";
   const goalNextDisabled = committedGoalsCount < 1 || loading;
   const goalNextVariant: "primary" | "neutral" =
     !goalNextDisabled ? "primary" : "neutral";
@@ -2217,7 +2226,6 @@ export default function ProjectWorkspace() {
                 setActiveTab("goals");
               }}
               onNext={() => setActiveTab("goals")}
-              onGoToGoals={() => setActiveTab("goals")}
               canEdit={canEdit}
               hasGoals={nonEmptyGoals.length > 0}
               skillSuggestions={skillSuggestions}
@@ -2234,30 +2242,12 @@ export default function ProjectWorkspace() {
               hasGoals={nonEmptyGoals.length > 0}
               onGenerateFromGoals={handleGenerateStoriesFromGoals}
               preBody={
-                <GoalsPanel
-                  embedded
-                  goals={goals}
-                  onGoalsChange={handleGoalsChange}
-                  onGoalCommit={handleGoalCommit}
-                  goalSuggestions={goalSuggestions}
-                  onAcceptGoalSuggestion={handleAcceptGoalSuggestion}
-                  onDismissGoalSuggestion={handleDismissGoalSuggestion}
-                  suggestionsLoading={goalSuggestionsLoading}
-                  goalFeedback={goalFeedback}
-                  goalFeedbackLoading={goalFeedbackLoading}
-                  // Embedded → footer/right not rendered, but the prop is
-                  // required. Wire to the combined-page primary so the
-                  // values stay coherent with what the parent shows.
-                  onNext={() => setActiveTab("skill")}
-                  nextLabel={goalNextLabel}
-                  nextVariant={goalNextVariant}
-                  nextDisabled={goalNextDisabled}
-                  canEdit={canEdit}
-                  banner={
-                    canEdit &&
-                    urlSessionId &&
-                    !state.charter.task.skill_body &&
-                    !isPromptEval ? (
+                <>
+                  {canEdit &&
+                  urlSessionId &&
+                  !state.charter.task.skill_body &&
+                  !isPromptEval ? (
+                    <div className="mb-8">
                       <AddSourceBanner
                         sessionId={urlSessionId}
                         onSeeded={handleSessionSeeded}
@@ -2265,9 +2255,29 @@ export default function ProjectWorkspace() {
                           navigate(`/project/${newSessionId}?tab=goals`);
                         }}
                       />
-                    ) : undefined
-                  }
-                />
+                    </div>
+                  ) : null}
+                  <GoalsPanel
+                    embedded
+                    goals={goals}
+                    onGoalsChange={handleGoalsChange}
+                    onGoalCommit={handleGoalCommit}
+                    goalSuggestions={goalSuggestions}
+                    onAcceptGoalSuggestion={handleAcceptGoalSuggestion}
+                    onDismissGoalSuggestion={handleDismissGoalSuggestion}
+                    suggestionsLoading={goalSuggestionsLoading}
+                    goalFeedback={goalFeedback}
+                    goalFeedbackLoading={goalFeedbackLoading}
+                    // Embedded → footer/right not rendered, but the prop is
+                    // required. Wire to the combined-page primary so the
+                    // values stay coherent with what the parent shows.
+                    onNext={() => setActiveTab("skill")}
+                    nextLabel={goalNextLabel}
+                    nextVariant={goalNextVariant}
+                    nextDisabled={goalNextDisabled}
+                    canEdit={canEdit}
+                  />
+                </>
               }
               storyGroups={storyGroups}
               onStoryGroupsChange={(groups) => {

@@ -434,6 +434,28 @@ export default function GoalsPanel({
           List and prioritize your business goals.
         </p>
         {body}
+        {/* Inline Suggestions — embedded mode has no right rail. */}
+        {canEdit && (
+          <div className="mt-6">
+            <SuggestionBox
+              onRefresh={nonEmptyGoals.length > 0 ? onGoalCommit : undefined}
+              loading={suggestionsLoading}
+              emptyText="Enter a business goal to see suggestions."
+            >
+              {goalSuggestions.length > 0
+                ? goalSuggestions.map((suggestion, i) => (
+                    <SuggestionCard
+                      key={i}
+                      onAccept={() => onAcceptGoalSuggestion(suggestion)}
+                      onDismiss={() => onDismissGoalSuggestion(suggestion)}
+                    >
+                      {suggestion}
+                    </SuggestionCard>
+                  ))
+                : null}
+            </SuggestionBox>
+          </div>
+        )}
       </section>
     );
   }
