@@ -22,6 +22,12 @@ import NewSkillEvalModal from "../components/NewSkillEvalModal";
 import NewPromptEvalModal from "../components/NewPromptEvalModal";
 import SettingsPanel from "../components/SettingsPanel";
 import { GearIcon, StarIcon } from "../components/ui/Icons";
+import {
+  evictSession,
+  getCachedSessionsList,
+  patchCachedSessionName,
+  setCachedSessionsList,
+} from "../utils/projectCache";
 
 function relativeTime(dateStr: string): string {
   const date = new Date(dateStr);
@@ -46,8 +52,12 @@ function statusBadge(project: ProjectSummary): string | null {
 
 export default function Home() {
   const navigate = useNavigate();
-  const [projects, setProjects] = useState<ProjectSummary[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Seed from in-memory cache so a return-trip to Home renders instantly.
+  // The fresh listSessions() call still fires in the background and swaps
+  // the result in once it lands.
+  const cachedList = getCachedSessionsList();
+  const [projects, setProjects] = useState<ProjectSummary[]>(cachedList ?? []);
+  const [loading, setLoading] = useState(cachedList === null);
   const [creating, setCreating] = useState(false);
   const [isNewSkillModalOpen, setIsNewSkillModalOpen] = useState(false);
   const [isNewPromptModalOpen, setIsNewPromptModalOpen] = useState(false);
@@ -86,6 +96,7 @@ export default function Home() {
     try {
       const res = await listSessions();
       setProjects(res.sessions);
+      setCachedSessionsList(res.sessions);
     } catch (err) {
       console.error("Failed to load projects:", err);
     } finally {
@@ -106,6 +117,19 @@ export default function Home() {
   const openNewPromptModal = () => {
     setIsMenuOpen(false);
     setIsNewPromptModalOpen(true);
+  };
+
+  const handleNewProject = async () => {
+    setCreating(true);
+    try {
+      const res = await createSession({ name: "Untitled project" });
+      navigate(`/project/${res.session_id}?tab=goals`);
+    } catch (err) {
+      console.error("Failed to create project:", err);
+      alert(`Error: ${err instanceof Error ? err.message : "Unknown error"}`);
+    } finally {
+      setCreating(false);
+    }
   };
 
   const handleCreatePromptEval = async (target: string, sampleSize: number, body: string) => {
@@ -184,6 +208,7 @@ export default function Home() {
             const desired = uniqueProjectName(skillName, taken);
             if (desired) {
               await updateSessionName(sessionRes.session_id, desired);
+              patchCachedSessionName(sessionRes.session_id, desired);
             }
           } catch (err) {
             console.error("Failed to auto-rename project:", err);
@@ -205,7 +230,15 @@ export default function Home() {
     if (!confirm("Delete this project? This cannot be undone.")) return;
     try {
       await deleteSession(projectId);
-      setProjects((prev) => prev.filter((p) => p.id !== projectId));
+      setProjects((prev) => {
+        const next = prev.filter((p) => p.id !== projectId);
+        setCachedSessionsList(next);
+        return next;
+      });
+      // Drop the project's cached state + dataset so a fresh project that
+      // happens to reuse the id (extremely unlikely, but still) doesn't
+      // get the dead row's data.
+      evictSession(projectId);
     } catch (err) {
       console.error("Failed to delete project:", err);
     }
@@ -231,12 +264,12 @@ export default function Home() {
             <Button
               size="small"
               variant="primary"
-              onClick={openNewSkillModal}
+              onClick={handleNewProject}
               disabled={creating}
               className="rounded-r-none"
             >
               {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-              New skill eval
+              New project
             </Button>
             <Button
               size="small"
@@ -250,6 +283,13 @@ export default function Home() {
             </Button>
             {isMenuOpen && (
               <div className="absolute right-0 top-full mt-1 w-56 bg-surface-raised border border-border shadow-lg z-30">
+                <button
+                  type="button"
+                  onClick={openNewSkillModal}
+                  className="w-full text-left px-3 py-2 text-sm hover:bg-fill-neutral/30 text-foreground"
+                >
+                  New skill eval
+                </button>
                 <button
                   type="button"
                   onClick={openNewPromptModal}
@@ -276,16 +316,16 @@ export default function Home() {
                 No projects yet
               </h2>
               <p className="text-sm text-fg-dim mb-6 max-w-sm">
-                Paste a SKILL.md to build a charter, generate a dataset, and run evals.
+                Start with your business goals — North Star can generate them from a skill or prompt if you have one.
               </p>
               <Button
                 size="big"
                 variant="primary"
-                onClick={openNewSkillModal}
+                onClick={handleNewProject}
                 disabled={creating}
               >
                 {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-                New skill eval
+                New project
               </Button>
             </div>
           ) : (

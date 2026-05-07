@@ -831,6 +831,128 @@ async def call_evaluate_goals(goals: list[str]) -> tuple[list[dict], list[dict]]
     return feedback, [meta]
 
 
+@traced("generate_skill_from_goals")
+async def call_generate_skill_from_goals(
+    goals: list[str],
+    stories: list[dict],
+    project_name: str | None,
+) -> tuple[str, list[dict]]:
+    """Generate a full SKILL.md body. Returns (body, call metadata list)."""
+    from .prompt import build_generate_skill_from_goals_prompt
+    await _refresh_settings()
+    prompt = build_generate_skill_from_goals_prompt(goals, stories, project_name)
+    text, meta = _call_llm(prompt, max_tokens=2048)
+    body = text.strip()
+    # Strip accidental code fences if the model wrapped output despite the
+    # explicit instruction not to.
+    if body.startswith("```"):
+        lines = body.splitlines()
+        # Drop leading and trailing fence lines.
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        body = "\n".join(lines).strip()
+    try:
+        bubble_input = (
+            "Goals:\n" + ("\n".join(f"- {g}" for g in goals) or "(none)")
+            + "\n\nStories:\n"
+            + ("\n".join(
+                f"- As a {s.get('who','')}, I want to {s.get('what','')}" for s in stories
+            ) or "(none)")
+        )
+        _bubble_io_to_parent_span(bubble_input, body)
+    except Exception as e:
+        logger.warning(f"generate_skill_from_goals scorer payload bubble failed: {e}")
+    return body, [meta]
+
+
+@traced("suggest_scorer_ideas")
+async def call_suggest_scorer_ideas(
+    charter: dict,
+    existing_scorers: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """Suggest NEW scorer ideas (no code) for the user to refine. Returns
+    (suggestions, call metadata list)."""
+    from .prompt import build_suggest_scorer_ideas_prompt
+    await _refresh_settings()
+    prompt = build_suggest_scorer_ideas_prompt(charter, existing_scorers)
+    text, meta = _call_llm(prompt, max_tokens=512)
+    data = _extract_json(text)
+    suggestions: list[dict] = []
+    for s in data.get("suggestions", []):
+        if isinstance(s, str) and s.strip():
+            suggestions.append({"summary": s.strip(), "type": None})
+        elif isinstance(s, dict):
+            summary = (s.get("summary") or "").strip()
+            stype = (s.get("type") or "").strip() or None
+            if summary:
+                suggestions.append({"summary": summary, "type": stype})
+    try:
+        bubble_input = (
+            f"Existing scorers ({len(existing_scorers)}):\n"
+            + ("\n".join(f"- {s.get('name','')}: {s.get('type','?')}" for s in existing_scorers) or "(none)")
+        )
+        bubble_output = "Scorer ideas:\n" + (
+            "\n".join(
+                f"- {s['summary']}" + (f"  [{s['type']}]" if s.get("type") else "")
+                for s in suggestions
+            ) or "(none)"
+        )
+        _bubble_io_to_parent_span(bubble_input, bubble_output)
+    except Exception as e:
+        logger.warning(f"suggest_scorer_ideas scorer payload bubble failed: {e}")
+    return suggestions, [meta]
+
+
+@traced("suggest_skill")
+async def call_suggest_skill(
+    goals: list[str],
+    stories: list[dict],
+    current_body: str | None,
+) -> tuple[list[dict], list[dict]]:
+    """Suggest SKILL.md content ideas. Returns (suggestions, call metadata list).
+
+    Each suggestion is ``{"summary": str, "where": str | None}``. The model is
+    instructed to point at the section the suggestion belongs in; we accept
+    legacy plain-string entries too so older clients / cached prompts still
+    deserialize cleanly.
+    """
+    from .prompt import build_suggest_skill_prompt
+    await _refresh_settings()
+    prompt = build_suggest_skill_prompt(goals, stories, current_body)
+    text, meta = _call_llm(prompt, max_tokens=768)
+    data = _extract_json(text)
+    suggestions: list[dict] = []
+    for s in data.get("suggestions", []):
+        if isinstance(s, str) and s.strip():
+            suggestions.append({"summary": s.strip(), "where": None})
+        elif isinstance(s, dict):
+            summary = (s.get("summary") or "").strip()
+            where = (s.get("where") or "").strip() or None
+            if summary:
+                suggestions.append({"summary": summary, "where": where})
+    try:
+        bubble_input = (
+            "Goals:\n" + ("\n".join(f"- {g}" for g in goals) or "(none)")
+            + "\n\nStories:\n"
+            + ("\n".join(
+                f"- As a {s.get('who','')}, I want to {s.get('what','')}" for s in stories
+            ) or "(none)")
+        )
+        bubble_output = "Skill suggestions:\n" + (
+            "\n".join(
+                f"- {s['summary']}"
+                + (f"  →  {s['where']}" if s.get("where") else "")
+                for s in suggestions
+            ) or "(none)"
+        )
+        _bubble_io_to_parent_span(bubble_input, bubble_output)
+    except Exception as e:
+        logger.warning(f"suggest_skill scorer payload bubble failed: {e}")
+    return suggestions, [meta]
+
+
 @traced("suggest_stories")
 async def call_suggest_stories(goals: list[str], stories: list[dict]) -> tuple[list[dict], list[dict]]:
     """Suggest additional user stories. Returns (suggestions, call metadata list)."""
@@ -863,9 +985,11 @@ async def call_suggest_stories(goals: list[str], stories: list[dict]) -> tuple[l
 # --- Dataset phase tools ---
 
 # Concurrency cap for per-cell synth fan-out. The backend talks to a single
-# upstream LLM provider; ~5 in-flight requests is a safe ceiling that keeps
-# latency low without rate-limiting risk.
-_SYNTH_CELL_CONCURRENCY = 5
+# upstream LLM provider; bumping from 5 → 10 cuts wall-clock for typical
+# 4×5 grids roughly in half (4 batches → 2). Anthropic's default tier
+# tolerates this comfortably; if you hit rate limits, lower via the
+# NORTHSTAR_SYNTH_CONCURRENCY env var.
+_SYNTH_CELL_CONCURRENCY = int(os.environ.get("NORTHSTAR_SYNTH_CONCURRENCY", "10"))
 
 
 def _has_off_target_or_safety(charter: dict) -> bool:

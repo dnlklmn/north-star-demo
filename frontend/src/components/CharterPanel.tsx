@@ -76,6 +76,23 @@ interface Props {
    *  CTAs. Pass `role !== 'viewer'` from the parent. Defaults to true so older
    *  callers keep their existing behavior. */
   canEdit?: boolean;
+  /** Whether the project has a skill body (or synthetic prompt body for
+   *  prompt-eval). When false, the footer collapses to a single "Generate
+   *  skill" / "Generate prompt" CTA so the user is pushed to define one
+   *  before reaching dataset/scorers. */
+  skillReady?: boolean;
+  /** Drives the "Generate skill" vs "Generate prompt" label. */
+  isPromptEval?: boolean;
+  /** Click handler for the "Generate skill" / "Generate prompt" CTA. */
+  onGenerateSkill?: () => void;
+  /** Whether a charter has already been generated. Drives the empty-state
+   *  title-row "Generate from goals and skill" button visibility — we only
+   *  surface it when there's nothing to overwrite. */
+  hasCharter?: boolean;
+  /** Fires the intake pass that drafts a charter from goals + stories.
+   *  Rendered as a title-row action when the panel is empty AND the
+   *  project has a skill (or is a prompt-eval). */
+  onGenerateCharter?: () => void;
 }
 
 type CharterTab = "task" | "coverage" | "balance" | "alignment" | "rot" | "safety";
@@ -111,6 +128,11 @@ export default function CharterPanel({
   datasetState = "missing",
   scorersState = "missing",
   canEdit = true,
+  skillReady = true,
+  isPromptEval = false,
+  onGenerateSkill,
+  hasCharter = true,
+  onGenerateCharter,
 }: Props) {
   // Strip every edit handler when canEdit is false so the inner sub-components
   // (CriteriaEditor, AlignmentEditor, TaskEditor, suggestion cards, shortcut
@@ -212,10 +234,31 @@ export default function CharterPanel({
     );
   }
 
+  // Empty-state action — when there's no charter yet but the project has
+  // a skill (or is a prompt-eval), let the user generate the charter
+  // directly from the Charter page header instead of jumping back to
+  // Skill. The handler navigates back to Charter + flips loading at the
+  // parent level, so the existing in-progress overlay covers the wait.
+  const charterTitleAction =
+    canEdit && !hasCharter && skillReady && onGenerateCharter ? (
+      <Button
+        size="small"
+        variant="primary"
+        onClick={onGenerateCharter}
+        disabled={!!loading}
+      >
+        {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+        {isPromptEval
+          ? "Generate from goals and prompt"
+          : "Generate from goals and skill"}
+      </Button>
+    ) : undefined;
+
   return (
     <PanelLayout
       title="Charter"
       subtitle="A formal rule set to keep your dataset in check"
+      titleAction={charterTitleAction}
       rightTop={
         hasRadarData ? (
           <div>
@@ -261,7 +304,11 @@ export default function CharterPanel({
       rightBottom={rightBottom}
       rightBottomExpanded={rightBottomExpanded}
       footer={
-        onGenerateDataset || onGenerateScorers || onGenerateBoth ? (
+        !skillReady && canEdit && onGenerateSkill ? (
+          <Button size="big" variant="primary" onClick={onGenerateSkill}>
+            {isPromptEval ? "Generate prompt" : "Generate skill"}
+          </Button>
+        ) : onGenerateDataset || onGenerateScorers || onGenerateBoth ? (
           <ChartersGenerateSplitButton
             datasetState={datasetState}
             scorersState={scorersState}
@@ -276,15 +323,16 @@ export default function CharterPanel({
       }
     >
       <div className="relative">
-        {/* Regenerate overlay — fires when the caller flags loading=true while
-            a non-empty charter is on screen. The user sees a "Regenerating…"
-            label over their existing charter so they know work is in flight
-            without us swapping out the panel. */}
+        {/* Loading overlay — fires when the caller flags loading=true.
+            Shows over an existing charter (regenerate) or the empty
+            scaffold (first-time generate). Label flips on hasCharter. */}
         {loading && (
-          <div className="absolute inset-0 z-10 flex items-center justify-center bg-bg-default/70 backdrop-blur-[1px]">
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-bg-default/70 backdrop-blur-[1px] min-h-[12rem]">
             <div className="flex items-center gap-2 px-4 py-2 bg-surface-raised border border-border shadow-lg">
               <Loader2 className="w-4 h-4 text-fg-dim animate-spin" />
-              <span className="text-sm text-fg-contrast">Regenerating…</span>
+              <span className="text-sm text-fg-contrast">
+                {hasCharter ? "Regenerating charter…" : "Generating charter…"}
+              </span>
             </div>
           </div>
         )}

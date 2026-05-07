@@ -1,0 +1,6 @@
+# Per-session generated scorer artifacts. Each subdirectory is named after
+# a skill body hash + session prefix and contains the .py/.md files written
+# by scorer_publish on demand. They're regenerated from session state and
+# shouldn't be tracked.
+*/
+!.gitignore

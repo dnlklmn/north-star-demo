@@ -789,6 +789,176 @@ Return ONLY valid JSON:
 }}"""
 
 
+def build_suggest_skill_prompt(
+    goals: list[str],
+    stories: list[dict],
+    current_body: str | None,
+) -> str:
+    """Prompt for suggesting SKILL.md content based on goals + stories.
+
+    Suggestions are short, actionable rule/section ideas the user can paste
+    or accept into their SKILL.md draft. We stay agnostic about the skill's
+    structure — output is just a list of plain-text strings, one per idea.
+    """
+    goals_text = "\n".join(f"- {g}" for g in goals if g.strip()) or "(none yet)"
+    if stories:
+        stories_text = "\n".join(
+            f"- As a {s.get('who','')}, I want to {s.get('what','')}"
+            f"{', so that ' + s.get('why','') if s.get('why') else ''}"
+            for s in stories
+            if s.get("who") or s.get("what")
+        ) or "(none yet)"
+    else:
+        stories_text = "(none yet)"
+    body_section = (
+        f"\nCurrent SKILL.md draft (de-dup against this — don't repeat rules already covered):\n```\n{current_body.strip()}\n```\n"
+        if current_body and current_body.strip()
+        else "\n(The user hasn't started writing the SKILL.md yet.)\n"
+    )
+
+    return f"""You are helping a product person draft a SKILL.md for an AI feature they're building. They've defined business goals and user stories; suggest 3-5 concrete things the SKILL.md should cover so the resulting AI behavior actually serves those goals and stories.
+
+Business goals:
+{goals_text}
+
+User stories:
+{stories_text}
+{body_section}
+Each suggestion has two fields:
+- "summary": the suggestion itself — a specific rule, section, or guardrail the SKILL.md should include. Phrased in 1-2 sentences max. Actionable: the user should read it and immediately know what to add.
+- "where": where in the SKILL.md it should land. A short hint pointing at a section/heading. Use the section names already present in the current draft when applicable (e.g. "Output format", "Behaviors / rules", "Edge cases"). If the right section doesn't exist yet, suggest creating one (e.g. "New section: Adversarial inputs"). Keep it under 6 words.
+
+Suggestions must be distinct from each other and from anything already in the current draft.
+
+Examples of the right shape:
+[
+  {{"summary": "Add an explicit format spec for the output: required fields, ordering, max length per field.", "where": "Output format"}},
+  {{"summary": "Spell out what to do when the input is missing context (refuse vs. ask vs. infer) so the eval can grade refusals consistently.", "where": "Edge cases"}},
+  {{"summary": "Define how the skill handles adversarial inputs — name the categories you want it to refuse.", "where": "New section: Adversarial inputs"}}
+]
+
+Return ONLY valid JSON:
+{{
+  "suggestions": [
+    {{"summary": "...", "where": "..."}},
+    {{"summary": "...", "where": "..."}}
+  ]
+}}"""
+
+
+def build_generate_skill_from_goals_prompt(
+    goals: list[str],
+    stories: list[dict],
+    project_name: str | None,
+) -> str:
+    """Prompt for generating a full SKILL.md body from goals + stories.
+
+    Output is a complete SKILL.md (with frontmatter) the user can paste
+    into the textarea as a starting point. Keep it pragmatic — short,
+    skill-shaped, and ready to evaluate.
+    """
+    goals_text = "\n".join(f"- {g}" for g in goals if g.strip()) or "(none)"
+    if stories:
+        stories_text = "\n".join(
+            f"- As a {s.get('who','')}, I want to {s.get('what','')}"
+            f"{', so that ' + s.get('why','') if s.get('why') else ''}"
+            for s in stories
+            if s.get("who") or s.get("what")
+        ) or "(none)"
+    else:
+        stories_text = "(none)"
+    name_hint = (
+        project_name.strip().lower().replace(" ", "-")
+        if project_name and project_name.strip() and project_name.strip() != "Untitled project"
+        else "my-skill"
+    )
+
+    return f"""You are drafting a SKILL.md for an AI feature based on the user's defined business goals and user stories. The SKILL.md is the system prompt the AI feature runs under — it's what gets evaluated. Produce a complete, paste-ready draft the user will refine.
+
+Business goals:
+{goals_text}
+
+User stories:
+{stories_text}
+
+Output requirements:
+- Start with YAML frontmatter: name (kebab-case), description (one short sentence — the routing signal).
+- Use suggested name "{name_hint}" if it fits; otherwise pick a better one based on the goals.
+- Body sections: # Instructions, ## Output format, ## Behaviors / rules, ## Edge cases. Each with concrete content drawn from the goals/stories above.
+- Keep it short and pragmatic: ~30-60 lines total. Specific rules, not platitudes.
+- Output ONLY the SKILL.md text — no commentary, no code fences. Frontmatter must be the first three lines (---, fields, ---) without any prefix.
+
+Begin the SKILL.md now:
+"""
+
+
+def build_suggest_scorer_ideas_prompt(charter: dict, existing_scorers: list[dict]) -> str:
+    """Prompt for suggesting NEW scorer ideas the user might want.
+
+    Output is short pitches, not Python code — the user can later promote a
+    pitch into a real scorer via the existing generate-scorers pass. Each
+    idea pairs with an optional ``type`` (coverage / alignment / balance /
+    rot / safety) so the user can categorize at a glance.
+    """
+    coverage = (charter.get("coverage") or {}).get("criteria") or []
+    balance = (charter.get("balance") or {}).get("criteria") or []
+    alignment = charter.get("alignment") or []
+    rot = (charter.get("rot") or {}).get("criteria") or []
+    safety = (charter.get("safety") or {}).get("criteria") or []
+
+    coverage_text = "\n".join(f"- {c}" for c in coverage) or "(none)"
+    balance_text = "\n".join(f"- {c}" for c in balance) or "(none)"
+    alignment_text = (
+        "\n".join(f"- {a.get('feature_area', '')}: {a.get('good', '')[:120]}" for a in alignment if isinstance(a, dict))
+        or "(none)"
+    )
+    rot_text = "\n".join(f"- {c}" for c in rot) or "(none)"
+    safety_text = "\n".join(f"- {c}" for c in safety) or "(none)"
+
+    existing_text = (
+        "\n".join(
+            f"- [{s.get('type', '?')}] {s.get('name', '')}: {s.get('description', '')}"
+            for s in existing_scorers
+        )
+        or "(none yet)"
+    )
+
+    return f"""You are helping a product person who has generated a base set of LLM-as-judge scorers from their charter. They're now looking for additional scorer ideas they might have missed — angles that aren't covered by the existing set.
+
+Charter dimensions:
+Coverage:
+{coverage_text}
+
+Balance:
+{balance_text}
+
+Alignment (per feature_area):
+{alignment_text}
+
+Rot:
+{rot_text}
+
+Safety:
+{safety_text}
+
+Existing scorers (don't duplicate these):
+{existing_text}
+
+Suggest 3-5 NEW scorers the user might want. Each suggestion has:
+- "summary": a one-sentence description of what the scorer would judge.
+- "type": one of "coverage", "alignment", "balance", "rot", "safety", or null if it cuts across dimensions.
+
+Be specific and complementary — fill gaps, don't restate. If the existing set is already strong, return fewer.
+
+Return ONLY valid JSON:
+{{
+  "suggestions": [
+    {{"summary": "...", "type": "..."}},
+    {{"summary": "...", "type": "..."}}
+  ]
+}}"""
+
+
 def build_evaluate_goals_prompt(goals: list[str]) -> str:
     goals_text = "\n".join(f"{i+1}. {g}" for i, g in enumerate(goals) if g.strip())
 

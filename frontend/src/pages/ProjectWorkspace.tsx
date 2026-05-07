@@ -1,6 +1,16 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { ArrowRight as ArrowRightLucide, Loader2, Sparkles as SparklesIcon } from "lucide-react";
+import {
+  ArrowRight as ArrowRightLucide,
+  Loader2,
+  Sparkles as SparklesIcon,
+} from "lucide-react";
 import {
   GearIcon,
   ChatBubbleIcon,
@@ -8,7 +18,7 @@ import {
   AIIcon,
   StarIcon,
   GoalsIcon,
-  UsersIcon,
+  SkillIcon,
   CharterIcon,
   DatasetIcon,
   ScorerIcon,
@@ -36,6 +46,8 @@ import {
   suggestGoals,
   evaluateGoals,
   suggestStories,
+  suggestSkill,
+  generateSkillFromGoals,
   createDataset,
   getDataset,
   synthesizeExamples,
@@ -54,11 +66,22 @@ import {
   suggestRevisions,
   getActivity,
   listSessions,
+  type SkillSuggestion,
 } from "../api";
 import Button from "../components/ui/Button";
 import { uniqueProjectName } from "../utils/skillFrontmatter";
+import { getAutoGenerateSuggestions } from "../utils/uiPrefs";
+import {
+  getCachedDataset,
+  getCachedSession,
+  patchCachedSessionName,
+  patchCachedSessionState,
+  setCachedDataset,
+  setCachedSession,
+} from "../utils/projectCache";
 import IconButton from "../components/ui/IconButton";
 import GoalsPanel from "../components/GoalsPanel";
+import AddSourceBanner from "../components/AddSourceBanner";
 import UsersPanel from "../components/UsersPanel";
 import CharterPanel from "../components/CharterPanel";
 import ScorersPanel from "../components/ScorersPanel";
@@ -180,6 +203,42 @@ export default function ProjectWorkspace() {
   // --- Story suggestion state ---
   const [storySuggestionsLoading, setStorySuggestionsLoading] = useState(false);
 
+  // --- Auto-generate-suggestions UI preference ---
+  // Whether goal/story/skill suggestion fetches fire automatically as the
+  // user types. Toggled in Settings → App. The SettingsPanel dispatches a
+  // window event when it flips so we can react without a parent rerender.
+  const [autoGenerateSuggestions, setAutoGenerateSuggestionsLocal] = useState(
+    () => getAutoGenerateSuggestions(),
+  );
+  useEffect(() => {
+    const handler = () =>
+      setAutoGenerateSuggestionsLocal(getAutoGenerateSuggestions());
+    window.addEventListener(
+      "ns:auto-generate-suggestions-changed",
+      handler,
+    );
+    return () =>
+      window.removeEventListener(
+        "ns:auto-generate-suggestions-changed",
+        handler,
+      );
+  }, []);
+
+  // --- Skill suggestion state (right rail on Skill tab) ---
+  const [skillSuggestions, setSkillSuggestions] = useState<SkillSuggestion[]>(
+    [],
+  );
+  const [skillSuggestionsLoading, setSkillSuggestionsLoading] = useState(false);
+  // Dismissed suggestions are tracked by their summary text so a manual
+  // refresh after a dismiss doesn't bring the same idea right back.
+  const [dismissedSkillSuggestions, setDismissedSkillSuggestions] = useState<
+    Set<string>
+  >(new Set());
+
+  // --- Goals "Add skill / Add prompt" banner ---
+  // Always visible until the session has a skill body or is a prompt-eval
+  // (the banner offer becomes moot once a skill/prompt is in place).
+
   // --- Charter phase state ---
   const [activeCriteria, setActiveCriteria] = useState<string[]>([]);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
@@ -196,8 +255,11 @@ export default function ProjectWorkspace() {
   );
 
   // --- Dirty tracking: has a section changed since the next section was last touched? ---
-  const [goalsDirty, setGoalsDirty] = useState(false);
-  const [storiesDirty, setStoriesDirty] = useState(false);
+  // Setters are still wired so future "stale upstream" UX can read these
+  // again; the read-side consumer (the regenerate-charter confirm prompt)
+  // moved off the Goal page. Underscore prefix silences no-unused-vars.
+  const [, setGoalsDirty] = useState(false);
+  const [, setStoriesDirty] = useState(false);
   // Charter-edit → downstream stale. Flip true when the charter changes after
   // hydration; flip false after a successful (re)generation of that artifact.
   // Client-side only — survives tab switches within the session but not a
@@ -273,131 +335,176 @@ export default function ProjectWorkspace() {
   const activityCursorRef = useRef<string | null>(null);
   const seenActivityIdsRef = useRef<Set<string>>(new Set());
 
-  // --- Hydration: load existing session from DB ---
+  // --- Hydration: cache-first, background refresh ---
+  //
+  // Render order on mount:
+  //   1. If a cached SessionRecord (and optionally Dataset) exists for
+  //      this id, apply them synchronously and clear `hydrating` so the
+  //      page draws instantly.
+  //   2. Always issue a parallel `getSession` + `getDataset` refresh in
+  //      the background. When each lands, write to the cache and re-apply
+  //      so any server-side change since the last visit shows up.
+  //
+  // `tabSetRef` makes the tab-determination logic (which is sticky to
+  // first apply only) safe to re-run on background refreshes — the user's
+  // current tab won't get stomped when fresh data lands seconds later.
+  const tabSetRef = useRef(false);
   useEffect(() => {
     if (!urlSessionId) {
       setHydrating(false);
       return;
     }
+    tabSetRef.current = false;
+    let cancelled = false;
 
-    const hydrate = async () => {
-      try {
-        const session = await getSession(urlSessionId);
-        const s = session.state as SessionState;
-        setSessionId(urlSessionId);
-        setState(s);
-        setMessages(
-          session.conversation?.map((m: { role: string; content: string }) => ({
-            role: m.role as "user" | "assistant",
-            content: m.content,
-          })) || [],
-        );
+    type SessionRecord = Awaited<ReturnType<typeof getSession>>;
 
-        // Restore structured goals/stories if available
-        if (s.input.goals && s.input.goals.length > 0) {
-          setGoals([...s.input.goals, ""]);
-        } else if (s.input.business_goals) {
-          setGoals([
-            ...s.input.business_goals.split("\n").filter((g) => g.trim()),
-            "",
-          ]);
-        }
+    const applySession = (session: SessionRecord) => {
+      if (cancelled) return;
+      const s = session.state as SessionState;
+      setSessionId(urlSessionId);
+      setState(s);
+      setMessages(
+        session.conversation?.map((m: { role: string; content: string }) => ({
+          role: m.role as "user" | "assistant",
+          content: m.content,
+        })) || [],
+      );
 
-        if (s.input.story_groups && s.input.story_groups.length > 0) {
-          setStoryGroups(s.input.story_groups as StoryGroup[]);
-        }
-
-        // Restore project name
-        if ((session as { name?: string }).name)
-          setProjectName((session as { name?: string }).name!);
-
-        // Restore scorers
-        if (s.scorers && s.scorers.length > 0) {
-          setScorers(s.scorers);
-        }
-
-         // Determine active tab
-         const hasCharter = !!(
-           s.charter.coverage.criteria.length || s.charter.alignment.length
-         );
-         const hasSkillBody = !!s.charter.task.skill_body;
-         const isTriggered = s.eval_mode === "triggered";
-         const isPromptEval = s.kind === "prompt";
-
-         // Check for ?tab= query param (e.g. ?tab=goals from Home modal).
-         // Read directly from window.location so this effect only re-runs on
-         // urlSessionId change — adding searchParams to the dep list would
-         // re-hydrate on every tab toggle (the user can change tabs after
-         // load, which updates searchParams).
-         const tabParam = new URLSearchParams(window.location.search).get("tab");
-          const validTabs: ActiveTab[] = ["skill", "goals", "users", "charter", "dataset", "scorers", "evaluate"];
-         const tabFromUrl = validTabs.includes(tabParam as ActiveTab) ? tabParam as ActiveTab : null;
-
-         // Try to load dataset. For skill-mode sessions that haven't built a
-         // charter yet, land on the Skill tab so the user sees what they just
-         // pasted — not the empty goals screen. Brand-new triggered sessions
-         // (no skill body yet) also land on Skill so the paste form is the
-         // first thing the user sees.
-         try {
-           let ds = await getDataset(urlSessionId);
-           // For prompt-eval projects, opportunistically pull any new turns
-           // landed since the last visit so the dataset stays current. The
-           // backend tags new rows with "new" in coverage_tags so the UI can
-           // badge them. Failure is non-fatal — we just show what we have.
-           if (isPromptEval) {
-             try {
-               const result = await refreshDatasetFromTurns(ds.id);
-               if (result.added > 0) {
-                 ds = await getDataset(urlSessionId);
-               }
-             } catch (err) {
-               console.warn("auto-refresh from turns failed:", err);
-             }
-           }
-           setDataset(ds);
-           if (tabFromUrl) {
-             setActiveTab(tabFromUrl);
-           } else if (isPromptEval) {
-             // Prompt-eval projects always land on the Prompt tab so the
-             // user reads the synthetic description before scrolling through
-             // the auto-seeded INPUT and on into Charter / Scorers.
-             setActiveTab("skill");
-           } else if (ds.examples?.length > 0) {
-             setActiveTab("dataset");
-           } else if (hasCharter) {
-             setActiveTab("charter");
-           } else if (hasSkillBody || isTriggered) {
-             setActiveTab("skill");
-           }
-         } catch {
-           // No dataset yet
-           if (tabFromUrl) {
-             setActiveTab(tabFromUrl);
-           } else if (isPromptEval) {
-             setActiveTab("skill");
-           } else if (hasCharter) {
-             setActiveTab("charter");
-           } else if (hasSkillBody || isTriggered) {
-             setActiveTab("skill");
-           } else if (s.input.story_groups && s.input.story_groups.length > 0) {
-             setActiveTab("users");
-           }
-         }
-
-        if (s.input.business_goals || s.input.user_stories) {
-          setSavedInput({
-            goals: s.input.business_goals || "",
-            stories: s.input.user_stories || "",
-          });
-        }
-      } catch (err) {
-        console.error("Failed to load project:", err);
-        navigate("/", { replace: true });
-      } finally {
-        setHydrating(false);
+      if (s.input.goals && s.input.goals.length > 0) {
+        setGoals([...s.input.goals, ""]);
+      } else if (s.input.business_goals) {
+        setGoals([
+          ...s.input.business_goals.split("\n").filter((g) => g.trim()),
+          "",
+        ]);
+      }
+      if (s.input.story_groups && s.input.story_groups.length > 0) {
+        setStoryGroups(s.input.story_groups as StoryGroup[]);
+      }
+      if ((session as { name?: string }).name) {
+        setProjectName((session as { name?: string }).name!);
+      }
+      if (s.scorers && s.scorers.length > 0) {
+        setScorers(s.scorers);
+      }
+      if (s.input.business_goals || s.input.user_stories) {
+        setSavedInput({
+          goals: s.input.business_goals || "",
+          stories: s.input.user_stories || "",
+        });
       }
     };
-    hydrate();
+
+    const applyDataset = (ds: Dataset | null) => {
+      if (cancelled) return;
+      if (ds) setDataset(ds);
+    };
+
+    const decideInitialTab = (
+      session: SessionRecord,
+      ds: Dataset | null,
+    ) => {
+      if (cancelled || tabSetRef.current) return;
+      tabSetRef.current = true;
+      const s = session.state as SessionState;
+      const hasCharter = !!(
+        s.charter.coverage.criteria.length || s.charter.alignment.length
+      );
+      const hasSkillBody = !!s.charter.task.skill_body;
+      const isTriggered = s.eval_mode === "triggered";
+      const isPromptEval = s.kind === "prompt";
+      // ?tab= overrides every other rule. Read fresh from window.location
+      // so this only fires on real session changes, not tab toggles.
+      const tabParam = new URLSearchParams(window.location.search).get("tab");
+      const validTabs: ActiveTab[] = [
+        "skill", "goals", "users", "charter", "dataset", "scorers", "evaluate",
+      ];
+      const tabFromUrl = validTabs.includes(tabParam as ActiveTab)
+        ? (tabParam as ActiveTab)
+        : null;
+      if (tabFromUrl) {
+        setActiveTab(tabFromUrl);
+        return;
+      }
+      if (isPromptEval) {
+        setActiveTab("skill");
+        return;
+      }
+      if (ds && (ds.examples?.length || 0) > 0) {
+        setActiveTab("dataset");
+        return;
+      }
+      if (hasCharter) {
+        setActiveTab("charter");
+        return;
+      }
+      if (hasSkillBody || isTriggered) {
+        setActiveTab("goals");
+        return;
+      }
+      if (s.input.story_groups && s.input.story_groups.length > 0) {
+        setActiveTab("goals");
+      }
+    };
+
+    // (1) Cache-first paint.
+    const cachedSession = getCachedSession(urlSessionId);
+    const cachedDataset = getCachedDataset(urlSessionId);
+    if (cachedSession) {
+      applySession(cachedSession as SessionRecord);
+      if (cachedDataset) applyDataset(cachedDataset);
+      decideInitialTab(cachedSession as SessionRecord, cachedDataset);
+      setHydrating(false);
+    }
+
+    // (2) Background refresh — always run, even on cache hit.
+    const refresh = async () => {
+      try {
+        const [session, dataset] = await Promise.allSettled([
+          getSession(urlSessionId),
+          getDataset(urlSessionId),
+        ]);
+        if (cancelled) return;
+        if (session.status === "rejected") {
+          console.error("Failed to load project:", session.reason);
+          if (!cachedSession) navigate("/", { replace: true });
+          return;
+        }
+        const sessionValue = session.value;
+        applySession(sessionValue as SessionRecord);
+        setCachedSession(urlSessionId, sessionValue as SessionRecord);
+
+        let datasetValue: Dataset | null = null;
+        if (dataset.status === "fulfilled") {
+          datasetValue = dataset.value;
+          // Prompt-eval auto-refresh: pull any new turns landed since the
+          // last visit. Failure is non-fatal — we just show what we have.
+          const isPromptEval =
+            (sessionValue.state as SessionState).kind === "prompt";
+          if (isPromptEval) {
+            try {
+              const result = await refreshDatasetFromTurns(datasetValue.id);
+              if (result.added > 0 && !cancelled) {
+                datasetValue = await getDataset(urlSessionId);
+              }
+            } catch (err) {
+              console.warn("auto-refresh from turns failed:", err);
+            }
+          }
+          applyDataset(datasetValue);
+          if (datasetValue) setCachedDataset(urlSessionId, datasetValue);
+        }
+        decideInitialTab(sessionValue as SessionRecord, datasetValue);
+      } finally {
+        if (!cancelled) setHydrating(false);
+      }
+    };
+    refresh();
+
+    return () => {
+      cancelled = true;
+    };
   }, [urlSessionId, navigate]);
 
   // --- Live updates: re-fetch session + dataset on SSE state_changed ---
@@ -409,17 +516,35 @@ export default function ProjectWorkspace() {
     try {
       const session = await getSession(sessionId);
       setState(session.state as SessionState);
+      // Keep the in-memory cache in sync so a return-trip to this project
+      // (after navigating away and back) renders fresh data instantly.
+      setCachedSession(sessionId, session);
     } catch (err) {
       console.warn("Live refetch (session) failed:", err);
     }
     try {
       const ds = await getDataset(sessionId);
       setDataset(ds);
+      setCachedDataset(sessionId, ds);
     } catch {
       // No dataset yet, or fetch failed — non-fatal.
     }
   }, [sessionId]);
   useProjectEvents(sessionId, handleLiveStateChange);
+
+  // Mirror React state → in-memory cache. Every setState((prev) => …) call
+  // (charter edits, scorer toggles, skill body updates, etc.) trips this
+  // effect, so the cached SessionRecord stays in lock-step without each
+  // handler having to remember to update the cache. Same for dataset.
+  useEffect(() => {
+    if (!sessionId) return;
+    if (state === EMPTY_STATE) return;
+    patchCachedSessionState(sessionId, state);
+  }, [sessionId, state]);
+  useEffect(() => {
+    if (!sessionId || !dataset) return;
+    setCachedDataset(sessionId, dataset);
+  }, [sessionId, dataset]);
 
   const status: AgentStatus = state.agent_status;
   const hasCharter = !!(
@@ -432,12 +557,11 @@ export default function ProjectWorkspace() {
     0,
   );
 
-  // Tab availability. In triggered mode, no tab downstream of Skill opens
-  // until the user has pasted + seeded a SKILL.md. This makes the empty
-  // Skill tab the only interactive surface on a brand-new skill session —
-  // mirroring the old standalone "new skill eval" page while keeping the
-  // user in the project workspace throughout.
-  const isTriggered = state.eval_mode === "triggered";
+  // Tab availability. Goals is the entry point and always open; everything
+  // downstream gates on its own data. Triggered- and prompt-eval projects
+  // surface a Skill/Prompt nav item but no longer block the rest of the flow
+  // — users can type goals manually or seed them via the Goals page banner.
+  //
   // Prompt-eval projects share the full skill-eval flow: synthetic SKILL.md
   // describes the prompt under test, gets seeded through call_skill_seed
   // into goals/users/stories, then the user reviews the charter + generates
@@ -445,13 +569,17 @@ export default function ProjectWorkspace() {
   // at run time, where the eval task replays the prompt builder instead
   // of running skill_body as a system prompt.
   const isPromptEval = state.kind === "prompt";
-  const skillReady = !!state.charter.task.skill_body || !isTriggered;
-  const usersAvailable = skillReady && nonEmptyGoals.length >= 2;
-  const charterAvailable = skillReady && (hasCharter || loading);
-  // Prompt-eval seeds the dataset up-front, so it's available even before
-  // the charter has been generated. Skill mode still gates on hasCharter
-  // because that's where dataset feature_areas come from.
-  const datasetAvailable = isPromptEval ? !!dataset : (skillReady && hasCharter);
+  // Goals tab is always reachable — it's where users enter their goals.
+  const usersAvailable = true;
+  const charterAvailable = hasCharter || loading;
+  // A skill body (or a prompt-eval, which has a synthetic skill_body) is the
+  // gate for everything downstream of the charter. Without one, you can't
+  // run a meaningful eval — there's nothing to evaluate against — so the
+  // dataset/scorers/evaluate tabs stay locked. Prompt-eval projects always
+  // have a synthetic body, so they're allowed through.
+  const hasSkillBody = !!state.charter.task.skill_body;
+  const skillReady = hasSkillBody || isPromptEval;
+  const datasetAvailable = skillReady && (isPromptEval ? !!dataset : hasCharter);
   const scorersAvailable = skillReady && hasCharter;
   const evaluateAvailable = skillReady && !!dataset;
 
@@ -463,6 +591,30 @@ export default function ProjectWorkspace() {
   const [generatingScorersShortcut, setGeneratingScorersShortcut] = useState(false);
   const [generatingBoth, setGeneratingBoth] = useState(false);
 
+  // Watchdog: while a generation is in flight, poll the session + dataset
+  // every 5s. Belt-and-braces against the SSE event AND the long-lived
+  // synth POST both getting lost (proxy timeout, throttled tab, etc.) —
+  // without this, the user has to refresh the page to see rows that have
+  // already landed in the DB. Lives down here (not next to useProjectEvents)
+  // because the generating* flags are declared further down — referencing
+  // them earlier hits a temporal-dead-zone ReferenceError on first render.
+  useEffect(() => {
+    if (!sessionId) return;
+    const generating =
+      generatingDataset || generatingScorersShortcut || generatingBoth;
+    if (!generating) return;
+    const tick = window.setInterval(() => {
+      handleLiveStateChange();
+    }, 5000);
+    return () => window.clearInterval(tick);
+  }, [
+    sessionId,
+    generatingDataset,
+    generatingScorersShortcut,
+    generatingBoth,
+    handleLiveStateChange,
+  ]);
+
   // --- Project name ---
   const startEditingName = () => {
     setEditingName(true);
@@ -472,7 +624,11 @@ export default function ProjectWorkspace() {
   const saveName = async () => {
     setEditingName(false);
     if (sessionId && projectName.trim()) {
-      updateSessionName(sessionId, projectName.trim()).catch((err) => {
+      const trimmed = projectName.trim();
+      // Patch the cache before the network round-trip so a Home navigation
+      // before the response lands shows the new name immediately.
+      patchCachedSessionName(sessionId, trimmed);
+      updateSessionName(sessionId, trimmed).catch((err) => {
         console.error("Failed to save project name:", err);
       });
     }
@@ -580,6 +736,32 @@ export default function ProjectWorkspace() {
     }
   }, [goals, storyGroups, hydrating, sessionId, scheduleSaveInput]);
 
+  // Debounced auto-fetch of goal suggestions as the user types. First-fire
+  // happens as soon as any goal has at least one non-whitespace character;
+  // subsequent edits re-fire on a 1.5s idle. Keeps the right rail responsive
+  // without spamming the backend every keystroke.
+  const goalsTypingDebounceRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (hydrating) return;
+    if (!autoGenerateSuggestions) return;
+    const nonEmpty = goals.filter((g) => g.trim());
+    if (nonEmpty.length === 0) return;
+    if (goalsTypingDebounceRef.current) {
+      window.clearTimeout(goalsTypingDebounceRef.current);
+    }
+    goalsTypingDebounceRef.current = window.setTimeout(() => {
+      goalsTypingDebounceRef.current = null;
+      fetchGoalSuggestions(goals);
+    }, 1500);
+    return () => {
+      if (goalsTypingDebounceRef.current) {
+        window.clearTimeout(goalsTypingDebounceRef.current);
+        goalsTypingDebounceRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [goals, hydrating, autoGenerateSuggestions]);
+
   const fetchGoalSuggestions = useCallback(async (currentGoals: string[]) => {
     const nonEmpty = currentGoals.filter((g) => g.trim());
     if (nonEmpty.length === 0) return;
@@ -594,6 +776,235 @@ export default function ProjectWorkspace() {
       setGoalSuggestionsLoading(false);
     }
   }, [urlSessionId]);
+
+  // --- Skill suggestion fetcher ---
+  const fetchSkillSuggestions = useCallback(async () => {
+    const nonEmptyGoalsList = goals.filter((g) => g.trim());
+    if (nonEmptyGoalsList.length === 0) {
+      setSkillSuggestions([]);
+      return;
+    }
+    const storiesPayload = storyGroups
+      .filter((g) => g.role.trim())
+      .flatMap((g) =>
+        g.stories
+          .filter((s) => s.what.trim())
+          .map((s) => ({ who: g.role, what: s.what, why: s.why ?? "" })),
+      );
+    setSkillSuggestionsLoading(true);
+    try {
+      const res = await suggestSkill(
+        nonEmptyGoalsList,
+        storiesPayload,
+        state.charter.task.skill_body || null,
+        urlSessionId ?? null,
+      );
+      setSkillSuggestions(
+        res.suggestions.filter(
+          (s) => !dismissedSkillSuggestions.has(s.summary),
+        ),
+      );
+    } catch (err) {
+      console.error("Failed to fetch skill suggestions:", err);
+    } finally {
+      setSkillSuggestionsLoading(false);
+    }
+  }, [
+    goals,
+    storyGroups,
+    state.charter.task.skill_body,
+    urlSessionId,
+    dismissedSkillSuggestions,
+  ]);
+
+  // Auto-fetch skill suggestions on a 1.5s idle debounce when the user is on
+  // the Skill tab and at least one goal exists. Re-runs when goals or stories
+  // change so the right rail stays in sync with the upstream context.
+  const skillSuggestionsDebounceRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (hydrating) return;
+    if (activeTab !== "skill") return;
+    if (isPromptEval) return;
+    if (!autoGenerateSuggestions) return;
+    const nonEmptyGoalsList = goals.filter((g) => g.trim());
+    if (nonEmptyGoalsList.length === 0) {
+      setSkillSuggestions([]);
+      return;
+    }
+    if (skillSuggestionsDebounceRef.current) {
+      window.clearTimeout(skillSuggestionsDebounceRef.current);
+    }
+    skillSuggestionsDebounceRef.current = window.setTimeout(() => {
+      skillSuggestionsDebounceRef.current = null;
+      fetchSkillSuggestions();
+    }, 1500);
+    return () => {
+      if (skillSuggestionsDebounceRef.current) {
+        window.clearTimeout(skillSuggestionsDebounceRef.current);
+        skillSuggestionsDebounceRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    activeTab,
+    goals,
+    storyGroups,
+    hydrating,
+    isPromptEval,
+    autoGenerateSuggestions,
+  ]);
+
+  const handleAcceptSkillSuggestion = useCallback(
+    (suggestion: SkillSuggestion) => {
+      // Append the suggestion to the existing skill body as a new bullet,
+      // prefixing the where-hint as a comment so the user can move it to
+      // the right section if needed. Drops it from the local list once
+      // accepted (and remembers it so a refresh doesn't re-suggest).
+      const current = state.charter.task.skill_body || "";
+      const sep = current.endsWith("\n") || current === "" ? "" : "\n";
+      const wherePrefix = suggestion.where ? `<!-- ${suggestion.where} -->\n` : "";
+      const next = `${current}${sep}\n${wherePrefix}- ${suggestion.summary}\n`;
+      setState((prev) => ({
+        ...prev,
+        charter: {
+          ...prev.charter,
+          task: { ...prev.charter.task, skill_body: next },
+        },
+      }));
+      setSkillSuggestions((prev) =>
+        prev.filter((s) => s.summary !== suggestion.summary),
+      );
+      setDismissedSkillSuggestions((prev) =>
+        new Set(prev).add(suggestion.summary),
+      );
+    },
+    [state.charter.task.skill_body],
+  );
+
+  const handleDismissSkillSuggestion = useCallback(
+    (suggestion: SkillSuggestion) => {
+      setSkillSuggestions((prev) =>
+        prev.filter((s) => s.summary !== suggestion.summary),
+      );
+      setDismissedSkillSuggestions((prev) =>
+        new Set(prev).add(suggestion.summary),
+      );
+    },
+    [],
+  );
+
+  // --- Generate full SKILL.md from goals + stories ---
+  const [generatingSkillFromGoals, setGeneratingSkillFromGoals] =
+    useState(false);
+  // Snapshot of the goals + stories that produced the current skill body.
+  // Drives the Generate / Regenerate button visibility on the Skill page:
+  //   - null         → never generated → show "Generate from goals"
+  //   - matches now  → fresh           → hide button
+  //   - differs      → upstream changed → show "Regenerate from goals"
+  const [generatedSkillSig, setGeneratedSkillSig] = useState<string | null>(
+    null,
+  );
+  const currentGoalsSig = useMemo(
+    () =>
+      JSON.stringify({
+        goals: goals.map((g) => g.trim()).filter(Boolean),
+        story_groups: storyGroups
+          .filter((g) => g.role.trim())
+          .map((g) => ({
+            role: g.role.trim(),
+            stories: g.stories
+              .filter((s) => s.what.trim())
+              .map((s) => ({
+                what: s.what.trim(),
+                why: (s.why || "").trim(),
+              })),
+          })),
+      }),
+    [goals, storyGroups],
+  );
+  const skillFromGoalsFresh =
+    generatedSkillSig !== null && generatedSkillSig === currentGoalsSig;
+  const skillFromGoalsStale =
+    generatedSkillSig !== null && generatedSkillSig !== currentGoalsSig;
+  const handleGenerateSkillFromGoals = useCallback(async () => {
+    if (!urlSessionId) return;
+    if (state.charter.task.skill_body?.trim()) {
+      const ok = window.confirm(
+        "Replace the current skill body?\n\nThis overwrites the textarea with a fresh draft generated from your goals and user stories. Save the current body as a version first if you want to keep it.",
+      );
+      if (!ok) return;
+    }
+    // Capture the sig at request time so a stale sig from a future race
+    // doesn't accidentally hide the button if goals change during the call.
+    const sigAtRequest = currentGoalsSig;
+    setGeneratingSkillFromGoals(true);
+    try {
+      const res = await generateSkillFromGoals(urlSessionId);
+      // Backend strips frontmatter and persists body + name + description
+      // on the session, then returns all three. Mirror them locally so the
+      // Skill page renders immediately (the SSE refetch that follows the
+      // _save_state call will overwrite anyway, but doing it here avoids a
+      // visible flicker).
+      setState((prev) => ({
+        ...prev,
+        charter: {
+          ...prev.charter,
+          task: {
+            ...prev.charter.task,
+            skill_body: res.body,
+            skill_name: res.name ?? prev.charter.task.skill_name ?? null,
+            skill_description:
+              res.description ?? prev.charter.task.skill_description ?? null,
+          },
+        },
+      }));
+      setGeneratedSkillSig(sigAtRequest);
+
+      // Rename the project to the skill name when the current name is still
+      // a generic default. Dedupe against other projects with a " 2",
+      // " 3"... suffix so two projects with the same skill don't collide.
+      const desiredBase = res.name?.trim();
+      if (desiredBase) {
+        const currentName = projectName.trim();
+        const isDefault =
+          !currentName ||
+          currentName === "Untitled project" ||
+          currentName === "Untitled skill eval" ||
+          currentName === "Skill eval";
+        if (isDefault) {
+          try {
+            const list = await listSessions();
+            const taken = new Set(
+              list.sessions
+                .filter((p) => p.id !== urlSessionId)
+                .map((p) => p.name?.trim())
+                .filter(Boolean) as string[],
+            );
+            const candidate = uniqueProjectName(desiredBase, taken);
+            if (candidate && candidate !== currentName) {
+              await updateSessionName(urlSessionId, candidate);
+              setProjectName(candidate);
+              patchCachedSessionName(urlSessionId, candidate);
+            }
+          } catch (err) {
+            console.error("Failed to rename project after generate:", err);
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Failed to generate skill from goals:", err);
+      alert(
+        `Could not generate skill — ${err instanceof Error ? err.message : "unknown error"}`,
+      );
+    } finally {
+      setGeneratingSkillFromGoals(false);
+    }
+  }, [
+    urlSessionId,
+    state.charter.task.skill_body,
+    currentGoalsSig,
+    projectName,
+  ]);
 
   const fetchGoalFeedback = useCallback(
     async (currentGoals: string[]) => {
@@ -716,6 +1127,76 @@ export default function ProjectWorkspace() {
     fetchStorySuggestions(goals, storyGroups);
   }, [goals, storyGroups, fetchStorySuggestions]);
 
+  // "Generate from business goals" — explicit user request to seed user
+  // stories from the current goals. Fetches suggestions AND auto-accepts
+  // the first few into storyGroups so the page actually populates with
+  // stories instead of leaving the work in the right rail.
+  const handleGenerateStoriesFromGoals = useCallback(async () => {
+    const nonEmpty = goals.filter((g) => g.trim());
+    if (nonEmpty.length === 0) return;
+    const existingStories = storyGroups
+      .filter((g) => g.role.trim())
+      .flatMap((g) =>
+        g.stories
+          .filter((s) => s.what.trim())
+          .map((s) => ({ who: g.role, what: s.what, why: s.why })),
+      );
+
+    setStorySuggestionsLoading(true);
+    try {
+      const res = await suggestStories(
+        nonEmpty,
+        existingStories,
+        urlSessionId ?? null,
+      );
+      const fresh = res.suggestions.map((s) => ({
+        who: s.who,
+        what: s.what,
+        why: s.why || "",
+      }));
+
+      // Auto-insert the first three suggestions directly into storyGroups,
+      // grouped by role. The remainder stays in the right-rail SuggestionBox
+      // so the user can still pick from them.
+      const TO_INSERT = 3;
+      const toInsert = fresh.slice(0, TO_INSERT);
+      const remainder = fresh.slice(TO_INSERT);
+
+      setStoryGroups((prev) => {
+        let next = prev;
+        for (const story of toInsert) {
+          const existingIdx = next.findIndex(
+            (g) => g.role.toLowerCase() === story.who.toLowerCase(),
+          );
+          if (existingIdx >= 0) {
+            next = [...next];
+            next[existingIdx] = {
+              ...next[existingIdx],
+              stories: [
+                ...next[existingIdx].stories,
+                { what: story.what, why: story.why },
+              ],
+            };
+          } else {
+            next = [
+              ...next,
+              {
+                role: story.who,
+                stories: [{ what: story.what, why: story.why }],
+              },
+            ];
+          }
+        }
+        return next;
+      });
+      setSuggestedStories(remainder);
+    } catch (err) {
+      console.error("Failed to generate stories from goals:", err);
+    } finally {
+      setStorySuggestionsLoading(false);
+    }
+  }, [goals, storyGroups, urlSessionId]);
+
   const storySuggestionDebounceRef = useRef<number | null>(null);
 
   const handleAcceptStory = useCallback(
@@ -763,11 +1244,14 @@ export default function ProjectWorkspace() {
     setSuggestedStories((prev) => prev.filter((s) => s !== story));
   }, []);
 
-  // When navigating to User Stories, kick off a suggestion round
-  // based on the goals we already have (first visit only).
+  // First-visit auto-fetch of story suggestions from the existing goals.
+  // Fires on the combined Goal tab (where the User Stories section lives)
+  // as well as the legacy standalone "users" tab. Once the user has at
+  // least one goal committed, we get a suggestion batch ready in the rail.
   const storyAutoSuggestedRef = useRef(false);
   useEffect(() => {
-    if (activeTab !== "users") return;
+    if (activeTab !== "users" && activeTab !== "goals") return;
+    if (!autoGenerateSuggestions) return;
     if (storyAutoSuggestedRef.current) return;
     if (storySuggestionsLoading) return;
     if (suggestedStories.length > 0) return;
@@ -782,6 +1266,7 @@ export default function ProjectWorkspace() {
     suggestedStories.length,
     storySuggestionsLoading,
     fetchStorySuggestions,
+    autoGenerateSuggestions,
   ]);
 
   useEffect(() => {
@@ -791,6 +1276,80 @@ export default function ProjectWorkspace() {
       }
     };
   }, []);
+
+  // --- Skill / prompt seed completion ---
+  // Re-hydrates session state, refreshes local goals/story_groups, and renames
+  // the project from the freshly-extracted skill_name when the current name is
+  // still a generic default. Used by both the SkillPanel (Analyze) and the
+  // Goals-page AddSourceBanner (Add skill).
+  const handleSessionSeeded = useCallback(async () => {
+    if (!urlSessionId) return;
+    try {
+      const session = await getSession(urlSessionId);
+      setState(session.state as SessionState);
+      if (session.state.input?.goals) {
+        setGoals([...session.state.input.goals, ""]);
+      }
+      if (session.state.input?.story_groups) {
+        setStoryGroups(session.state.input.story_groups as StoryGroup[]);
+      }
+      // If the user had a fresh generation tracked, Analyze just re-extracted
+      // goals/stories from the same skill body — refresh the signature to the
+      // new shape so the Skill page doesn't immediately show "Regenerate
+      // from goals" for what was, semantically, no upstream change.
+      setGeneratedSkillSig((prev) => {
+        if (prev === null) return prev;
+        const goalsList = (session.state.input?.goals ?? [])
+          .map((g) => g.trim())
+          .filter(Boolean);
+        const storyGroupsList = (
+          (session.state.input?.story_groups ?? []) as StoryGroup[]
+        )
+          .filter((g) => g.role.trim())
+          .map((g) => ({
+            role: g.role.trim(),
+            stories: g.stories
+              .filter((s) => s.what.trim())
+              .map((s) => ({
+                what: s.what.trim(),
+                why: (s.why || "").trim(),
+              })),
+          }));
+        return JSON.stringify({
+          goals: goalsList,
+          story_groups: storyGroupsList,
+        });
+      });
+
+      const desiredBase = session.state.charter?.task?.skill_name?.trim();
+      const currentName = (session as { name?: string }).name?.trim();
+      const isDefault =
+        !currentName ||
+        currentName === "Untitled skill eval" ||
+        currentName === "Untitled project" ||
+        currentName === "Skill eval";
+      if (desiredBase && isDefault) {
+        try {
+          const list = await listSessions();
+          const taken = new Set(
+            list.sessions
+              .filter((p) => p.id !== urlSessionId)
+              .map((p) => p.name?.trim())
+              .filter(Boolean) as string[],
+          );
+          const candidate = uniqueProjectName(desiredBase, taken);
+          if (candidate && candidate !== currentName) {
+            await updateSessionName(urlSessionId, candidate);
+            setProjectName(candidate);
+          }
+        } catch (err) {
+          console.error("Failed to rename project:", err);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to refresh after seed:", err);
+    }
+  }, [urlSessionId]);
 
   // --- Charter phase handlers ---
 
@@ -1311,22 +1870,31 @@ export default function ProjectWorkspace() {
   const runGenerateDataset = useCallback(async () => {
     if (!sessionId) return;
     await ensureCharter();
-    // Use the existing handleGenerateDataset below (defined later in file).
-    // We can't forward-reference a useCallback so inline the work:
+    let ds = dataset;
+    if (!ds) {
+      await createDataset(sessionId);
+      ds = await getDataset(sessionId);
+      setDataset(ds);
+    }
+    let synthError: unknown = null;
     try {
-      let ds = dataset;
-      if (!ds) {
-        await createDataset(sessionId);
-        ds = await getDataset(sessionId);
-        setDataset(ds);
-      }
       await synthesizeExamples(ds.id);
+    } catch (err) {
+      // Synth POST may fail with a network/timeout/proxy error even
+      // when the backend has actually persisted rows. Capture the
+      // error so we still rethrow downstream (the shortcut handler
+      // wants it for telemetry), but DON'T skip the refetch — the
+      // dataset on disk is the source of truth.
+      synthError = err;
+      console.error("Shortcut: generate dataset failed", err);
+    }
+    try {
       const fresh = await getDataset(sessionId);
       setDataset(fresh);
-    } catch (err) {
-      console.error("Shortcut: generate dataset failed", err);
-      throw err;
+    } catch (refreshErr) {
+      console.warn("Failed to refetch dataset after synth:", refreshErr);
     }
+    if (synthError) throw synthError;
   }, [sessionId, dataset, ensureCharter]);
 
   const runGenerateScorers = useCallback(async () => {
@@ -1412,19 +1980,49 @@ export default function ProjectWorkspace() {
     // evaluate tab, which is the natural next step after generation.
     setActiveTab("dataset");
     setGeneratingBoth(true);
+    // Per-artifact flags drive the sidebar spinners so each one stops
+    // independently — without these, the scorers spinner kept spinning
+    // until the dataset finished even when scorers were done well first.
+    if (!datasetFresh) setGeneratingDataset(true);
+    if (!scorersFresh) setGeneratingScorersShortcut(true);
     try {
       // Ensure charter once, then fan out. Skip the ones that are already
       // fresh so users don't regenerate downstream work unnecessarily.
       await ensureCharter();
       const jobs: Promise<void>[] = [];
-      if (!datasetFresh) jobs.push(runGenerateDataset().then(() => { setDatasetStale(false); }));
-      if (!scorersFresh) jobs.push(runGenerateScorers().then(() => { setScorersStale(false); }));
+      if (!datasetFresh) {
+        jobs.push(
+          runGenerateDataset()
+            .then(() => {
+              setDatasetStale(false);
+            })
+            .finally(() => {
+              setGeneratingDataset(false);
+            }),
+        );
+      }
+      if (!scorersFresh) {
+        jobs.push(
+          runGenerateScorers()
+            .then(() => {
+              setScorersStale(false);
+            })
+            .finally(() => {
+              setGeneratingScorersShortcut(false);
+            }),
+        );
+      }
       await Promise.all(jobs);
       setActiveTab("evaluate");
     } catch (err) {
       console.error("Shortcut: generate both failed", err);
     } finally {
+      // Belt-and-braces: clear the umbrella flag and any per-artifact
+      // flags that the inner finallys missed (e.g. ensureCharter threw
+      // before the jobs array got a chance to wire them).
       setGeneratingBoth(false);
+      setGeneratingDataset(false);
+      setGeneratingScorersShortcut(false);
     }
   }, [ensureCharter, runGenerateDataset, runGenerateScorers, dataset, datasetStale, scorers.length, scorersStale]);
 
@@ -1473,12 +2071,51 @@ export default function ProjectWorkspace() {
   const handleUpdateExample = useCallback(
     async (exampleId: string, fields: Partial<Example>) => {
       if (!dataset) return;
+      // Snapshot the pre-update example so we can roll back on failure.
+      // Optimistic update first — the UI reflects the change instantly even
+      // if the PATCH is slow or the backend is unresponsive. The SSE event
+      // (or the awaited response below) overwrites it with the canonical
+      // server version when the round trip completes.
+      const prev = dataset.examples?.find((e) => e.id === exampleId);
+      setDataset((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          examples: current.examples.map((e) =>
+            e.id === exampleId ? { ...e, ...fields } : e,
+          ),
+        };
+      });
       try {
-        await apiUpdateExample(dataset.id, exampleId, fields);
-        const fullDs = await getDataset(dataset.session_id);
-        setDataset(fullDs);
+        const updated = await apiUpdateExample(dataset.id, exampleId, fields);
+        setDataset((current) => {
+          if (!current) return current;
+          return {
+            ...current,
+            examples: current.examples.map((e) =>
+              e.id === exampleId ? updated : e,
+            ),
+          };
+        });
       } catch (err) {
         console.error("Failed to update example:", err);
+        // Roll back to the pre-update row so the UI doesn't lie about a
+        // change that never landed. Surface the error so the user knows
+        // why their click did nothing.
+        if (prev) {
+          setDataset((current) => {
+            if (!current) return current;
+            return {
+              ...current,
+              examples: current.examples.map((e) =>
+                e.id === exampleId ? prev : e,
+              ),
+            };
+          });
+        }
+        alert(
+          `Couldn't save the change — ${err instanceof Error ? err.message : "unknown error"}. The backend may be unresponsive.`,
+        );
       }
     },
     [dataset],
@@ -1487,12 +2124,27 @@ export default function ProjectWorkspace() {
   const handleDeleteExample = useCallback(
     async (exampleId: string) => {
       if (!dataset) return;
+      // Optimistic remove — same pattern as handleUpdateExample. SSE
+      // refresh + the awaited DELETE response are both belt-and-braces.
+      const prevExamples = dataset.examples;
+      setDataset((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          examples: current.examples.filter((e) => e.id !== exampleId),
+        };
+      });
       try {
         await apiDeleteExample(dataset.id, exampleId);
-        const fullDs = await getDataset(dataset.session_id);
-        setDataset(fullDs);
       } catch (err) {
         console.error("Failed to delete example:", err);
+        // Roll back so the row reappears.
+        setDataset((current) =>
+          current ? { ...current, examples: prevExamples } : current,
+        );
+        alert(
+          `Couldn't delete the row — ${err instanceof Error ? err.message : "unknown error"}. The backend may be unresponsive.`,
+        );
       }
     },
     [dataset],
@@ -1751,58 +2403,81 @@ export default function ProjectWorkspace() {
 
   // --- Next-button state per panel ---
 
-  // Goals → User Stories. Same tri-state pattern as the other transitions:
-  //   * no stories yet         → "Generate user stories" (primary)
-  //   * stories exist, goals changed → "Regenerate user stories" (primary)
-  //   * stories exist, no changes    → "Go to user stories" (neutral)
-  // Stories can be agent-extracted from goals, user-authored, or both — but
-  // the CTA unifies on "Generate" for consistency with downstream steps.
-  const hasAnyStories = storyGroups.some(
-    (g) => g.role.trim() && g.stories.some((s) => s.what.trim()),
-  );
-  const goalsNextLabel = !hasAnyStories
-    ? "Generate user stories"
-    : goalsDirty
-      ? "Regenerate user stories"
-      : "Go to user stories";
-  const goalsNextDisabled = nonEmptyGoals.length < 2;
-  // Only "Generate" (no stories yet) gets primary. Regenerate + Go to stay
-  // neutral — re-running is safe + reversible, so we don't visually push it.
-  const goalsNextVariant: "primary" | "neutral" =
-    !goalsNextDisabled && !hasAnyStories ? "primary" : "neutral";
-
-  // User Stories → Charter. Three CTA states:
-  //   * no charter yet           → "Generate charter" (primary)
-  //   * charter exists, dirty    → "Regenerate charter" (primary)
-  //   * charter exists, unchanged → "Go to charter" (neutral)
-  // "Dirty" here means goals OR stories have changed since the charter was
-  // last (re)generated, i.e. the previous steps are ahead of the charter.
-  const upstreamDirty = storiesDirty || goalsDirty;
-  const storiesNextLabel = !hasCharter
-    ? "Generate charter"
-    : upstreamDirty
-      ? "Regenerate charter"
-      : "Go to charter";
-  const storiesHasContent = storyGroups.some(
-    (g) => g.role.trim() && g.stories.some((s) => s.what.trim()),
-  );
-  const storiesNextDisabled = !storiesHasContent || loading;
-  // Same rule as Goals → Stories: primary only on first-time Generate;
-  // Regenerate + Go to are neutral.
-  const storiesNextVariant: "primary" | "neutral" =
-    !storiesNextDisabled && !hasCharter ? "primary" : "neutral";
+  // Goals → User Stories. Two button shapes depending on whether stories
+  // already exist:
+  //   * no stories yet → primary "Generate user stories" + neutral "Add user
+  //     stories" (Add navigates without auto-suggesting).
+  //   * stories exist  → primary "Go to user stories" + neutral "Regenerate
+  //     user stories". Goal-edit dirtiness is irrelevant; the user can pick
+  //     Regenerate explicitly when they want a fresh draft.
+  // Combined Goal page → next phase is now Skill (not Charter). Charter
+  // generation lives on the Skill page. Goals only count once committed
+  // (Enter / Submit) — typing into the trailing draft input does NOT flip
+  // the button to primary.
+  const committedGoalsCount = goals.slice(0, -1).filter((g) => g.trim()).length;
+  // Without a skill body the next-phase action is "Generate" — same target
+  // tab, but the verb signals there's still a missing artifact upstream of
+  // the charter. Once a skill exists we drop back to "Go to" navigation.
+  const goalNextLabel = isPromptEval
+    ? skillReady
+      ? "Go to prompt"
+      : "Generate prompt"
+    : skillReady
+      ? "Go to skill"
+      : "Generate skill";
+  const goalNextDisabled = committedGoalsCount < 1 || loading;
+  const goalNextVariant: "primary" | "neutral" =
+    !goalNextDisabled ? "primary" : "neutral";
 
   return (
     <div className="h-full flex flex-col bg-bg-default text-fg-contrast">
       {/* Top bar */}
       <header className="h-16 flex items-center justify-between px-4 flex-shrink-0 border-b border-border-hint">
-        <IconButton
-          tone="contrast"
-          onClick={() => navigate("/")}
-          title="All projects"
-        >
-          <StarIcon />
-        </IconButton>
+        <div className="flex items-center gap-4 min-w-0">
+          <IconButton
+            tone="contrast"
+            onClick={() => navigate("/")}
+            title="All projects"
+          >
+            <StarIcon />
+          </IconButton>
+          {/* Inline project title — editable in place. Lives here so users
+              can rename without scrolling the sidebar, and stays visible on
+              every tab. */}
+          <div className="flex items-center gap-2 min-w-0">
+            {editingName ? (
+              <input
+                ref={nameInputRef}
+                type="text"
+                value={projectName}
+                onChange={(e) => setProjectName(e.target.value)}
+                onBlur={saveName}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") saveName();
+                }}
+                className="text-sm font-medium text-fg-contrast bg-transparent border-b border-border-primary outline-none min-w-0"
+              />
+            ) : (
+              <button
+                onClick={startEditingName}
+                className="text-sm font-medium text-fg-contrast hover:text-fg-primary truncate min-w-0 text-left transition-colors"
+                title="Click to rename"
+              >
+                {projectName}
+              </button>
+            )}
+            {!hasCharter && (
+              <span className="font-mono text-xs text-fg-dim bg-fill-neutral px-1.5 py-0.5 flex-shrink-0">
+                Draft
+              </span>
+            )}
+            {isPromptEval && (
+              <span className="font-mono text-xs text-fg-dim bg-fill-neutral px-1.5 py-0.5 flex-shrink-0">
+                prompt
+              </span>
+            )}
+          </div>
+        </div>
         <div className="flex items-center gap-3">
           {role === "owner" && sessionId && (
             <Button
@@ -1847,87 +2522,55 @@ export default function ProjectWorkspace() {
       <div className="flex-1 flex min-h-0 gap-6">
         {/* Left sidebar */}
         <nav className="w-56 flex-shrink-0 px-4 py-6 overflow-y-auto border-r border-border-hint">
-          {/* Project header */}
-          <div className="flex items-center gap-2 mb-6 px-2">
-            {editingName ? (
-              <input
-                ref={nameInputRef}
-                type="text"
-                value={projectName}
-                onChange={(e) => setProjectName(e.target.value)}
-                onBlur={saveName}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") saveName();
-                }}
-                className="text-sm font-medium text-fg-contrast bg-transparent border-b border-border-primary outline-none min-w-0 flex-1"
-              />
-            ) : (
-              <button
-                onClick={startEditingName}
-                className="text-sm font-medium text-fg-contrast hover:text-fg-primary truncate min-w-0 text-left transition-colors"
-                title="Click to rename"
-              >
-                {projectName}
-              </button>
-            )}
-            {!hasCharter && (
-              <span className="font-mono text-xs text-fg-dim bg-fill-neutral px-1.5 py-0.5 flex-shrink-0">
-                Draft
-              </span>
-            )}
-          </div>
-
-          {/* Nav groups */}
-          {(state.eval_mode === "triggered" || state.charter.task.skill_body) && (
-            <SidebarGroup hideTopDivider>
-              <SidebarItem
-                label={isPromptEval ? "Prompt" : "Skill"}
-                icon={<GoalsIcon width={24} height={24} />}
-                active={activeTab === "skill"}
-                onClick={() => setActiveTab("skill")}
-              />
-            </SidebarGroup>
-          )}
-
-          <SidebarGroup
-            hideTopDivider={
-              !(state.eval_mode === "triggered" || state.charter.task.skill_body)
-            }
-          >
+          {/* Nav groups — entry order: Goal → Skill/Prompt → Charter. */}
+          <SidebarGroup hideTopDivider>
             <SidebarItem
-              label="Business Goals"
+              label="Goal"
               icon={<GoalsIcon width={24} height={24} />}
-              active={activeTab === "goals"}
+              active={activeTab === "goals" || activeTab === "users"}
               onClick={() => setActiveTab("goals")}
-              disabled={!skillReady}
+              disabled={!usersAvailable}
+              disabledReason="Goal is the entry tab — it should always be available."
               badge={
-                nonEmptyGoals.length > 0 ? `${nonEmptyGoals.length}` : undefined
+                totalStoryCount > 0
+                  ? `${nonEmptyGoals.length}/${totalStoryCount}`
+                  : nonEmptyGoals.length > 0
+                    ? `${nonEmptyGoals.length}`
+                    : undefined
               }
             />
             <SidebarItem
-              label="User Stories"
-              icon={<UsersIcon width={24} height={24} />}
-              active={activeTab === "users"}
-              onClick={() => setActiveTab("users")}
-              disabled={!usersAvailable}
-              badge={totalStoryCount > 0 ? `${totalStoryCount}` : undefined}
+              label={isPromptEval ? "Prompt" : "Skill"}
+              icon={<SkillIcon width={24} height={24} />}
+              active={activeTab === "skill"}
+              onClick={() => setActiveTab("skill")}
             />
-          </SidebarGroup>
-
-          <SidebarGroup>
             <SidebarItem
               label="Charter"
               icon={<CharterIcon width={24} height={24} />}
               active={activeTab === "charter"}
               onClick={() => setActiveTab("charter")}
               disabled={!charterAvailable}
+              loading={loading && !hasCharter}
+              disabledReason="Charter generates after you submit your goals and user stories."
             />
+          </SidebarGroup>
+
+          <SidebarGroup>
             <SidebarItem
               label="Dataset"
               icon={<DatasetIcon width={24} height={24} />}
               active={activeTab === "dataset"}
               onClick={() => setActiveTab("dataset")}
               disabled={!datasetAvailable}
+              loading={generatingDataset}
+              disabledReason={
+                !skillReady
+                  ? `Add a ${isPromptEval ? "prompt" : "skill"} first — the dataset evaluates against it.`
+                  : !hasCharter
+                    ? "Generate the charter first; the dataset is built from its criteria."
+                    : undefined
+              }
             />
             <SidebarItem
               label="Scorers"
@@ -1935,6 +2578,14 @@ export default function ProjectWorkspace() {
               active={activeTab === "scorers"}
               onClick={() => setActiveTab("scorers")}
               disabled={!scorersAvailable}
+              loading={generatingScorersShortcut}
+              disabledReason={
+                !skillReady
+                  ? `Add a ${isPromptEval ? "prompt" : "skill"} first — scorers grade its output.`
+                  : !hasCharter
+                    ? "Generate the charter first; scorers map to its criteria."
+                    : undefined
+              }
             />
           </SidebarGroup>
 
@@ -1945,6 +2596,13 @@ export default function ProjectWorkspace() {
               active={activeTab === "evaluate"}
               onClick={() => setActiveTab("evaluate")}
               disabled={!evaluateAvailable}
+              disabledReason={
+                !skillReady
+                  ? `Add a ${isPromptEval ? "prompt" : "skill"} to run evaluations against.`
+                  : !dataset
+                    ? "Generate the dataset first."
+                    : undefined
+              }
             />
           </SidebarGroup>
         </nav>
@@ -1981,97 +2639,111 @@ export default function ProjectWorkspace() {
                 const s = await getSession(urlSessionId);
                 setState(s.state as SessionState);
               }}
+              onBeforeAnalyze={() => {
+                // Snap the user to the Charter tab the moment they click
+                // "Generate charter" so the spinner shows up there
+                // instead of the Skill page sitting silent during the
+                // ~10s seed call. Flip loading too so the overlay
+                // renders without waiting for handleSubmitIntake.
+                setActiveTab("charter");
+                setLoading(true);
+              }}
               onSeeded={async () => {
-                // Re-hydrate session state so extracted goals/users/stories
-                // show up and downstream tabs unlock. Rename the project to
-                // the skill name if it's still the default. Then jump to
-                // Goals so the user's next action is reviewing extractions.
-                if (!urlSessionId) return;
-                try {
-                  const session = await getSession(urlSessionId);
-                  setState(session.state as SessionState);
-                  if (session.state.input?.goals) {
-                    setGoals([...session.state.input.goals, ""]);
-                  }
-                  if (session.state.input?.story_groups) {
-                    setStoryGroups(session.state.input.story_groups as StoryGroup[]);
-                  }
-
-                  // Rename: take skill name (if any), dedupe against other
-                  // projects with a " N" suffix, only touch generic defaults
-                  // so we don't clobber a name the user typed themselves.
-                  const desiredBase =
-                    session.state.charter?.task?.skill_name?.trim();
-                  const currentName = (session as { name?: string }).name?.trim();
-                  const isDefault =
-                    !currentName ||
-                    currentName === "Untitled skill eval" ||
-                    currentName === "Untitled project" ||
-                    currentName === "Skill eval";
-                  if (desiredBase && isDefault) {
-                    try {
-                      const list = await listSessions();
-                      const taken = new Set(
-                        list.sessions
-                          .filter((p) => p.id !== urlSessionId)
-                          .map((p) => p.name?.trim())
-                          .filter(Boolean) as string[],
-                      );
-                      const candidate = uniqueProjectName(desiredBase, taken);
-                      if (candidate && candidate !== currentName) {
-                        await updateSessionName(urlSessionId, candidate);
-                        setProjectName(candidate);
-                      }
-                    } catch (err) {
-                      console.error("Failed to rename project:", err);
-                    }
-                  }
-
-                  setActiveTab("goals");
-                } catch (err) {
-                  console.error("Failed to refresh after seed:", err);
+                // Re-hydrate session state so the freshly-extracted
+                // goals/users/stories land in local state, then push
+                // straight into charter generation. The "Generate
+                // charter" CTA on the Skill page should land the user
+                // on a fresh charter, not bounce them through Goals.
+                await handleSessionSeeded();
+                handleSubmitIntake();
+              }}
+              onNext={() => {
+                // Post-seed primary CTA — user clicks "Generate charter"
+                // / "Regenerate charter" again. Confirms before
+                // overwriting an existing charter, then jumps to
+                // Charter immediately (so the spinner is visible there)
+                // and re-runs the intake pass.
+                if (hasCharter) {
+                  const ok = window.confirm(
+                    "Regenerate the charter?\n\nThis replaces the current criteria, alignment entries, and rot signals with a fresh draft built from your goals and stories.",
+                  );
+                  if (!ok) return;
                 }
+                setActiveTab("charter");
+                setLoading(true);
+                handleSubmitIntake();
               }}
-              onStartFromScratch={() => {
-                // SkillPanel has already flipped the session to standard mode.
-                // Reflect locally + jump to Goals so the old flow takes over.
-                setState((prev) => ({ ...prev, eval_mode: "standard" }));
-                setActiveTab("goals");
-              }}
-              onNext={() => setActiveTab("goals")}
               canEdit={canEdit}
+              hasCharter={hasCharter}
+              hasGoals={nonEmptyGoals.length > 0}
+              skillSuggestions={skillSuggestions}
+              skillSuggestionsLoading={skillSuggestionsLoading}
+              onRefreshSkillSuggestions={fetchSkillSuggestions}
+              onAcceptSkillSuggestion={handleAcceptSkillSuggestion}
+              onDismissSkillSuggestion={handleDismissSkillSuggestion}
+              onGenerateFromGoals={
+                skillFromGoalsFresh ? undefined : handleGenerateSkillFromGoals
+              }
+              generatingFromGoals={generatingSkillFromGoals}
+              regenerateFromGoals={skillFromGoalsStale}
+              autoGenerateSuggestions={autoGenerateSuggestions}
             />
           )}
 
-          {activeTab === "goals" && (
-            <>
-          <GoalsPanel
-              goals={goals}
-              onGoalsChange={handleGoalsChange}
-              onGoalCommit={handleGoalCommit}
+          {(activeTab === "goals" || activeTab === "users") && (
+            <UsersPanel
+              embedded
+              autoGenerateSuggestions={autoGenerateSuggestions}
+              hasGoals={nonEmptyGoals.length > 0}
+              onGenerateFromGoals={handleGenerateStoriesFromGoals}
               goalSuggestions={goalSuggestions}
+              goalSuggestionsLoading={goalSuggestionsLoading}
               onAcceptGoalSuggestion={handleAcceptGoalSuggestion}
               onDismissGoalSuggestion={handleDismissGoalSuggestion}
-              suggestionsLoading={goalSuggestionsLoading}
-              goalFeedback={goalFeedback}
-              goalFeedbackLoading={goalFeedbackLoading}
-              onNext={() => {
-                setGoalsDirty(false);
-                setActiveTab("users");
-              }}
-              nextLabel={goalsNextLabel}
-              nextVariant={goalsNextVariant}
-              nextDisabled={goalsNextDisabled}
-              rightBottom={showAssistant ? undefined : aiAssistButton}
-              rightBottomExpanded={showAssistant ? polarisPanel : undefined}
-              canEdit={canEdit}
-            />
-            </>
-          )}
-
-          {activeTab === "users" && (
-            <>
-            <UsersPanel
+              onRefreshGoalSuggestions={handleGoalCommit}
+              topBanner={
+                canEdit &&
+                urlSessionId &&
+                !state.charter.task.skill_body &&
+                !isPromptEval ? (
+                  <AddSourceBanner
+                    sessionId={urlSessionId}
+                    onSeeded={handleSessionSeeded}
+                    onPromptCreated={(newSessionId) => {
+                      navigate(`/project/${newSessionId}?tab=goals`);
+                    }}
+                  />
+                ) : undefined
+              }
+              preBody={
+                <>
+                  <GoalsPanel
+                    embedded
+                    goals={goals}
+                    onGoalsChange={handleGoalsChange}
+                    onGoalCommit={handleGoalCommit}
+                    goalSuggestions={goalSuggestions}
+                    onAcceptGoalSuggestion={handleAcceptGoalSuggestion}
+                    onDismissGoalSuggestion={handleDismissGoalSuggestion}
+                    suggestionsLoading={goalSuggestionsLoading}
+                    goalFeedback={goalFeedback}
+                    goalFeedbackLoading={goalFeedbackLoading}
+                    // Embedded → footer/right not rendered, but the prop is
+                    // required. Wire to the combined-page primary so the
+                    // values stay coherent with what the parent shows.
+                    onNext={() => {
+                      if (!skillReady && !isPromptEval) {
+                        void handleGenerateSkillFromGoals();
+                      }
+                      setActiveTab("skill");
+                    }}
+                    nextLabel={goalNextLabel}
+                    nextVariant={goalNextVariant}
+                    nextDisabled={goalNextDisabled}
+                    canEdit={canEdit}
+                  />
+                </>
+              }
               storyGroups={storyGroups}
               onStoryGroupsChange={(groups) => {
                 setStoryGroups(groups);
@@ -2083,33 +2755,26 @@ export default function ProjectWorkspace() {
               onDismissStory={handleDismissStory}
               storySuggestionsLoading={storySuggestionsLoading}
               onNext={() => {
+                // Primary CTA on the combined Goal page. Always navigates to
+                // the Skill tab. When no skill exists yet (and we're not a
+                // prompt-eval, which has a synthetic body), also kick off the
+                // backend pass that drafts a SKILL.md from goals + stories so
+                // the Skill page fills in once generation completes.
+                setGoalsDirty(false);
                 setStoriesDirty(false);
-                // "Go to charter" skips regeneration when nothing upstream
-                // changed. Otherwise generate/regenerate then navigate — the
-                // submit handler already switches tabs on success.
-                if (hasCharter && !upstreamDirty) {
-                  setActiveTab("charter");
-                  return;
+                if (!skillReady && !isPromptEval) {
+                  void handleGenerateSkillFromGoals();
                 }
-                if (hasCharter && upstreamDirty) {
-                  // Confirm before overwriting an existing charter — user
-                  // edits to criteria, alignment entries, etc. will be lost.
-                  const ok = window.confirm(
-                    "Regenerate the charter?\n\nThis replaces the current criteria, alignment entries, and rot signals with a fresh draft built from your goals and stories.",
-                  );
-                  if (!ok) return;
-                }
-                handleSubmitIntake();
+                setActiveTab("skill");
               }}
-              nextLabel={storiesNextLabel}
-              nextVariant={storiesNextVariant}
-              nextDisabled={storiesNextDisabled}
+              nextLabel={goalNextLabel}
+              nextVariant={goalNextVariant}
+              nextDisabled={goalNextDisabled}
               loading={loading}
               rightBottom={showAssistant ? undefined : aiAssistButton}
               rightBottomExpanded={showAssistant ? polarisPanel : undefined}
               canEdit={canEdit}
             />
-            </>
           )}
 
           {activeTab === "charter" && (
@@ -2149,6 +2814,27 @@ export default function ProjectWorkspace() {
                 scorers.length === 0 ? "missing" : scorersStale ? "stale" : "fresh"
               }
               canEdit={canEdit}
+              skillReady={skillReady}
+              isPromptEval={isPromptEval}
+              onGenerateSkill={() => {
+                // Mirror the Goal-page CTA: navigate to Skill and, when
+                // there's no skill yet, kick off generation in flight so the
+                // textarea fills in once the LLM call completes.
+                if (!skillReady && !isPromptEval) {
+                  void handleGenerateSkillFromGoals();
+                }
+                setActiveTab("skill");
+              }}
+              hasCharter={hasCharter}
+              onGenerateCharter={() => {
+                // User landed on an empty Charter page directly (e.g. via
+                // sidebar after the skill was generated) — let them kick
+                // off the intake pass right here. Same handler as the
+                // Skill page CTA; loading is already reflected by the
+                // panel's own overlay.
+                setLoading(true);
+                handleSubmitIntake();
+              }}
             />
             </>
           )}
@@ -2480,6 +3166,8 @@ function SidebarItem({
   disabled,
   badge,
   icon,
+  loading,
+  disabledReason,
 }: {
   label: string;
   active: boolean;
@@ -2487,11 +3175,17 @@ function SidebarItem({
   disabled?: boolean;
   badge?: string;
   icon?: React.ReactNode;
+  /** When true, render a spinner in the trailing slot (e.g. while the
+   *  artifact behind this nav item is being generated). */
+  loading?: boolean;
+  /** When this item is disabled, surfaced as a hover tooltip explaining why. */
+  disabledReason?: string;
 }) {
   return (
     <button
       onClick={onClick}
       disabled={disabled}
+      title={disabled ? disabledReason : undefined}
       className={`flex gap-2.5 items-center justify-between px-2 py-2 text-base text-left transition-colors ${
         active
           ? "bg-fill-primary/10 text-fg-primary font-bold [&_svg]:text-fg-primary"
@@ -2502,7 +3196,10 @@ function SidebarItem({
     >
       {icon ?? <StarIcon />}
       <span className="truncate w-full">{label}</span>
-      {badge && (
+      {loading && (
+        <Loader2 className="w-4 h-4 text-fg-dim animate-spin flex-shrink-0" />
+      )}
+      {!loading && badge && (
         <span
           className={`font-mono text-[10px] px-1.5 py-0.5 ml-2 ${
             active ? "bg-fill-primary/20 text-fg-primary" : "bg-fill-neutral text-fg-dim"

@@ -623,6 +623,63 @@ class SuggestStoriesResponse(BaseModel):
     suggestions: list[dict] = Field(default_factory=list)  # each dict has who, what, why
 
 
+class SuggestSkillRequest(BaseModel):
+    """Ask the agent for skill-content ideas given goals + stories.
+
+    Powers the right-rail SuggestionBox on the Skill tab. The current draft
+    body is included so we can de-dup against rules already present and
+    avoid suggesting things the user has clearly already covered.
+    """
+    goals: list[str]
+    stories: list[dict] = Field(default_factory=list)  # each dict has who, what, why
+    current_body: Optional[str] = None
+    session_id: Optional[str] = None
+
+
+class SkillSuggestion(BaseModel):
+    """One skill-content idea, with an optional pointer to where in the
+    SKILL.md it should land. ``where`` is freeform — typically a section
+    name like "Output format" or "Behaviors / rules" — and renders as a
+    small label next to the suggestion text in the right rail."""
+    summary: str
+    where: Optional[str] = None
+
+
+class SuggestSkillResponse(BaseModel):
+    suggestions: list[SkillSuggestion] = Field(default_factory=list)
+
+
+class GenerateSkillFromGoalsRequest(BaseModel):
+    """Generate a full SKILL.md body from goals + stories.
+
+    Distinct from SuggestSkill which returns short bullet hints. This
+    endpoint returns a ready-to-paste SKILL.md draft (with frontmatter)
+    that the user can then refine inline. session_id is required because
+    we read the goals/stories from the persisted session to keep the
+    request payload small.
+    """
+    session_id: str
+
+
+class GenerateSkillFromGoalsResponse(BaseModel):
+    body: str
+    name: Optional[str] = None
+    description: Optional[str] = None
+
+
+class ScorerIdea(BaseModel):
+    """One scorer idea — short pitch, no code. The user can click to
+    promote into a real scorer (we don't auto-create code for it yet)."""
+    summary: str
+    # Optional dimension hint (coverage / alignment / balance / rot / safety).
+    # Free-form so the model can suggest a new dimension if it wants.
+    type: Optional[str] = None
+
+
+class SuggestScorerIdeasResponse(BaseModel):
+    suggestions: list[ScorerIdea] = Field(default_factory=list)
+
+
 class SuggestRevisionsRequest(BaseModel):
     example_ids: list[str] = Field(default_factory=list)
 

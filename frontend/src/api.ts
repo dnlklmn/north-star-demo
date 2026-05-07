@@ -750,6 +750,79 @@ export async function suggestStories(
   return res.json()
 }
 
+export async function generateSkillFromGoals(
+  sessionId: string,
+): Promise<{ body: string; name: string | null; description: string | null }> {
+  const res = await apiFetch(
+    `${BASE}/sessions/${sessionId}/generate-skill-from-goals`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
+    },
+  )
+  if (!res.ok) {
+    let detail = `Failed to generate skill (${res.status})`
+    try {
+      const j = await res.json()
+      if (j?.detail) detail = j.detail
+    } catch { /* not JSON */ }
+    throw new Error(detail)
+  }
+  return res.json()
+}
+
+export interface SkillSuggestion {
+  summary: string
+  where: string | null
+}
+
+export interface ScorerIdea {
+  summary: string
+  type: string | null
+}
+
+export async function suggestScorerIdeas(
+  sessionId: string,
+): Promise<{ suggestions: ScorerIdea[] }> {
+  const res = await apiFetch(
+    `${BASE}/sessions/${sessionId}/suggest-scorer-ideas`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    },
+  )
+  if (!res.ok) {
+    let detail = `Failed to suggest scorer ideas (${res.status})`
+    try {
+      const j = await res.json()
+      if (j?.detail) detail = j.detail
+    } catch { /* not JSON */ }
+    throw new Error(detail)
+  }
+  return res.json()
+}
+
+export async function suggestSkill(
+  goals: string[],
+  stories: Array<{ who: string; what: string; why: string }>,
+  currentBody: string | null,
+  sessionId?: string | null,
+): Promise<{ suggestions: SkillSuggestion[] }> {
+  const res = await apiFetch(`${BASE}/suggest-skill`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      goals,
+      stories,
+      current_body: currentBody ?? null,
+      session_id: sessionId ?? null,
+    }),
+  })
+  if (!res.ok) throw new Error(`Failed to suggest skill: ${res.status}`)
+  return res.json()
+}
+
 export async function finalizeCharter(
   sessionId: string
 ): Promise<{ charter_id: string; session_id: string; charter: Charter }> {
@@ -809,13 +882,28 @@ export async function updateExample(
   exampleId: string,
   fields: Partial<Example>
 ): Promise<Example> {
-  const res = await apiFetch(`${BASE}/datasets/${datasetId}/examples/${exampleId}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(fields),
-  })
-  if (!res.ok) throw new Error(`Failed to update example: ${res.status}`)
-  return res.json()
+  // Hard timeout — without this an unresponsive backend leaves the user
+  // staring at a spinner forever. 15s is generous for a single PATCH;
+  // anything slower is a hung process or a stuck connection pool.
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 15000)
+  try {
+    const res = await apiFetch(`${BASE}/datasets/${datasetId}/examples/${exampleId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(fields),
+      signal: controller.signal,
+    })
+    if (!res.ok) throw new Error(`Failed to update example: ${res.status}`)
+    return res.json()
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error('Request timed out (15s). Backend may be unresponsive — try restarting.')
+    }
+    throw err
+  } finally {
+    clearTimeout(timeout)
+  }
 }
 
 export async function addExample(

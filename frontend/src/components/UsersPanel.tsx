@@ -1,6 +1,6 @@
 import { useRef, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
 import { ReturnKeyIcon, CmdReturnIcon } from "./ui/Icons";
 import type { StoryGroup, SuggestedStory } from "../types";
 import PanelLayout from "./PanelLayout";
@@ -22,6 +22,10 @@ interface Props {
   nextLabel: string;
   nextVariant: "primary" | "neutral";
   nextDisabled: boolean;
+  /** Secondary CTA shown next to the primary button. Hidden when not provided. */
+  secondaryLabel?: string;
+  onSecondary?: () => void;
+  secondaryDisabled?: boolean;
   loading: boolean;
   /** Rendered in the right sidebar bottom slot (e.g. AI Assist) */
   rightBottom?: ReactNode;
@@ -30,6 +34,35 @@ interface Props {
   /** Read-only when false: suggestions, footer CTA, and inputs all disabled.
    *  Defaults to true. */
   canEdit?: boolean;
+  /** Embed mode: re-titles the panel "Goals" and renders preBody (typically
+   *  GoalsPanel in embedded mode) above the user-stories content, so a single
+   *  PanelLayout owns the combined Goals + User Stories page. */
+  embedded?: boolean;
+  /** Content rendered above the user-stories body, inside the same
+   *  PanelLayout. Used to host an embedded GoalsPanel on the combined tab. */
+  preBody?: React.ReactNode;
+  /** Banner rendered above the page title (forwarded to PanelLayout). */
+  topBanner?: ReactNode;
+  /** When false, the right-rail Suggestion boxes swap their refresh icon
+   *  for an explicit "Get suggestions" button so the user has a clear
+   *  affordance to fetch on demand. */
+  autoGenerateSuggestions?: boolean;
+  /** Whether at least one non-empty business goal exists. Drives the
+   *  "Generate from business goals" button state in embedded mode. */
+  hasGoals?: boolean;
+  /** Click handler for the "Generate from business goals" button.
+   *  Distinct from onStoryCommit — the latter fires on each typed story
+   *  for incremental suggestions, this one runs an explicit pass that
+   *  seeds storyGroups directly. */
+  onGenerateFromGoals?: () => void | Promise<void>;
+  /** Goal-suggestion props — surfaced in the right rail above the
+   *  story-suggestion box when this panel is hosting the combined Goal
+   *  page (embedded mode). Ignored when embedded is false. */
+  goalSuggestions?: string[];
+  goalSuggestionsLoading?: boolean;
+  onAcceptGoalSuggestion?: (suggestion: string) => void;
+  onDismissGoalSuggestion?: (suggestion: string) => void;
+  onRefreshGoalSuggestions?: () => void;
 }
 
 export default function UsersPanel({
@@ -48,6 +81,20 @@ export default function UsersPanel({
   rightBottom,
   rightBottomExpanded,
   canEdit = true,
+  secondaryLabel,
+  onSecondary,
+  secondaryDisabled,
+  embedded = false,
+  preBody,
+  hasGoals = false,
+  onGenerateFromGoals,
+  goalSuggestions = [],
+  goalSuggestionsLoading = false,
+  onAcceptGoalSuggestion,
+  onDismissGoalSuggestion,
+  onRefreshGoalSuggestions,
+  topBanner,
+  autoGenerateSuggestions = true,
 }: Props) {
   // Track which roles have been committed (Enter pressed)
   const [committedRoles, setCommittedRoles] = useState<Set<number>>(new Set());
@@ -426,63 +473,157 @@ export default function UsersPanel({
 
   return (
     <PanelLayout
-      title="User Stories"
-      subtitle="Define your users and what they do"
+      title={embedded ? "Goal" : "User Stories"}
+      subtitle={
+        embedded
+          ? "Define your business goals and the user stories they enable."
+          : "Define your users and what they do"
+      }
+      topBanner={topBanner}
       rightBottom={rightBottom}
       rightBottomExpanded={rightBottomExpanded}
       right={
         canEdit ? (
-        <SuggestionBox
-          onRefresh={hasStories ? onStoryCommit : undefined}
-          loading={storySuggestionsLoading}
-          emptyText={
-            hasStories
-              ? "Press Enter after a story to get suggestions"
-              : "Enter a business goal to see suggestions."
-          }
-        >
-          {suggestedStories.length > 0
-            ? suggestedStories.map((story, i) => (
-                <SuggestionCard
-                  key={i}
-                  onAccept={() => onAcceptStory(story)}
-                  onDismiss={() => onDismissStory(story)}
-                >
-                  <div className="flex flex-col gap-2">
-                    <span className="self-start bg-gray-150 text-fg-contrast text-base leading-[1.5] px-1">
-                      {story.who}
-                    </span>
-                    <div>
-                      <p className="text-base text-fg-contrast leading-[1.5]">
-                        {story.what}
-                      </p>
-                      {story.why && (
-                        <p className="text-base text-fg-dim leading-[1.5]">
-                          {story.why}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                </SuggestionCard>
-              ))
-            : null}
-        </SuggestionBox>
+          <div className="flex flex-col gap-8">
+            {/* Goal suggestions — only shown in embedded mode (combined Goal
+                page hosts both this and the User Stories editor). The
+                standalone Stories tab leaves goals to the dedicated Goals
+                tab and skips the box. */}
+            {embedded && (
+              <SuggestionBox
+                label="Goal suggestions"
+                onRefresh={hasGoals ? onRefreshGoalSuggestions : undefined}
+                loading={goalSuggestionsLoading}
+                emptyText={
+                  hasGoals && !autoGenerateSuggestions
+                    ? "Auto-generate is off — click below to fetch suggestions."
+                    : "Enter a business goal to see suggestions."
+                }
+                showGetButton={hasGoals && !autoGenerateSuggestions}
+                getButtonLabel="Get goal suggestions"
+              >
+                {goalSuggestions.length > 0
+                  ? goalSuggestions.map((suggestion, i) => (
+                      <SuggestionCard
+                        key={i}
+                        onAccept={() =>
+                          onAcceptGoalSuggestion?.(suggestion)
+                        }
+                        onDismiss={() =>
+                          onDismissGoalSuggestion?.(suggestion)
+                        }
+                      >
+                        {suggestion}
+                      </SuggestionCard>
+                    ))
+                  : null}
+              </SuggestionBox>
+            )}
+            <SuggestionBox
+              label={embedded ? "Story suggestions" : "Suggestions"}
+              onRefresh={
+                hasStories || hasGoals ? onStoryCommit : undefined
+              }
+              loading={storySuggestionsLoading}
+              emptyText={
+                hasGoals
+                  ? hasStories
+                    ? autoGenerateSuggestions
+                      ? "Press Enter after a story to get suggestions."
+                      : "Auto-generate is off — click below to fetch suggestions."
+                    : autoGenerateSuggestions
+                      ? "Press refresh to suggest stories from your goals."
+                      : "Auto-generate is off — click below to fetch suggestions."
+                  : "Enter a business goal to see suggestions."
+              }
+              showGetButton={
+                (hasGoals || hasStories) && !autoGenerateSuggestions
+              }
+              getButtonLabel="Get story suggestions"
+            >
+              {suggestedStories.length > 0
+                ? suggestedStories.map((story, i) => (
+                    <SuggestionCard
+                      key={i}
+                      onAccept={() => onAcceptStory(story)}
+                      onDismiss={() => onDismissStory(story)}
+                    >
+                      <div className="flex flex-col gap-2">
+                        <span className="self-start bg-gray-150 text-fg-contrast text-base leading-[1.5] px-1">
+                          {story.who}
+                        </span>
+                        <div>
+                          <p className="text-base text-fg-contrast leading-[1.5]">
+                            {story.what}
+                          </p>
+                          {story.why && (
+                            <p className="text-base text-fg-dim leading-[1.5]">
+                              {story.why}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    </SuggestionCard>
+                  ))
+                : null}
+            </SuggestionBox>
+          </div>
         ) : undefined
       }
       footer={
         canEdit ? (
-          <Button
-            size="big"
-            variant={nextVariant}
-            shortcut={<CmdReturnIcon />}
-            onClick={onNext}
-            disabled={nextDisabled}
-          >
-            {loading ? "Generating..." : nextLabel}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              size="big"
+              variant={nextVariant}
+              shortcut={<CmdReturnIcon />}
+              onClick={onNext}
+              disabled={nextDisabled}
+            >
+              {loading ? "Generating..." : nextLabel}
+            </Button>
+            {secondaryLabel && onSecondary && (
+              <Button
+                size="big"
+                variant="neutral"
+                onClick={onSecondary}
+                disabled={secondaryDisabled || loading}
+              >
+                {secondaryLabel}
+              </Button>
+            )}
+          </div>
         ) : undefined
       }
     >
+      {preBody}
+      {preBody && (
+        <hr className="my-12 border-border-hint" />
+      )}
+      {embedded && (
+        <div className="flex items-center justify-between mb-6">
+          <h3 className="text-lg font-medium text-fg-contrast">
+            User stories
+          </h3>
+          {canEdit && (
+            <Button
+              size="small"
+              variant="neutral"
+              onClick={() =>
+                onGenerateFromGoals
+                  ? onGenerateFromGoals()
+                  : onStoryCommit()
+              }
+              disabled={!hasGoals || storySuggestionsLoading}
+            >
+              {storySuggestionsLoading ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : null}
+              Generate from business goals
+            </Button>
+          )}
+        </div>
+      )}
       {/* Read-only mode: a top-level disabled fieldset disables every native
           input/button beneath it. Visual cursor stays default. We deliberately
           don't add a 'disabled' style — viewers should still see the content

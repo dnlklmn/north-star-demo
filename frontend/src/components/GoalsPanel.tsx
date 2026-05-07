@@ -28,6 +28,12 @@ interface Props {
   nextLabel: string;
   nextVariant: "primary" | "neutral";
   nextDisabled: boolean;
+  /** Secondary CTA shown next to the primary "Generate" button (e.g. "Add user
+   *  stories" — navigates to stories without auto-generating). Hidden when
+   *  not provided. */
+  secondaryLabel?: string;
+  onSecondary?: () => void;
+  secondaryDisabled?: boolean;
   /** Rendered in the right sidebar bottom slot (e.g. AI Assist) */
   rightBottom?: ReactNode;
   /** When set, expands bottom section to fill and caps Suggestions height. */
@@ -35,6 +41,13 @@ interface Props {
   /** Read-only when false: compose row, suggestions, edit/delete affordances,
    *  and the footer CTA all hide. Defaults to true. */
   canEdit?: boolean;
+  /** Optional banner rendered above the compose row (e.g. "Add skill / prompt"). */
+  banner?: ReactNode;
+  /** Embed mode: skip the PanelLayout wrapper and render only the body
+   *  content. Used when this panel is composed inside a larger combined
+   *  page (e.g. the Goals + Stories tab). When embedded, the parent owns
+   *  the title, footer, and right rail. */
+  embedded?: boolean;
 }
 
 export default function GoalsPanel({
@@ -53,6 +66,11 @@ export default function GoalsPanel({
   rightBottom,
   rightBottomExpanded,
   canEdit = true,
+  banner,
+  secondaryLabel,
+  onSecondary,
+  secondaryDisabled,
+  embedded = false,
 }: Props) {
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
   const focusIndexRef = useRef<number | null>(null);
@@ -196,47 +214,10 @@ export default function GoalsPanel({
     setDragOverIndex(null);
   };
 
-  return (
-    <PanelLayout
-      title="Business Goals"
-      subtitle="List and prioritize your business goals"
-      rightBottom={rightBottom}
-      rightBottomExpanded={rightBottomExpanded}
-      right={
-        canEdit ? (
-          <SuggestionBox
-            onRefresh={nonEmptyGoals.length > 0 ? onGoalCommit : undefined}
-            loading={suggestionsLoading}
-            emptyText="Enter a business goal to see suggestions."
-          >
-            {goalSuggestions.length > 0
-              ? goalSuggestions.map((suggestion, i) => (
-                  <SuggestionCard
-                    key={i}
-                    onAccept={() => onAcceptGoalSuggestion(suggestion)}
-                    onDismiss={() => onDismissGoalSuggestion(suggestion)}
-                  >
-                    {suggestion}
-                  </SuggestionCard>
-                ))
-              : null}
-          </SuggestionBox>
-        ) : undefined
-      }
-      footer={
-        canEdit ? (
-          <Button
-            size="big"
-            variant={nextVariant}
-            shortcut={<CmdReturnIcon />}
-            onClick={onNext}
-            disabled={nextDisabled}
-          >
-            {nextLabel}
-          </Button>
-        ) : undefined
-      }
-    >
+  const body = (
+    <>
+      {banner && <div className="mb-6">{banner}</div>}
+
       {/* Compose row — only shown when the user can actually edit. Viewers see
           the existing goal list as a read-only summary. */}
       {canEdit && (
@@ -333,14 +314,14 @@ export default function GoalsPanel({
                 <div className="bg-fill-neutral">
                   {/* Goal row — amber border, no fill */}
                   <div
-                    className="flex items-center justify-between gap-1 px-4 h-[72px] border border-[#533E1D] group"
+                    className="flex items-center justify-between gap-1 px-4 py-4 min-h-[72px] border border-[#533E1D] group"
                     draggable={dragEnabled}
                     onDragStart={() => handleDragStart(i)}
                     onDragOver={(e) => handleDragOver(i, e)}
                     onDrop={() => handleDrop(i)}
                     onDragEnd={handleDragEnd}
                   >
-                    <span className="text-base font-medium text-gray-900 flex-1 min-w-0 truncate">
+                    <span className="text-base font-medium text-gray-900 flex-1 min-w-0 whitespace-pre-wrap break-words">
                       {goal}
                     </span>
                     <div
@@ -400,7 +381,7 @@ export default function GoalsPanel({
               {dropIndicator}
               <div
                 onClick={canEdit ? () => startEdit(i, goal) : undefined}
-                className={`flex items-center justify-between gap-1 group px-4 h-[72px] bg-fill-neutral ${
+                className={`flex items-center justify-between gap-1 group px-4 py-4 min-h-[72px] bg-fill-neutral ${
                   canEdit ? "cursor-pointer" : "cursor-default"
                 }`}
                 draggable={canEdit && dragEnabled}
@@ -409,7 +390,7 @@ export default function GoalsPanel({
                 onDrop={() => handleDrop(i)}
                 onDragEnd={handleDragEnd}
               >
-                <span className="text-base font-medium text-gray-900 flex-1 min-w-0 truncate">
+                <span className="text-base font-medium text-gray-900 flex-1 min-w-0 whitespace-pre-wrap break-words">
                   {goal}
                 </span>
                 {canEdit && (
@@ -440,6 +421,77 @@ export default function GoalsPanel({
           );
         })}
       </div>
+    </>
+  );
+
+  if (embedded) {
+    return (
+      <section>
+        <h3 className="text-lg font-medium text-fg-contrast mb-1">
+          Business goals
+        </h3>
+        <p className="text-sm text-fg-dim mb-6">
+          List and prioritize your business goals.
+        </p>
+        {body}
+      </section>
+    );
+  }
+
+  return (
+    <PanelLayout
+      title="Business Goals"
+      subtitle="List and prioritize your business goals"
+      rightBottom={rightBottom}
+      rightBottomExpanded={rightBottomExpanded}
+      right={
+        canEdit ? (
+          <SuggestionBox
+            onRefresh={nonEmptyGoals.length > 0 ? onGoalCommit : undefined}
+            loading={suggestionsLoading}
+            emptyText="Enter a business goal to see suggestions."
+          >
+            {goalSuggestions.length > 0
+              ? goalSuggestions.map((suggestion, i) => (
+                  <SuggestionCard
+                    key={i}
+                    onAccept={() => onAcceptGoalSuggestion(suggestion)}
+                    onDismiss={() => onDismissGoalSuggestion(suggestion)}
+                  >
+                    {suggestion}
+                  </SuggestionCard>
+                ))
+              : null}
+          </SuggestionBox>
+        ) : undefined
+      }
+      footer={
+        canEdit ? (
+          <div className="flex items-center gap-2">
+            <Button
+              size="big"
+              variant={nextVariant}
+              shortcut={<CmdReturnIcon />}
+              onClick={onNext}
+              disabled={nextDisabled}
+            >
+              {nextLabel}
+            </Button>
+            {secondaryLabel && onSecondary && (
+              <Button
+                size="big"
+                variant="neutral"
+                onClick={onSecondary}
+                disabled={secondaryDisabled}
+              >
+                {secondaryLabel}
+              </Button>
+            )}
+          </div>
+        ) : undefined
+      }
+    >
+      {body}
     </PanelLayout>
   );
 }

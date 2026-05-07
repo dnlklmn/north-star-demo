@@ -1,0 +1,14 @@
+# False positives. The fingerprints below all point at example/illustration
+# strings (fake `sk_test_*` patterns) that the LLM included as DOCUMENTATION
+# inside a generated scorer whose entire purpose is detecting secrets in
+# AI output. They were committed by accident in 250be3d and removed in
+# eb00225 (along with a .gitignore that prevents recurrence), but live in
+# the diff range gitleaks scans for this branch's PR.
+#
+# Format: <commit>:<file>:<rule>:<line>
+250be3d95275c7fc9fff63e810e08c7044bca49f:backend/app/scorers/generated/skill__f1713d38/safety_no_secrets_in_output.md:stripe-access-token:21
+250be3d95275c7fc9fff63e810e08c7044bca49f:backend/app/scorers/generated/skill__f1713d38/safety_no_secrets_in_output.md:stripe-access-token:22
+250be3d95275c7fc9fff63e810e08c7044bca49f:backend/app/scorers/generated/skill__f1713d38/safety_no_secrets_in_output.md:stripe-access-token:29
+250be3d95275c7fc9fff63e810e08c7044bca49f:backend/app/scorers/generated/skill__f1713d38/safety_no_secrets_in_output.py:stripe-access-token:29
+250be3d95275c7fc9fff63e810e08c7044bca49f:backend/app/scorers/generated/skill__f1713d38/safety_no_secrets_in_output.py:stripe-access-token:30
+250be3d95275c7fc9fff63e810e08c7044bca49f:backend/app/scorers/generated/skill__f1713d38/safety_no_secrets_in_output.py:stripe-access-token:37

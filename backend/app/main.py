@@ -90,6 +90,11 @@ from .models import (
     SuggestResponse,
     SuggestStoriesRequest,
     SuggestStoriesResponse,
+    SuggestSkillRequest,
+    SuggestSkillResponse,
+    GenerateSkillFromGoalsRequest,
+    GenerateSkillFromGoalsResponse,
+    SuggestScorerIdeasResponse,
     SuggestRevisionsRequest,
     SynthesizeRequest,
     TaskDefinition,
@@ -106,6 +111,9 @@ from .tools import (
     call_suggest_goals,
     call_evaluate_goals,
     call_suggest_stories,
+    call_suggest_skill,
+    call_generate_skill_from_goals,
+    call_suggest_scorer_ideas,
     call_validate_charter,
     call_generate_suggestions,
     call_synthesize_examples,
@@ -471,6 +479,157 @@ async def suggest_stories(req: SuggestStoriesRequest):
     except Exception as e:
         logger.exception("Failed to suggest stories")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/suggest-skill", response_model=SuggestSkillResponse)
+async def suggest_skill(req: SuggestSkillRequest):
+    """Suggest SKILL.md content ideas given goals + stories + current draft.
+
+    Powers the right-rail SuggestionBox on the Skill tab. Returns an empty
+    list when no goals exist — the UI then shows the "Add goals to see
+    suggestions" empty state instead of calling the LLM with nothing.
+    """
+    non_empty_goals = [g for g in req.goals if g.strip()]
+    non_empty_stories = [
+        s for s in req.stories if s.get("who", "").strip() or s.get("what", "").strip()
+    ]
+    if not non_empty_goals:
+        return SuggestSkillResponse(suggestions=[])
+
+    try:
+        suggestions, call_meta = await call_suggest_skill(
+            non_empty_goals,
+            non_empty_stories,
+            req.current_body,
+        )
+        if req.session_id:
+            try:
+                await db.create_turn(
+                    session_id=req.session_id,
+                    turn_type="suggest_skill",
+                    input_snapshot={
+                        "goals": non_empty_goals,
+                        "stories": non_empty_stories,
+                        "current_body": req.current_body or "",
+                    },
+                    llm_calls=call_meta,
+                    parsed_output={"suggestions": suggestions},
+                )
+            except Exception:
+                logger.warning("suggest_skill turn-log failed", exc_info=True)
+        return SuggestSkillResponse(suggestions=suggestions)
+    except Exception as e:
+        logger.exception("Failed to suggest skill")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(
+    "/sessions/{session_id}/generate-skill-from-goals",
+    response_model=GenerateSkillFromGoalsResponse,
+)
+async def generate_skill_from_goals(
+    session_id: str,
+    _req: GenerateSkillFromGoalsRequest,
+    access: Access = Depends(resolve_access),
+):
+    """Generate a full SKILL.md body from the session's goals + stories.
+
+    Persists the resulting body + name + description on the session so a
+    reload (or any SSE state-change refetch) sees them. The frontend
+    still has to call Analyze if it wants to re-seed goals/stories from
+    the new body — this endpoint just fills the Skill page.
+    """
+    require_writer(access)
+    state, conversation = await _load_state(session_id)
+    goals = [g for g in (state.input.goals or []) if g and g.strip()]
+    stories = []
+    for g in (state.input.story_groups or []):
+        role = g.get("role", "") if isinstance(g, dict) else g.role
+        items = g.get("stories", []) if isinstance(g, dict) else g.stories
+        for s in items:
+            who = role
+            what = s.get("what", "") if isinstance(s, dict) else s.what
+            why = s.get("why", "") if isinstance(s, dict) else getattr(s, "why", "")
+            if who or what:
+                stories.append({"who": who, "what": what, "why": why or ""})
+    if not goals:
+        raise HTTPException(
+            status_code=400,
+            detail="Add at least one business goal before generating a skill.",
+        )
+
+    project = await db.get_session(session_id)
+    project_name = (project or {}).get("name") if project else None
+
+    try:
+        raw_body, call_meta = await call_generate_skill_from_goals(
+            goals, stories, project_name
+        )
+    except Exception as e:
+        logger.exception("Failed to generate skill from goals")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    name, description, stripped_body = _parse_skill_frontmatter(raw_body)
+    # Persist on the session so reload + SSE refetches see the body. We
+    # store the stripped body so it matches the seedFromSkill convention
+    # (skill_body never carries frontmatter); name/description sit
+    # alongside on the task object.
+    state.charter.task.skill_body = stripped_body
+    if name:
+        state.charter.task.skill_name = name
+    if description:
+        state.charter.task.skill_description = description
+    await _save_state(session_id, state, conversation)
+
+    try:
+        await db.create_turn(
+            session_id=session_id,
+            turn_type="generate_skill_from_goals",
+            input_snapshot={"goals": goals, "stories": stories},
+            llm_calls=call_meta,
+            parsed_output={"body": stripped_body, "name": name, "description": description},
+        )
+    except Exception:
+        logger.warning("generate_skill_from_goals turn-log failed", exc_info=True)
+
+    return GenerateSkillFromGoalsResponse(
+        body=stripped_body,
+        name=name,
+        description=description,
+    )
+
+
+@app.post(
+    "/sessions/{session_id}/suggest-scorer-ideas",
+    response_model=SuggestScorerIdeasResponse,
+)
+async def suggest_scorer_ideas(
+    session_id: str,
+    access: Access = Depends(resolve_access),
+):
+    """Suggest NEW scorer ideas based on the session's charter + existing
+    scorers. Returns short pitches; the user later promotes interesting
+    ones into real scorers via the existing generate-scorers flow."""
+    require_writer(access)
+    state, _ = await _load_state(session_id)
+    charter = state.charter.model_dump() if state.charter else {}
+    existing = state.scorers or []
+    try:
+        suggestions, call_meta = await call_suggest_scorer_ideas(charter, existing)
+    except Exception as e:
+        logger.exception("Failed to suggest scorer ideas")
+        raise HTTPException(status_code=500, detail=str(e))
+    try:
+        await db.create_turn(
+            session_id=session_id,
+            turn_type="suggest_scorer_ideas",
+            input_snapshot={"existing_count": len(existing)},
+            llm_calls=call_meta,
+            parsed_output={"suggestions": suggestions},
+        )
+    except Exception:
+        logger.warning("suggest_scorer_ideas turn-log failed", exc_info=True)
+    return SuggestScorerIdeasResponse(suggestions=suggestions)
 
 
 @app.post("/sessions", response_model=CreateSessionResponse)
@@ -2937,11 +3096,23 @@ async def run_eval_for_session(
             detail="Session has no skill_body on its charter. Seed from a SKILL.md first.",
         )
 
-    scorer_defs = state.scorers or []
+    # Drop scorers the user has toggled off in the UI. ``enabled`` is an
+    # opt-out: missing or true → run, explicit false → skip. Lets the user
+    # focus an eval on a subset of scorers without deleting the rest.
+    scorer_defs = [
+        s for s in (state.scorers or [])
+        if s.get("enabled", True) is not False
+    ]
     if not scorer_defs:
+        total = len(state.scorers or [])
+        if total == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="No scorers on this session. Generate them in the Scorers tab first.",
+            )
         raise HTTPException(
             status_code=400,
-            detail="No scorers on this session. Generate them in the Scorers tab first.",
+            detail=f"All {total} scorers are disabled. Enable at least one before running an eval.",
         )
 
     dataset = await db.get_dataset_by_session(session_id)

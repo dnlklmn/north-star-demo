@@ -103,6 +103,8 @@ export interface ScorerDef {
   type: string
   description: string
   code: string
+  /** UI toggle. Missing or true → run in evals; false → skip. */
+  enabled?: boolean
 }
 
 export interface SessionState {
