@@ -2447,14 +2447,29 @@ export default function ProjectWorkspace() {
                 setState(s.state as SessionState);
               }}
               onSeeded={async () => {
-                // Re-hydrate session state so extracted goals/users/stories
-                // show up and downstream tabs unlock. Then jump to Goals so
-                // the user's next action is reviewing extractions.
+                // Re-hydrate session state so the freshly-extracted
+                // goals/users/stories land in local state, then push
+                // straight into charter generation. The "Generate
+                // charter" CTA on the Skill page should land the user
+                // on a fresh charter, not bounce them through Goals.
                 await handleSessionSeeded();
-                setActiveTab("goals");
+                handleSubmitIntake();
               }}
-              onNext={() => setActiveTab("goals")}
+              onNext={() => {
+                // Post-seed primary CTA — user clicks "Generate charter"
+                // / "Regenerate charter" again. Confirms before
+                // overwriting an existing charter, then re-runs the
+                // intake pass which navigates to Charter on success.
+                if (hasCharter) {
+                  const ok = window.confirm(
+                    "Regenerate the charter?\n\nThis replaces the current criteria, alignment entries, and rot signals with a fresh draft built from your goals and stories.",
+                  );
+                  if (!ok) return;
+                }
+                handleSubmitIntake();
+              }}
               canEdit={canEdit}
+              hasCharter={hasCharter}
               hasGoals={nonEmptyGoals.length > 0}
               skillSuggestions={skillSuggestions}
               skillSuggestionsLoading={skillSuggestionsLoading}

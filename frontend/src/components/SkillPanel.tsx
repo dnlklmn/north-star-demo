@@ -88,6 +88,9 @@ interface Props {
    *  refresh icon for an explicit "Get suggestions" button so the user
    *  has a clear affordance to fetch on demand. */
   autoGenerateSuggestions?: boolean
+  /** Whether the project already has a charter. Drives the primary CTA
+   *  label between "Generate charter" and "Regenerate charter". */
+  hasCharter?: boolean
 }
 
 /**
@@ -126,6 +129,7 @@ export default function SkillPanel({
   generatingFromGoals = false,
   regenerateFromGoals = false,
   autoGenerateSuggestions = true,
+  hasCharter = false,
 }: Props) {
   const [draft, setDraft] = useState(skillBody)
   const [versions, setVersions] = useState<SkillVersion[]>([])
@@ -349,10 +353,16 @@ export default function SkillPanel({
   )
 
   // Floating footer — matches the pattern on Goals / Stories / Charter.
-  // Analyze before first seed, Save as v{n} after edits. "Go to business
-  // goals" shows after seeding so the user can jump to the next phase.
-  // Viewers see no footer (no write actions); Cmd+Enter Next is also disabled
-  // upstream because the navigation buttons drive panel switches.
+  // Primary CTA before first seed is the charter-generator (relabelled
+  // from the old "Analyze" — same handler, but the user-facing name now
+  // reflects the next phase). Save as v{n} shows when edits land on top
+  // of an existing version. After seeding (no canAnalyze, no canSave)
+  // the same charter CTA stays so the user can move to the charter step.
+  // Viewers see no footer (no write actions); Cmd+Enter Next is also
+  // disabled upstream because the navigation buttons drive panel switches.
+  const charterCtaLabel = hasCharter
+    ? "Regenerate charter"
+    : "Generate charter"
   const footer = !canEdit ? null : canAnalyze ? (
     <Button
       size="big"
@@ -361,7 +371,7 @@ export default function SkillPanel({
       disabled={working}
     >
       {working ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
-      Analyze
+      {charterCtaLabel}
     </Button>
   ) : canSave ? (
     <div className="flex items-center gap-2">
@@ -406,11 +416,11 @@ export default function SkillPanel({
       )}
       <Button
         size="big"
-        variant="neutral"
+        variant="primary"
         onClick={onNext}
         shortcut={<CmdReturnIcon />}
       >
-        Go to Goals
+        {charterCtaLabel}
       </Button>
     </div>
   ) : undefined
