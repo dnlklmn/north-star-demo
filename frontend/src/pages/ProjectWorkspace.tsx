@@ -66,9 +66,11 @@ import {
   suggestRevisions,
   getActivity,
   listSessions,
+  type SkillSuggestion,
 } from "../api";
 import Button from "../components/ui/Button";
 import { uniqueProjectName } from "../utils/skillFrontmatter";
+import { getAutoGenerateSuggestions } from "../utils/uiPrefs";
 import IconButton from "../components/ui/IconButton";
 import GoalsPanel from "../components/GoalsPanel";
 import AddSourceBanner from "../components/AddSourceBanner";
@@ -193,9 +195,34 @@ export default function ProjectWorkspace() {
   // --- Story suggestion state ---
   const [storySuggestionsLoading, setStorySuggestionsLoading] = useState(false);
 
+  // --- Auto-generate-suggestions UI preference ---
+  // Whether goal/story/skill suggestion fetches fire automatically as the
+  // user types. Toggled in Settings → App. The SettingsPanel dispatches a
+  // window event when it flips so we can react without a parent rerender.
+  const [autoGenerateSuggestions, setAutoGenerateSuggestionsLocal] = useState(
+    () => getAutoGenerateSuggestions(),
+  );
+  useEffect(() => {
+    const handler = () =>
+      setAutoGenerateSuggestionsLocal(getAutoGenerateSuggestions());
+    window.addEventListener(
+      "ns:auto-generate-suggestions-changed",
+      handler,
+    );
+    return () =>
+      window.removeEventListener(
+        "ns:auto-generate-suggestions-changed",
+        handler,
+      );
+  }, []);
+
   // --- Skill suggestion state (right rail on Skill tab) ---
-  const [skillSuggestions, setSkillSuggestions] = useState<string[]>([]);
+  const [skillSuggestions, setSkillSuggestions] = useState<SkillSuggestion[]>(
+    [],
+  );
   const [skillSuggestionsLoading, setSkillSuggestionsLoading] = useState(false);
+  // Dismissed suggestions are tracked by their summary text so a manual
+  // refresh after a dismiss doesn't bring the same idea right back.
   const [dismissedSkillSuggestions, setDismissedSkillSuggestions] = useState<
     Set<string>
   >(new Set());
@@ -617,6 +644,7 @@ export default function ProjectWorkspace() {
   const goalsTypingDebounceRef = useRef<number | null>(null);
   useEffect(() => {
     if (hydrating) return;
+    if (!autoGenerateSuggestions) return;
     const nonEmpty = goals.filter((g) => g.trim());
     if (nonEmpty.length === 0) return;
     if (goalsTypingDebounceRef.current) {
@@ -633,7 +661,7 @@ export default function ProjectWorkspace() {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [goals, hydrating]);
+  }, [goals, hydrating, autoGenerateSuggestions]);
 
   const fetchGoalSuggestions = useCallback(async (currentGoals: string[]) => {
     const nonEmpty = currentGoals.filter((g) => g.trim());
@@ -673,7 +701,9 @@ export default function ProjectWorkspace() {
         urlSessionId ?? null,
       );
       setSkillSuggestions(
-        res.suggestions.filter((s) => !dismissedSkillSuggestions.has(s)),
+        res.suggestions.filter(
+          (s) => !dismissedSkillSuggestions.has(s.summary),
+        ),
       );
     } catch (err) {
       console.error("Failed to fetch skill suggestions:", err);
@@ -696,6 +726,7 @@ export default function ProjectWorkspace() {
     if (hydrating) return;
     if (activeTab !== "skill") return;
     if (isPromptEval) return;
+    if (!autoGenerateSuggestions) return;
     const nonEmptyGoalsList = goals.filter((g) => g.trim());
     if (nonEmptyGoalsList.length === 0) {
       setSkillSuggestions([]);
@@ -715,16 +746,25 @@ export default function ProjectWorkspace() {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab, goals, storyGroups, hydrating, isPromptEval]);
+  }, [
+    activeTab,
+    goals,
+    storyGroups,
+    hydrating,
+    isPromptEval,
+    autoGenerateSuggestions,
+  ]);
 
   const handleAcceptSkillSuggestion = useCallback(
-    (suggestion: string) => {
-      // Append the suggestion to the existing skill body as a new bullet so
-      // the user has a concrete starting point. Drops the suggestion from the
-      // local list once accepted.
+    (suggestion: SkillSuggestion) => {
+      // Append the suggestion to the existing skill body as a new bullet,
+      // prefixing the where-hint as a comment so the user can move it to
+      // the right section if needed. Drops it from the local list once
+      // accepted (and remembers it so a refresh doesn't re-suggest).
       const current = state.charter.task.skill_body || "";
       const sep = current.endsWith("\n") || current === "" ? "" : "\n";
-      const next = `${current}${sep}\n- ${suggestion}\n`;
+      const wherePrefix = suggestion.where ? `<!-- ${suggestion.where} -->\n` : "";
+      const next = `${current}${sep}\n${wherePrefix}- ${suggestion.summary}\n`;
       setState((prev) => ({
         ...prev,
         charter: {
@@ -732,16 +772,27 @@ export default function ProjectWorkspace() {
           task: { ...prev.charter.task, skill_body: next },
         },
       }));
-      setSkillSuggestions((prev) => prev.filter((s) => s !== suggestion));
-      setDismissedSkillSuggestions((prev) => new Set(prev).add(suggestion));
+      setSkillSuggestions((prev) =>
+        prev.filter((s) => s.summary !== suggestion.summary),
+      );
+      setDismissedSkillSuggestions((prev) =>
+        new Set(prev).add(suggestion.summary),
+      );
     },
     [state.charter.task.skill_body],
   );
 
-  const handleDismissSkillSuggestion = useCallback((suggestion: string) => {
-    setSkillSuggestions((prev) => prev.filter((s) => s !== suggestion));
-    setDismissedSkillSuggestions((prev) => new Set(prev).add(suggestion));
-  }, []);
+  const handleDismissSkillSuggestion = useCallback(
+    (suggestion: SkillSuggestion) => {
+      setSkillSuggestions((prev) =>
+        prev.filter((s) => s.summary !== suggestion.summary),
+      );
+      setDismissedSkillSuggestions((prev) =>
+        new Set(prev).add(suggestion.summary),
+      );
+    },
+    [],
+  );
 
   // --- Generate full SKILL.md from goals + stories ---
   const [generatingSkillFromGoals, setGeneratingSkillFromGoals] =
@@ -1100,6 +1151,7 @@ export default function ProjectWorkspace() {
   const storyAutoSuggestedRef = useRef(false);
   useEffect(() => {
     if (activeTab !== "users" && activeTab !== "goals") return;
+    if (!autoGenerateSuggestions) return;
     if (storyAutoSuggestedRef.current) return;
     if (storySuggestionsLoading) return;
     if (suggestedStories.length > 0) return;
@@ -1114,6 +1166,7 @@ export default function ProjectWorkspace() {
     suggestedStories.length,
     storySuggestionsLoading,
     fetchStorySuggestions,
+    autoGenerateSuggestions,
   ]);
 
   useEffect(() => {
@@ -2413,12 +2466,14 @@ export default function ProjectWorkspace() {
               }
               generatingFromGoals={generatingSkillFromGoals}
               regenerateFromGoals={skillFromGoalsStale}
+              autoGenerateSuggestions={autoGenerateSuggestions}
             />
           )}
 
           {(activeTab === "goals" || activeTab === "users") && (
             <UsersPanel
               embedded
+              autoGenerateSuggestions={autoGenerateSuggestions}
               hasGoals={nonEmptyGoals.length > 0}
               onGenerateFromGoals={handleGenerateStoriesFromGoals}
               goalSuggestions={goalSuggestions}

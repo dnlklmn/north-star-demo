@@ -636,8 +636,17 @@ class SuggestSkillRequest(BaseModel):
     session_id: Optional[str] = None
 
 
+class SkillSuggestion(BaseModel):
+    """One skill-content idea, with an optional pointer to where in the
+    SKILL.md it should land. ``where`` is freeform — typically a section
+    name like "Output format" or "Behaviors / rules" — and renders as a
+    small label next to the suggestion text in the right rail."""
+    summary: str
+    where: Optional[str] = None
+
+
 class SuggestSkillResponse(BaseModel):
-    suggestions: list[str] = Field(default_factory=list)
+    suggestions: list[SkillSuggestion] = Field(default_factory=list)
 
 
 class GenerateSkillFromGoalsRequest(BaseModel):

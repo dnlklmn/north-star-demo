@@ -43,6 +43,10 @@ interface Props {
   preBody?: React.ReactNode;
   /** Banner rendered above the page title (forwarded to PanelLayout). */
   topBanner?: ReactNode;
+  /** When false, the right-rail Suggestion boxes swap their refresh icon
+   *  for an explicit "Get suggestions" button so the user has a clear
+   *  affordance to fetch on demand. */
+  autoGenerateSuggestions?: boolean;
   /** Whether at least one non-empty business goal exists. Drives the
    *  "Generate from business goals" button state in embedded mode. */
   hasGoals?: boolean;
@@ -90,6 +94,7 @@ export default function UsersPanel({
   onDismissGoalSuggestion,
   onRefreshGoalSuggestions,
   topBanner,
+  autoGenerateSuggestions = true,
 }: Props) {
   // Track which roles have been committed (Enter pressed)
   const [committedRoles, setCommittedRoles] = useState<Set<number>>(new Set());
@@ -489,7 +494,13 @@ export default function UsersPanel({
                 label="Goal suggestions"
                 onRefresh={hasGoals ? onRefreshGoalSuggestions : undefined}
                 loading={goalSuggestionsLoading}
-                emptyText="Enter a business goal to see suggestions."
+                emptyText={
+                  hasGoals && !autoGenerateSuggestions
+                    ? "Auto-generate is off — click below to fetch suggestions."
+                    : "Enter a business goal to see suggestions."
+                }
+                showGetButton={hasGoals && !autoGenerateSuggestions}
+                getButtonLabel="Get goal suggestions"
               >
                 {goalSuggestions.length > 0
                   ? goalSuggestions.map((suggestion, i) => (
@@ -517,10 +528,18 @@ export default function UsersPanel({
               emptyText={
                 hasGoals
                   ? hasStories
-                    ? "Press Enter after a story to get suggestions."
-                    : "Press refresh to suggest stories from your goals."
+                    ? autoGenerateSuggestions
+                      ? "Press Enter after a story to get suggestions."
+                      : "Auto-generate is off — click below to fetch suggestions."
+                    : autoGenerateSuggestions
+                      ? "Press refresh to suggest stories from your goals."
+                      : "Auto-generate is off — click below to fetch suggestions."
                   : "Enter a business goal to see suggestions."
               }
+              showGetButton={
+                (hasGoals || hasStories) && !autoGenerateSuggestions
+              }
+              getButtonLabel="Get story suggestions"
             >
               {suggestedStories.length > 0
                 ? suggestedStories.map((story, i) => (

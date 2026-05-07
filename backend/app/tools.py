@@ -872,14 +872,28 @@ async def call_suggest_skill(
     goals: list[str],
     stories: list[dict],
     current_body: str | None,
-) -> tuple[list[str], list[dict]]:
-    """Suggest SKILL.md content ideas. Returns (suggestions, call metadata list)."""
+) -> tuple[list[dict], list[dict]]:
+    """Suggest SKILL.md content ideas. Returns (suggestions, call metadata list).
+
+    Each suggestion is ``{"summary": str, "where": str | None}``. The model is
+    instructed to point at the section the suggestion belongs in; we accept
+    legacy plain-string entries too so older clients / cached prompts still
+    deserialize cleanly.
+    """
     from .prompt import build_suggest_skill_prompt
     await _refresh_settings()
     prompt = build_suggest_skill_prompt(goals, stories, current_body)
     text, meta = _call_llm(prompt, max_tokens=768)
     data = _extract_json(text)
-    suggestions = [s for s in data.get("suggestions", []) if isinstance(s, str) and s.strip()]
+    suggestions: list[dict] = []
+    for s in data.get("suggestions", []):
+        if isinstance(s, str) and s.strip():
+            suggestions.append({"summary": s.strip(), "where": None})
+        elif isinstance(s, dict):
+            summary = (s.get("summary") or "").strip()
+            where = (s.get("where") or "").strip() or None
+            if summary:
+                suggestions.append({"summary": summary, "where": where})
     try:
         bubble_input = (
             "Goals:\n" + ("\n".join(f"- {g}" for g in goals) or "(none)")
@@ -888,7 +902,13 @@ async def call_suggest_skill(
                 f"- As a {s.get('who','')}, I want to {s.get('what','')}" for s in stories
             ) or "(none)")
         )
-        bubble_output = "Skill suggestions:\n" + ("\n".join(f"- {s}" for s in suggestions) or "(none)")
+        bubble_output = "Skill suggestions:\n" + (
+            "\n".join(
+                f"- {s['summary']}"
+                + (f"  →  {s['where']}" if s.get("where") else "")
+                for s in suggestions
+            ) or "(none)"
+        )
         _bubble_io_to_parent_span(bubble_input, bubble_output)
     except Exception as e:
         logger.warning(f"suggest_skill scorer payload bubble failed: {e}")

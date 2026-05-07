@@ -20,6 +20,10 @@ import {
 } from '../utils/evalDefaults'
 import IconButton from './ui/IconButton'
 import { CloseIcon } from './ui/Icons'
+import {
+  getAutoGenerateSuggestions,
+  setAutoGenerateSuggestions,
+} from '../utils/uiPrefs'
 
 interface SettingsPanelProps {
   onClose: () => void
@@ -72,6 +76,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
   // next time it mounts. No "Save" button: these are pure preferences.
   const [defaultJudgeModel, setDefaultJudgeModelLocal] = useState(() => getDefaultJudgeModel())
   const [defaultBraintrustProject, setDefaultBraintrustProjectLocal] = useState(() => getDefaultBraintrustProject())
+  const [autoGenerate, setAutoGenerateLocal] = useState(() => getAutoGenerateSuggestions())
 
   useEffect(() => {
     getSettings().then(setSettings).catch(() => setError('Failed to load settings'))
@@ -390,6 +395,44 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                     Dark
                   </button>
                 </div>
+              </div>
+
+              {/* Auto-generate suggestions */}
+              <div>
+                <label className="text-xs font-medium text-foreground block mb-1.5">
+                  Suggestions
+                </label>
+                <button
+                  onClick={() => {
+                    const next = !autoGenerate
+                    setAutoGenerateLocal(next)
+                    setAutoGenerateSuggestions(next)
+                    window.dispatchEvent(new Event("ns:auto-generate-suggestions-changed"))
+                  }}
+                  role="switch"
+                  aria-checked={autoGenerate}
+                  className="w-full flex items-center justify-between text-sm px-3 py-2 border border-border bg-surface hover:bg-fill-neutral/30 transition-colors"
+                >
+                  <span className="text-foreground">
+                    Automatically generate suggestions
+                  </span>
+                  <span
+                    className={`relative inline-flex h-5 w-9 items-center transition-colors ${
+                      autoGenerate ? "bg-accent" : "bg-muted"
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 transform bg-white transition-transform ${
+                        autoGenerate ? "translate-x-4" : "translate-x-0.5"
+                      }`}
+                    />
+                  </span>
+                </button>
+                <p className="text-[10px] text-muted-foreground mt-1.5">
+                  When off, the right-rail Suggestions panels stay empty
+                  until you click <em>Get suggestions</em>. When on, they
+                  refresh as you edit goals or stories.
+                </p>
               </div>
             </>
           )}

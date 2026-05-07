@@ -772,12 +772,17 @@ export async function generateSkillFromGoals(
   return res.json()
 }
 
+export interface SkillSuggestion {
+  summary: string
+  where: string | null
+}
+
 export async function suggestSkill(
   goals: string[],
   stories: Array<{ who: string; what: string; why: string }>,
   currentBody: string | null,
   sessionId?: string | null,
-): Promise<{ suggestions: string[] }> {
+): Promise<{ suggestions: SkillSuggestion[] }> {
   const res = await apiFetch(`${BASE}/suggest-skill`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

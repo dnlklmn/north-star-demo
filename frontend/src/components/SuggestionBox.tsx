@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { Loader2 } from "lucide-react";
+import Button from "./ui/Button";
 import IconButton from "./ui/IconButton";
 import { RefreshIcon, DismissIcon, PlusIcon, AIIcon } from "./ui/Icons";
 
@@ -43,6 +44,14 @@ interface BoxProps {
   loading?: boolean;
   emptyText?: string;
   children?: ReactNode;
+  /** When true, render a prominent "Get suggestions" button in the empty
+   *  state next to (instead of) the empty-text placeholder. Used when the
+   *  user has opted out of automatic suggestion fetches and needs an
+   *  explicit affordance to trigger one. */
+  showGetButton?: boolean;
+  /** Label override for the get-suggestions button (e.g. "Get story
+   *  suggestions"). Defaults to "Get suggestions". */
+  getButtonLabel?: string;
 }
 
 export default function SuggestionBox({
@@ -51,6 +60,8 @@ export default function SuggestionBox({
   loading,
   emptyText,
   children,
+  showGetButton = false,
+  getButtonLabel = "Get suggestions",
 }: BoxProps) {
   const hasContent = !!children;
   return (
@@ -88,9 +99,16 @@ export default function SuggestionBox({
           <Loader2 className="w-4 h-4 text-fg-dim animate-spin mx-auto mb-2" />
           <p className="text-sm text-fg-dim text-center">Generating…</p>
         </div>
-      ) : emptyText ? (
-        <p className="text-sm text-fg-dim">{emptyText}</p>
-      ) : null}
+      ) : (
+        <div className="flex flex-col gap-3">
+          {emptyText && <p className="text-sm text-fg-dim">{emptyText}</p>}
+          {showGetButton && onRefresh && (
+            <Button size="small" variant="neutral" onClick={onRefresh}>
+              {getButtonLabel}
+            </Button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

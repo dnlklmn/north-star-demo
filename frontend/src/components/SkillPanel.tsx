@@ -10,6 +10,7 @@ import {
   restoreSkillVersion,
   seedFromSkill,
   setSessionMode,
+  type SkillSuggestion,
 } from '../api'
 import DiffModal from './DiffModal'
 import PanelLayout from './PanelLayout'
@@ -60,15 +61,17 @@ interface Props {
   /** Whether at least one non-empty business goal exists upstream. Drives the
    *  Suggestions panel empty state on the right rail. */
   hasGoals?: boolean
-  /** Skill-content suggestions to render in the right rail. */
-  skillSuggestions?: string[]
+  /** Skill-content suggestions to render in the right rail. Each carries
+   *  a short summary plus an optional location hint (where in SKILL.md it
+   *  belongs) that renders as a small badge on the card. */
+  skillSuggestions?: SkillSuggestion[]
   skillSuggestionsLoading?: boolean
   /** Refresh handler for the right-rail Suggestions panel. */
   onRefreshSkillSuggestions?: () => void
   /** Accept handler — appends the suggestion to the draft body. */
-  onAcceptSkillSuggestion?: (suggestion: string) => void
+  onAcceptSkillSuggestion?: (suggestion: SkillSuggestion) => void
   /** Dismiss handler — drops the suggestion from the local list. */
-  onDismissSkillSuggestion?: (suggestion: string) => void
+  onDismissSkillSuggestion?: (suggestion: SkillSuggestion) => void
   /** "Generate from goals" / "Regenerate from goals" handler — fires the
    *  backend pass that produces a full SKILL.md draft from the session's
    *  goals and stories. Shown as a header-row button when provided.
@@ -81,6 +84,10 @@ interface Props {
    *  from goals". Set by the parent when an earlier generation exists but
    *  the upstream goals/stories have changed since. */
   regenerateFromGoals?: boolean
+  /** When false, the right-rail Suggestions box swaps its empty-state
+   *  refresh icon for an explicit "Get suggestions" button so the user
+   *  has a clear affordance to fetch on demand. */
+  autoGenerateSuggestions?: boolean
 }
 
 /**
@@ -118,6 +125,7 @@ export default function SkillPanel({
   onGenerateFromGoals,
   generatingFromGoals = false,
   regenerateFromGoals = false,
+  autoGenerateSuggestions = true,
 }: Props) {
   const [draft, setDraft] = useState(skillBody)
   const [versions, setVersions] = useState<SkillVersion[]>([])
@@ -298,23 +306,32 @@ export default function SkillPanel({
 
   // Fields block — single textarea. Name + description auto-detect from
   // frontmatter on Analyze; we don't ask for them up-front. No label —
-  // the panel header already says "Skill" / "Prompt".
+  // the panel header already says "Skill" / "Prompt". While a "Generate
+  // from goals" pass is in flight we overlay a centered spinner inside
+  // the textarea so the user sees something is happening.
   const fieldsBlock = (
     <>
       <section>
-        <textarea
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder={
-            hasVersions
-              ? 'Edit freely. Save creates a new version.'
-              : 'Paste GitHub link or start typing'
-          }
-          rows={24}
-          className="w-full p-3 bg-background border border-border font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent focus:ring-inset"
-          disabled={working || !canEdit}
-          readOnly={!canEdit}
-        />
+        <div className="relative">
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder={
+              hasVersions
+                ? 'Edit freely. Save creates a new version.'
+                : 'Paste GitHub link or start typing'
+            }
+            rows={24}
+            className="w-full p-3 bg-background border border-border font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent focus:ring-inset"
+            disabled={working || generatingFromGoals || !canEdit}
+            readOnly={!canEdit}
+          />
+          {generatingFromGoals && (
+            <div className="absolute inset-0 flex items-center justify-center bg-background/70 backdrop-blur-[1px]">
+              <Loader2 className="w-6 h-6 text-fg-dim animate-spin" />
+            </div>
+          )}
+        </div>
         {hasVersions && hasChanges && (
           <div className="mt-2">
             <input
@@ -404,20 +421,22 @@ export default function SkillPanel({
 
   // Header-row CTA: fire a backend pass that drafts a SKILL.md from the
   // session's goals + stories. Hidden for prompt-eval, viewer mode, no
-  // goals, or when the parent has flagged the current draft as a fresh
+  // goals, in-flight generation (the textarea overlay shows the spinner
+  // instead), or when the parent has flagged the current draft as a fresh
   // generation matching the upstream signature (onGenerateFromGoals
   // omitted in that case). Label flips on regenerateFromGoals.
   const titleAction =
-    canEdit && !isPromptEval && onGenerateFromGoals && hasGoals ? (
+    canEdit &&
+    !isPromptEval &&
+    onGenerateFromGoals &&
+    hasGoals &&
+    !generatingFromGoals ? (
       <Button
         size="small"
         variant="neutral"
         onClick={onGenerateFromGoals}
-        disabled={generatingFromGoals || working}
+        disabled={working}
       >
-        {generatingFromGoals ? (
-          <Loader2 className="w-4 h-4 animate-spin" />
-        ) : null}
         {regenerateFromGoals ? "Regenerate from goals" : "Generate from goals"}
       </Button>
     ) : undefined
@@ -443,9 +462,13 @@ export default function SkillPanel({
             loading={skillSuggestionsLoading}
             emptyText={
               hasGoals
-                ? "Press refresh to generate suggestions."
+                ? autoGenerateSuggestions
+                  ? "Press refresh to generate suggestions."
+                  : "Auto-generate is off — click below to fetch suggestions."
                 : "Add goals to see suggestions."
             }
+            showGetButton={hasGoals && !autoGenerateSuggestions}
+            getButtonLabel="Get skill suggestions"
           >
             {skillSuggestions.length > 0
               ? skillSuggestions.map((suggestion, i) => (
@@ -458,7 +481,14 @@ export default function SkillPanel({
                       onDismissSkillSuggestion?.(suggestion)
                     }
                   >
-                    {suggestion}
+                    <div className="flex flex-col gap-2">
+                      {suggestion.where && (
+                        <span className="self-start bg-fill-primary/10 text-fg-primary text-[11px] font-mono uppercase tracking-wide px-1.5 py-0.5">
+                          {suggestion.where}
+                        </span>
+                      )}
+                      <span>{suggestion.summary}</span>
+                    </div>
                   </SuggestionCard>
                 ))
               : null}

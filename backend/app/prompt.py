@@ -824,22 +824,24 @@ Business goals:
 User stories:
 {stories_text}
 {body_section}
-Each suggestion should be:
-- A specific rule, section, instruction, or guardrail the SKILL.md should include
-- Phrased in 1-2 sentences max — this is a hint, not the final wording
-- Actionable: the user should be able to read it and immediately know what to add
-- Distinct from the others and from anything already in the current draft
+Each suggestion has two fields:
+- "summary": the suggestion itself — a specific rule, section, or guardrail the SKILL.md should include. Phrased in 1-2 sentences max. Actionable: the user should read it and immediately know what to add.
+- "where": where in the SKILL.md it should land. A short hint pointing at a section/heading. Use the section names already present in the current draft when applicable (e.g. "Output format", "Behaviors / rules", "Edge cases"). If the right section doesn't exist yet, suggest creating one (e.g. "New section: Adversarial inputs"). Keep it under 6 words.
+
+Suggestions must be distinct from each other and from anything already in the current draft.
 
 Examples of the right shape:
-- "Add an explicit format spec for the output: required fields, ordering, max length per field."
-- "Spell out what to do when the input is missing context (refuse vs. ask vs. infer) so the eval can grade refusals consistently."
-- "Define how the skill should handle adversarial inputs (prompt injection, off-topic asks) — at minimum, name the categories you want it to refuse."
+[
+  {{"summary": "Add an explicit format spec for the output: required fields, ordering, max length per field.", "where": "Output format"}},
+  {{"summary": "Spell out what to do when the input is missing context (refuse vs. ask vs. infer) so the eval can grade refusals consistently.", "where": "Edge cases"}},
+  {{"summary": "Define how the skill handles adversarial inputs — name the categories you want it to refuse.", "where": "New section: Adversarial inputs"}}
+]
 
 Return ONLY valid JSON:
 {{
   "suggestions": [
-    "first suggestion",
-    "second suggestion"
+    {{"summary": "...", "where": "..."}},
+    {{"summary": "...", "where": "..."}}
   ]
 }}"""
 
