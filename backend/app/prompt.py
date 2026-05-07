@@ -892,6 +892,73 @@ Begin the SKILL.md now:
 """
 
 
+def build_suggest_scorer_ideas_prompt(charter: dict, existing_scorers: list[dict]) -> str:
+    """Prompt for suggesting NEW scorer ideas the user might want.
+
+    Output is short pitches, not Python code — the user can later promote a
+    pitch into a real scorer via the existing generate-scorers pass. Each
+    idea pairs with an optional ``type`` (coverage / alignment / balance /
+    rot / safety) so the user can categorize at a glance.
+    """
+    coverage = (charter.get("coverage") or {}).get("criteria") or []
+    balance = (charter.get("balance") or {}).get("criteria") or []
+    alignment = charter.get("alignment") or []
+    rot = (charter.get("rot") or {}).get("criteria") or []
+    safety = (charter.get("safety") or {}).get("criteria") or []
+
+    coverage_text = "\n".join(f"- {c}" for c in coverage) or "(none)"
+    balance_text = "\n".join(f"- {c}" for c in balance) or "(none)"
+    alignment_text = (
+        "\n".join(f"- {a.get('feature_area', '')}: {a.get('good', '')[:120]}" for a in alignment if isinstance(a, dict))
+        or "(none)"
+    )
+    rot_text = "\n".join(f"- {c}" for c in rot) or "(none)"
+    safety_text = "\n".join(f"- {c}" for c in safety) or "(none)"
+
+    existing_text = (
+        "\n".join(
+            f"- [{s.get('type', '?')}] {s.get('name', '')}: {s.get('description', '')}"
+            for s in existing_scorers
+        )
+        or "(none yet)"
+    )
+
+    return f"""You are helping a product person who has generated a base set of LLM-as-judge scorers from their charter. They're now looking for additional scorer ideas they might have missed — angles that aren't covered by the existing set.
+
+Charter dimensions:
+Coverage:
+{coverage_text}
+
+Balance:
+{balance_text}
+
+Alignment (per feature_area):
+{alignment_text}
+
+Rot:
+{rot_text}
+
+Safety:
+{safety_text}
+
+Existing scorers (don't duplicate these):
+{existing_text}
+
+Suggest 3-5 NEW scorers the user might want. Each suggestion has:
+- "summary": a one-sentence description of what the scorer would judge.
+- "type": one of "coverage", "alignment", "balance", "rot", "safety", or null if it cuts across dimensions.
+
+Be specific and complementary — fill gaps, don't restate. If the existing set is already strong, return fewer.
+
+Return ONLY valid JSON:
+{{
+  "suggestions": [
+    {{"summary": "...", "type": "..."}},
+    {{"summary": "...", "type": "..."}}
+  ]
+}}"""
+
+
 def build_evaluate_goals_prompt(goals: list[str]) -> str:
     goals_text = "\n".join(f"{i+1}. {g}" for i, g in enumerate(goals) if g.strip())
 

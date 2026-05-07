@@ -867,6 +867,44 @@ async def call_generate_skill_from_goals(
     return body, [meta]
 
 
+@traced("suggest_scorer_ideas")
+async def call_suggest_scorer_ideas(
+    charter: dict,
+    existing_scorers: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """Suggest NEW scorer ideas (no code) for the user to refine. Returns
+    (suggestions, call metadata list)."""
+    from .prompt import build_suggest_scorer_ideas_prompt
+    await _refresh_settings()
+    prompt = build_suggest_scorer_ideas_prompt(charter, existing_scorers)
+    text, meta = _call_llm(prompt, max_tokens=512)
+    data = _extract_json(text)
+    suggestions: list[dict] = []
+    for s in data.get("suggestions", []):
+        if isinstance(s, str) and s.strip():
+            suggestions.append({"summary": s.strip(), "type": None})
+        elif isinstance(s, dict):
+            summary = (s.get("summary") or "").strip()
+            stype = (s.get("type") or "").strip() or None
+            if summary:
+                suggestions.append({"summary": summary, "type": stype})
+    try:
+        bubble_input = (
+            f"Existing scorers ({len(existing_scorers)}):\n"
+            + ("\n".join(f"- {s.get('name','')}: {s.get('type','?')}" for s in existing_scorers) or "(none)")
+        )
+        bubble_output = "Scorer ideas:\n" + (
+            "\n".join(
+                f"- {s['summary']}" + (f"  [{s['type']}]" if s.get("type") else "")
+                for s in suggestions
+            ) or "(none)"
+        )
+        _bubble_io_to_parent_span(bubble_input, bubble_output)
+    except Exception as e:
+        logger.warning(f"suggest_scorer_ideas scorer payload bubble failed: {e}")
+    return suggestions, [meta]
+
+
 @traced("suggest_skill")
 async def call_suggest_skill(
     goals: list[str],

@@ -1,8 +1,15 @@
-import { useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Sparkles, ChevronRight, Copy, Download, Loader2, ArrowRight, Check, Upload } from 'lucide-react'
 import type { Charter, ScorerDef } from '../types'
-import { generateScorers, getBraintrustScorerPrompt } from '../api'
+import {
+  generateScorers,
+  getBraintrustScorerPrompt,
+  suggestScorerIdeas,
+  type ScorerIdea,
+} from '../api'
 import { AIIcon } from './ui/Icons'
+import SuggestionBox, { SuggestionCard } from './SuggestionBox'
+import { getAutoGenerateSuggestions } from '../utils/uiPrefs'
 
 interface Props {
   charter: Charter
@@ -35,6 +42,50 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
   // matching how the Copy button behaves elsewhere in the app.
   const [exportingName, setExportingName] = useState<string | null>(null)
   const [exportedName, setExportedName] = useState<string | null>(null)
+
+  // --- Right rail: scorer-idea suggestions ---
+  // Soft prompts for new scorers the user might add. These are pitches
+  // only — promoting one into a real scorer goes through the existing
+  // generate-scorers pass.
+  const [suggestions, setSuggestions] = useState<ScorerIdea[]>([])
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false)
+  const [dismissedIdeas, setDismissedIdeas] = useState<Set<string>>(new Set())
+  const fetchSuggestions = useCallback(async () => {
+    if (!sessionId) return
+    setSuggestionsLoading(true)
+    try {
+      const res = await suggestScorerIdeas(sessionId)
+      setSuggestions(
+        res.suggestions.filter((s) => !dismissedIdeas.has(s.summary)),
+      )
+    } catch (err) {
+      console.warn('Failed to fetch scorer ideas:', err)
+    } finally {
+      setSuggestionsLoading(false)
+    }
+  }, [sessionId, dismissedIdeas])
+
+  // Auto-fetch when the user lands on the Scorers page with at least one
+  // scorer present — and only if auto-generate-suggestions is on. Without
+  // existing scorers the suggestions aren't grounded in much; we skip then
+  // so the empty-state CTA stays the focus.
+  useEffect(() => {
+    if (!getAutoGenerateSuggestions()) return
+    if (scorers.length === 0) return
+    if (suggestions.length > 0) return
+    if (suggestionsLoading) return
+    fetchSuggestions()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scorers.length])
+
+  const handleToggleEnabled = (scorer: ScorerDef) => {
+    const next = scorers.map((s) =>
+      s.name === scorer.name
+        ? { ...s, enabled: s.enabled === false }
+        : s,
+    )
+    setScorers(next)
+  }
 
   const hasCriteria = charter.coverage.criteria.length > 0
     || charter.balance.criteria.length > 0
@@ -117,7 +168,14 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
         <div className="px-4 h-12 border-b border-border bg-surface-raised flex items-center justify-between flex-shrink-0">
           <div className="flex items-center gap-3">
             <h2 className="text-sm font-semibold text-foreground">Scorers</h2>
-            <span className="text-xs text-muted-foreground">{scorers.length} scorers</span>
+            <span className="text-xs text-muted-foreground">
+              {(() => {
+                const enabled = scorers.filter((s) => s.enabled !== false).length
+                return enabled === scorers.length
+                  ? `${scorers.length} scorers`
+                  : `${enabled} of ${scorers.length} enabled`
+              })()}
+            </span>
           </div>
           <div className="flex items-center gap-2">
             {/* Download is technically read-only (export of public state),
@@ -162,7 +220,8 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className="flex-1 flex min-h-0">
+        <div className="flex-1 overflow-y-auto p-6">
         {error && (
           <div className="mb-4 p-3 bg-danger/10 border border-danger/20 text-xs text-danger">
             {error}
@@ -215,15 +274,48 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
           </div>
         ) : (
           <div className="max-w-2xl space-y-2">
-            {scorers.map(scorer => (
-              <div key={scorer.name} className="border border-border bg-surface-raised">
+            {scorers.map(scorer => {
+              const isEnabled = scorer.enabled !== false
+              return (
+              <div
+                key={scorer.name}
+                className={`border border-border bg-surface-raised ${
+                  isEnabled ? '' : 'opacity-60'
+                }`}
+              >
                 {/* Row layout uses flex of three siblings instead of one big
                     button containing two more — nested <button>s are invalid
                     HTML and React 19 flags them as hydration errors. The
                     chevron + name area is the toggle (a <button>); the
-                    Braintrust + Copy actions live alongside as their own
-                    real <button>s. */}
+                    enabled-switch + Braintrust + Copy actions live alongside
+                    as their own real <button>s. */}
                 <div className="flex items-stretch">
+                  {canEdit && (
+                    <button
+                      type="button"
+                      onClick={() => handleToggleEnabled(scorer)}
+                      role="switch"
+                      aria-checked={isEnabled}
+                      title={
+                        isEnabled
+                          ? 'Disable this scorer (skip in evals)'
+                          : 'Enable this scorer'
+                      }
+                      className="flex items-center justify-center px-3 hover:bg-muted/50 transition-colors"
+                    >
+                      <span
+                        className={`relative inline-flex h-4 w-7 items-center transition-colors ${
+                          isEnabled ? 'bg-accent' : 'bg-muted'
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-3 w-3 transform bg-white transition-transform ${
+                            isEnabled ? 'translate-x-3.5' : 'translate-x-0.5'
+                          }`}
+                        />
+                      </span>
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => setExpandedScorer(expandedScorer === scorer.name ? null : scorer.name)}
@@ -276,8 +368,64 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
                   </div>
                 )}
               </div>
-            ))}
+              )
+            })}
           </div>
+        )}
+        </div>
+
+        {/* Right rail — scorer-idea suggestions. Hidden in viewer mode and
+            when there are no scorers yet (empty-state CTA owns the page). */}
+        {canEdit && scorers.length > 0 && (
+          <aside className="w-[320px] flex-shrink-0 border-l border-border-hint overflow-y-auto p-6">
+            <SuggestionBox
+              label="Scorer ideas"
+              onRefresh={fetchSuggestions}
+              loading={suggestionsLoading}
+              emptyText={
+                getAutoGenerateSuggestions()
+                  ? "Press refresh to get scorer ideas."
+                  : "Auto-generate is off — click below to fetch ideas."
+              }
+              showGetButton={!getAutoGenerateSuggestions()}
+              getButtonLabel="Get scorer ideas"
+            >
+              {suggestions.length > 0
+                ? suggestions.map((idea, i) => (
+                    <SuggestionCard
+                      key={i}
+                      onAccept={() => {
+                        // No code-generation for an idea yet — accept just
+                        // dismisses for now. The user will refine later.
+                        setSuggestions((prev) =>
+                          prev.filter((s) => s.summary !== idea.summary),
+                        )
+                        setDismissedIdeas((prev) =>
+                          new Set(prev).add(idea.summary),
+                        )
+                      }}
+                      onDismiss={() => {
+                        setSuggestions((prev) =>
+                          prev.filter((s) => s.summary !== idea.summary),
+                        )
+                        setDismissedIdeas((prev) =>
+                          new Set(prev).add(idea.summary),
+                        )
+                      }}
+                    >
+                      <div className="flex flex-col gap-2">
+                        {idea.type && (
+                          <span className="self-start bg-fill-primary/10 text-fg-primary text-[11px] font-mono uppercase tracking-wide px-1.5 py-0.5">
+                            {idea.type}
+                          </span>
+                        )}
+                        <span>{idea.summary}</span>
+                      </div>
+                    </SuggestionCard>
+                  ))
+                : null}
+            </SuggestionBox>
+          </aside>
         )}
       </div>
     </div>

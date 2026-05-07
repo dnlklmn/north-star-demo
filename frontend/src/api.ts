@@ -777,6 +777,32 @@ export interface SkillSuggestion {
   where: string | null
 }
 
+export interface ScorerIdea {
+  summary: string
+  type: string | null
+}
+
+export async function suggestScorerIdeas(
+  sessionId: string,
+): Promise<{ suggestions: ScorerIdea[] }> {
+  const res = await apiFetch(
+    `${BASE}/sessions/${sessionId}/suggest-scorer-ideas`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    },
+  )
+  if (!res.ok) {
+    let detail = `Failed to suggest scorer ideas (${res.status})`
+    try {
+      const j = await res.json()
+      if (j?.detail) detail = j.detail
+    } catch { /* not JSON */ }
+    throw new Error(detail)
+  }
+  return res.json()
+}
+
 export async function suggestSkill(
   goals: string[],
   stories: Array<{ who: string; what: string; why: string }>,

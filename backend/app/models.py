@@ -667,6 +667,19 @@ class GenerateSkillFromGoalsResponse(BaseModel):
     description: Optional[str] = None
 
 
+class ScorerIdea(BaseModel):
+    """One scorer idea — short pitch, no code. The user can click to
+    promote into a real scorer (we don't auto-create code for it yet)."""
+    summary: str
+    # Optional dimension hint (coverage / alignment / balance / rot / safety).
+    # Free-form so the model can suggest a new dimension if it wants.
+    type: Optional[str] = None
+
+
+class SuggestScorerIdeasResponse(BaseModel):
+    suggestions: list[ScorerIdea] = Field(default_factory=list)
+
+
 class SuggestRevisionsRequest(BaseModel):
     example_ids: list[str] = Field(default_factory=list)
 

@@ -94,6 +94,7 @@ from .models import (
     SuggestSkillResponse,
     GenerateSkillFromGoalsRequest,
     GenerateSkillFromGoalsResponse,
+    SuggestScorerIdeasResponse,
     SuggestRevisionsRequest,
     SynthesizeRequest,
     TaskDefinition,
@@ -112,6 +113,7 @@ from .tools import (
     call_suggest_stories,
     call_suggest_skill,
     call_generate_skill_from_goals,
+    call_suggest_scorer_ideas,
     call_validate_charter,
     call_generate_suggestions,
     call_synthesize_examples,
@@ -621,6 +623,39 @@ async def generate_skill_from_goals(
         name=name,
         description=description,
     )
+
+
+@app.post(
+    "/sessions/{session_id}/suggest-scorer-ideas",
+    response_model=SuggestScorerIdeasResponse,
+)
+async def suggest_scorer_ideas(
+    session_id: str,
+    access: Access = Depends(resolve_access),
+):
+    """Suggest NEW scorer ideas based on the session's charter + existing
+    scorers. Returns short pitches; the user later promotes interesting
+    ones into real scorers via the existing generate-scorers flow."""
+    require_writer(access)
+    state, _ = await _load_state(session_id)
+    charter = state.charter.model_dump() if state.charter else {}
+    existing = state.scorers or []
+    try:
+        suggestions, call_meta = await call_suggest_scorer_ideas(charter, existing)
+    except Exception as e:
+        logger.exception("Failed to suggest scorer ideas")
+        raise HTTPException(status_code=500, detail=str(e))
+    try:
+        await db.create_turn(
+            session_id=session_id,
+            turn_type="suggest_scorer_ideas",
+            input_snapshot={"existing_count": len(existing)},
+            llm_calls=call_meta,
+            parsed_output={"suggestions": suggestions},
+        )
+    except Exception:
+        logger.warning("suggest_scorer_ideas turn-log failed", exc_info=True)
+    return SuggestScorerIdeasResponse(suggestions=suggestions)
 
 
 @app.post("/sessions", response_model=CreateSessionResponse)
@@ -3087,11 +3122,23 @@ async def run_eval_for_session(
             detail="Session has no skill_body on its charter. Seed from a SKILL.md first.",
         )
 
-    scorer_defs = state.scorers or []
+    # Drop scorers the user has toggled off in the UI. ``enabled`` is an
+    # opt-out: missing or true → run, explicit false → skip. Lets the user
+    # focus an eval on a subset of scorers without deleting the rest.
+    scorer_defs = [
+        s for s in (state.scorers or [])
+        if s.get("enabled", True) is not False
+    ]
     if not scorer_defs:
+        total = len(state.scorers or [])
+        if total == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="No scorers on this session. Generate them in the Scorers tab first.",
+            )
         raise HTTPException(
             status_code=400,
-            detail="No scorers on this session. Generate them in the Scorers tab first.",
+            detail=f"All {total} scorers are disabled. Enable at least one before running an eval.",
         )
 
     dataset = await db.get_dataset_by_session(session_id)
