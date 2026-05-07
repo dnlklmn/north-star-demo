@@ -947,9 +947,11 @@ async def call_suggest_stories(goals: list[str], stories: list[dict]) -> tuple[l
 # --- Dataset phase tools ---
 
 # Concurrency cap for per-cell synth fan-out. The backend talks to a single
-# upstream LLM provider; ~5 in-flight requests is a safe ceiling that keeps
-# latency low without rate-limiting risk.
-_SYNTH_CELL_CONCURRENCY = 5
+# upstream LLM provider; bumping from 5 → 10 cuts wall-clock for typical
+# 4×5 grids roughly in half (4 batches → 2). Anthropic's default tier
+# tolerates this comfortably; if you hit rate limits, lower via the
+# NORTHSTAR_SYNTH_CONCURRENCY env var.
+_SYNTH_CELL_CONCURRENCY = int(os.environ.get("NORTHSTAR_SYNTH_CONCURRENCY", "10"))
 
 
 def _has_off_target_or_safety(charter: dict) -> bool:

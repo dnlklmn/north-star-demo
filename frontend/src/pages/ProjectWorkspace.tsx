@@ -1871,19 +1871,49 @@ export default function ProjectWorkspace() {
     // evaluate tab, which is the natural next step after generation.
     setActiveTab("dataset");
     setGeneratingBoth(true);
+    // Per-artifact flags drive the sidebar spinners so each one stops
+    // independently — without these, the scorers spinner kept spinning
+    // until the dataset finished even when scorers were done well first.
+    if (!datasetFresh) setGeneratingDataset(true);
+    if (!scorersFresh) setGeneratingScorersShortcut(true);
     try {
       // Ensure charter once, then fan out. Skip the ones that are already
       // fresh so users don't regenerate downstream work unnecessarily.
       await ensureCharter();
       const jobs: Promise<void>[] = [];
-      if (!datasetFresh) jobs.push(runGenerateDataset().then(() => { setDatasetStale(false); }));
-      if (!scorersFresh) jobs.push(runGenerateScorers().then(() => { setScorersStale(false); }));
+      if (!datasetFresh) {
+        jobs.push(
+          runGenerateDataset()
+            .then(() => {
+              setDatasetStale(false);
+            })
+            .finally(() => {
+              setGeneratingDataset(false);
+            }),
+        );
+      }
+      if (!scorersFresh) {
+        jobs.push(
+          runGenerateScorers()
+            .then(() => {
+              setScorersStale(false);
+            })
+            .finally(() => {
+              setGeneratingScorersShortcut(false);
+            }),
+        );
+      }
       await Promise.all(jobs);
       setActiveTab("evaluate");
     } catch (err) {
       console.error("Shortcut: generate both failed", err);
     } finally {
+      // Belt-and-braces: clear the umbrella flag and any per-artifact
+      // flags that the inner finallys missed (e.g. ensureCharter threw
+      // before the jobs array got a chance to wire them).
       setGeneratingBoth(false);
+      setGeneratingDataset(false);
+      setGeneratingScorersShortcut(false);
     }
   }, [ensureCharter, runGenerateDataset, runGenerateScorers, dataset, datasetStale, scorers.length, scorersStale]);
 
@@ -2370,7 +2400,7 @@ export default function ProjectWorkspace() {
               active={activeTab === "dataset"}
               onClick={() => setActiveTab("dataset")}
               disabled={!datasetAvailable}
-              loading={generatingDataset || generatingBoth}
+              loading={generatingDataset}
               disabledReason={
                 !skillReady
                   ? `Add a ${isPromptEval ? "prompt" : "skill"} first — the dataset evaluates against it.`
@@ -2385,7 +2415,7 @@ export default function ProjectWorkspace() {
               active={activeTab === "scorers"}
               onClick={() => setActiveTab("scorers")}
               disabled={!scorersAvailable}
-              loading={generatingScorersShortcut || generatingBoth}
+              loading={generatingScorersShortcut}
               disabledReason={
                 !skillReady
                   ? `Add a ${isPromptEval ? "prompt" : "skill"} first — scorers grade its output.`
