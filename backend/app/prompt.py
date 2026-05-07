@@ -844,6 +844,52 @@ Return ONLY valid JSON:
 }}"""
 
 
+def build_generate_skill_from_goals_prompt(
+    goals: list[str],
+    stories: list[dict],
+    project_name: str | None,
+) -> str:
+    """Prompt for generating a full SKILL.md body from goals + stories.
+
+    Output is a complete SKILL.md (with frontmatter) the user can paste
+    into the textarea as a starting point. Keep it pragmatic — short,
+    skill-shaped, and ready to evaluate.
+    """
+    goals_text = "\n".join(f"- {g}" for g in goals if g.strip()) or "(none)"
+    if stories:
+        stories_text = "\n".join(
+            f"- As a {s.get('who','')}, I want to {s.get('what','')}"
+            f"{', so that ' + s.get('why','') if s.get('why') else ''}"
+            for s in stories
+            if s.get("who") or s.get("what")
+        ) or "(none)"
+    else:
+        stories_text = "(none)"
+    name_hint = (
+        project_name.strip().lower().replace(" ", "-")
+        if project_name and project_name.strip() and project_name.strip() != "Untitled project"
+        else "my-skill"
+    )
+
+    return f"""You are drafting a SKILL.md for an AI feature based on the user's defined business goals and user stories. The SKILL.md is the system prompt the AI feature runs under — it's what gets evaluated. Produce a complete, paste-ready draft the user will refine.
+
+Business goals:
+{goals_text}
+
+User stories:
+{stories_text}
+
+Output requirements:
+- Start with YAML frontmatter: name (kebab-case), description (one short sentence — the routing signal).
+- Use suggested name "{name_hint}" if it fits; otherwise pick a better one based on the goals.
+- Body sections: # Instructions, ## Output format, ## Behaviors / rules, ## Edge cases. Each with concrete content drawn from the goals/stories above.
+- Keep it short and pragmatic: ~30-60 lines total. Specific rules, not platitudes.
+- Output ONLY the SKILL.md text — no commentary, no code fences. Frontmatter must be the first three lines (---, fields, ---) without any prefix.
+
+Begin the SKILL.md now:
+"""
+
+
 def build_evaluate_goals_prompt(goals: list[str]) -> str:
     goals_text = "\n".join(f"{i+1}. {g}" for i, g in enumerate(goals) if g.strip())
 

@@ -92,6 +92,8 @@ from .models import (
     SuggestStoriesResponse,
     SuggestSkillRequest,
     SuggestSkillResponse,
+    GenerateSkillFromGoalsRequest,
+    GenerateSkillFromGoalsResponse,
     SuggestRevisionsRequest,
     SynthesizeRequest,
     TaskDefinition,
@@ -109,6 +111,7 @@ from .tools import (
     call_evaluate_goals,
     call_suggest_stories,
     call_suggest_skill,
+    call_generate_skill_from_goals,
     call_validate_charter,
     call_generate_suggestions,
     call_synthesize_examples,
@@ -516,6 +519,65 @@ async def suggest_skill(req: SuggestSkillRequest):
     except Exception as e:
         logger.exception("Failed to suggest skill")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post(
+    "/sessions/{session_id}/generate-skill-from-goals",
+    response_model=GenerateSkillFromGoalsResponse,
+)
+async def generate_skill_from_goals(
+    session_id: str,
+    _req: GenerateSkillFromGoalsRequest,
+    access: Access = Depends(resolve_access),
+):
+    """Generate a full SKILL.md body from the session's goals + stories.
+
+    Returns just the body — the frontend pastes it into the textarea
+    and Analyze still has to be triggered explicitly. We don't persist
+    a skill version here so the user can review before committing.
+    """
+    require_writer(access)
+    state, _ = await _load_state(session_id)
+    goals = [g for g in (state.input.goals or []) if g and g.strip()]
+    stories = []
+    for g in (state.input.story_groups or []):
+        role = g.get("role", "") if isinstance(g, dict) else g.role
+        items = g.get("stories", []) if isinstance(g, dict) else g.stories
+        for s in items:
+            who = role
+            what = s.get("what", "") if isinstance(s, dict) else s.what
+            why = s.get("why", "") if isinstance(s, dict) else getattr(s, "why", "")
+            if who or what:
+                stories.append({"who": who, "what": what, "why": why or ""})
+    if not goals:
+        raise HTTPException(
+            status_code=400,
+            detail="Add at least one business goal before generating a skill.",
+        )
+
+    project = await db.get_session(session_id)
+    project_name = (project or {}).get("name") if project else None
+
+    try:
+        body, call_meta = await call_generate_skill_from_goals(
+            goals, stories, project_name
+        )
+    except Exception as e:
+        logger.exception("Failed to generate skill from goals")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    try:
+        await db.create_turn(
+            session_id=session_id,
+            turn_type="generate_skill_from_goals",
+            input_snapshot={"goals": goals, "stories": stories},
+            llm_calls=call_meta,
+            parsed_output={"body": body},
+        )
+    except Exception:
+        logger.warning("generate_skill_from_goals turn-log failed", exc_info=True)
+
+    return GenerateSkillFromGoalsResponse(body=body)
 
 
 @app.post("/sessions", response_model=CreateSessionResponse)

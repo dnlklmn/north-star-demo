@@ -750,6 +750,28 @@ export async function suggestStories(
   return res.json()
 }
 
+export async function generateSkillFromGoals(
+  sessionId: string,
+): Promise<{ body: string }> {
+  const res = await apiFetch(
+    `${BASE}/sessions/${sessionId}/generate-skill-from-goals`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
+    },
+  )
+  if (!res.ok) {
+    let detail = `Failed to generate skill (${res.status})`
+    try {
+      const j = await res.json()
+      if (j?.detail) detail = j.detail
+    } catch { /* not JSON */ }
+    throw new Error(detail)
+  }
+  return res.json()
+}
+
 export async function suggestSkill(
   goals: string[],
   stories: Array<{ who: string; what: string; why: string }>,

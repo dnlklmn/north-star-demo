@@ -510,11 +510,15 @@ export default function UsersPanel({
             )}
             <SuggestionBox
               label={embedded ? "Story suggestions" : "Suggestions"}
-              onRefresh={hasStories ? onStoryCommit : undefined}
+              onRefresh={
+                hasStories || hasGoals ? onStoryCommit : undefined
+              }
               loading={storySuggestionsLoading}
               emptyText={
-                hasStories
-                  ? "Press Enter after a story to get suggestions"
+                hasGoals
+                  ? hasStories
+                    ? "Press Enter after a story to get suggestions."
+                    : "Press refresh to suggest stories from your goals."
                   : "Enter a business goal to see suggestions."
               }
             >

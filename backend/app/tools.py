@@ -831,6 +831,42 @@ async def call_evaluate_goals(goals: list[str]) -> tuple[list[dict], list[dict]]
     return feedback, [meta]
 
 
+@traced("generate_skill_from_goals")
+async def call_generate_skill_from_goals(
+    goals: list[str],
+    stories: list[dict],
+    project_name: str | None,
+) -> tuple[str, list[dict]]:
+    """Generate a full SKILL.md body. Returns (body, call metadata list)."""
+    from .prompt import build_generate_skill_from_goals_prompt
+    await _refresh_settings()
+    prompt = build_generate_skill_from_goals_prompt(goals, stories, project_name)
+    text, meta = _call_llm(prompt, max_tokens=2048)
+    body = text.strip()
+    # Strip accidental code fences if the model wrapped output despite the
+    # explicit instruction not to.
+    if body.startswith("```"):
+        lines = body.splitlines()
+        # Drop leading and trailing fence lines.
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        body = "\n".join(lines).strip()
+    try:
+        bubble_input = (
+            "Goals:\n" + ("\n".join(f"- {g}" for g in goals) or "(none)")
+            + "\n\nStories:\n"
+            + ("\n".join(
+                f"- As a {s.get('who','')}, I want to {s.get('what','')}" for s in stories
+            ) or "(none)")
+        )
+        _bubble_io_to_parent_span(bubble_input, body)
+    except Exception as e:
+        logger.warning(f"generate_skill_from_goals scorer payload bubble failed: {e}")
+    return body, [meta]
+
+
 @traced("suggest_skill")
 async def call_suggest_skill(
     goals: list[str],

@@ -69,6 +69,12 @@ interface Props {
   onAcceptSkillSuggestion?: (suggestion: string) => void
   /** Dismiss handler — drops the suggestion from the local list. */
   onDismissSkillSuggestion?: (suggestion: string) => void
+  /** "Generate from goals" / "Regenerate from goals" handler — fires the
+   *  backend pass that produces a full SKILL.md draft from the session's
+   *  goals and stories. Shown as a header-row button when provided. */
+  onGenerateFromGoals?: () => void | Promise<void>
+  /** Drives the disabled state on the title-row generate button. */
+  generatingFromGoals?: boolean
 }
 
 /**
@@ -103,6 +109,8 @@ export default function SkillPanel({
   onRefreshSkillSuggestions,
   onAcceptSkillSuggestion,
   onDismissSkillSuggestion,
+  onGenerateFromGoals,
+  generatingFromGoals = false,
 }: Props) {
   const [draft, setDraft] = useState(skillBody)
   const [versions, setVersions] = useState<SkillVersion[]>([])
@@ -282,13 +290,11 @@ export default function SkillPanel({
   const nextVersion = (activeVersion?.version ?? 0) + 1
 
   // Fields block — single textarea. Name + description auto-detect from
-  // frontmatter on Analyze; we don't ask for them up-front.
+  // frontmatter on Analyze; we don't ask for them up-front. No label —
+  // the panel header already says "Skill" / "Prompt".
   const fieldsBlock = (
     <>
       <section>
-        <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide block mb-1">
-          {isPromptEval ? "Prompt template" : "Skill"}
-        </label>
         <textarea
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
@@ -298,7 +304,7 @@ export default function SkillPanel({
               : 'Paste GitHub link or start typing'
           }
           rows={24}
-          className="w-full p-3 bg-background border border-border font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+          className="w-full p-3 bg-background border border-border font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent focus:ring-inset"
           disabled={working || !canEdit}
           readOnly={!canEdit}
         />
@@ -389,6 +395,25 @@ export default function SkillPanel({
   // behind. Kept as a const for consistency with the JSX below.
   const showFields = true
 
+  // Header-row CTA: fire a backend pass that drafts a SKILL.md from the
+  // session's goals + stories. Hidden for prompt-eval and viewer mode.
+  // Label flips between Generate and Regenerate based on whether there's
+  // already content in the textarea.
+  const titleAction =
+    canEdit && !isPromptEval && onGenerateFromGoals && hasGoals ? (
+      <Button
+        size="small"
+        variant="neutral"
+        onClick={onGenerateFromGoals}
+        disabled={generatingFromGoals || working}
+      >
+        {generatingFromGoals ? (
+          <Loader2 className="w-4 h-4 animate-spin" />
+        ) : null}
+        {draft.trim() ? "Regenerate from goals" : "Generate from goals"}
+      </Button>
+    ) : undefined
+
   return (
     <PanelLayout
       title={isPromptEval ? "Prompt" : "Skill"}
@@ -401,6 +426,7 @@ export default function SkillPanel({
               : undefined
             : 'Paste a SKILL.md or a GitHub link, then click Analyze.'
       }
+      titleAction={titleAction}
       footer={footer}
       right={
         canEdit && !isPromptEval ? (

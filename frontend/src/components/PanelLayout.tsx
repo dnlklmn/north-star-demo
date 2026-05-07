@@ -5,6 +5,9 @@ import { AIIcon } from "./ui/Icons";
 interface Props {
   title: string;
   subtitle?: string;
+  /** Action (typically a Button) rendered inline at the right end of the
+   *  title row. Used for header-anchored CTAs like "Generate from goals". */
+  titleAction?: ReactNode;
   /** Banner rendered above the title inside the main column scroll area.
    *  Used for cross-section offers (e.g. "Already have a skill?") that
    *  shouldn't sit below the page heading. */
@@ -30,6 +33,7 @@ const MAX_RIGHT_WIDTH = 600;
 export default function PanelLayout({
   title,
   subtitle,
+  titleAction,
   topBanner,
   footer,
   rightTop,
@@ -95,7 +99,10 @@ export default function PanelLayout({
       <div className="flex-1 min-w-0 relative">
         <div className="absolute inset-0 overflow-y-auto py-6">
           {topBanner && <div className="mb-6">{topBanner}</div>}
-          <h2 className="text-2xl font-medium text-fg-contrast">{title}</h2>
+          <div className="flex items-center justify-between gap-4">
+            <h2 className="text-2xl font-medium text-fg-contrast">{title}</h2>
+            {titleAction && <div className="flex-shrink-0">{titleAction}</div>}
+          </div>
           {subtitle && (
             <p className="text-base text-fg-dim mt-1 mb-12">{subtitle}</p>
           )}

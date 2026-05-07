@@ -640,6 +640,22 @@ class SuggestSkillResponse(BaseModel):
     suggestions: list[str] = Field(default_factory=list)
 
 
+class GenerateSkillFromGoalsRequest(BaseModel):
+    """Generate a full SKILL.md body from goals + stories.
+
+    Distinct from SuggestSkill which returns short bullet hints. This
+    endpoint returns a ready-to-paste SKILL.md draft (with frontmatter)
+    that the user can then refine inline. session_id is required because
+    we read the goals/stories from the persisted session to keep the
+    request payload small.
+    """
+    session_id: str
+
+
+class GenerateSkillFromGoalsResponse(BaseModel):
+    body: str
+
+
 class SuggestRevisionsRequest(BaseModel):
     example_ids: list[str] = Field(default_factory=list)
 

@@ -41,6 +41,7 @@ import {
   evaluateGoals,
   suggestStories,
   suggestSkill,
+  generateSkillFromGoals,
   createDataset,
   getDataset,
   synthesizeExamples,
@@ -736,6 +737,37 @@ export default function ProjectWorkspace() {
     setDismissedSkillSuggestions((prev) => new Set(prev).add(suggestion));
   }, []);
 
+  // --- Generate full SKILL.md from goals + stories ---
+  const [generatingSkillFromGoals, setGeneratingSkillFromGoals] =
+    useState(false);
+  const handleGenerateSkillFromGoals = useCallback(async () => {
+    if (!urlSessionId) return;
+    if (state.charter.task.skill_body?.trim()) {
+      const ok = window.confirm(
+        "Replace the current skill body?\n\nThis overwrites the textarea with a fresh draft generated from your goals and user stories. Save the current body as a version first if you want to keep it.",
+      );
+      if (!ok) return;
+    }
+    setGeneratingSkillFromGoals(true);
+    try {
+      const res = await generateSkillFromGoals(urlSessionId);
+      setState((prev) => ({
+        ...prev,
+        charter: {
+          ...prev.charter,
+          task: { ...prev.charter.task, skill_body: res.body },
+        },
+      }));
+    } catch (err) {
+      console.error("Failed to generate skill from goals:", err);
+      alert(
+        `Could not generate skill — ${err instanceof Error ? err.message : "unknown error"}`,
+      );
+    } finally {
+      setGeneratingSkillFromGoals(false);
+    }
+  }, [urlSessionId, state.charter.task.skill_body]);
+
   const fetchGoalFeedback = useCallback(
     async (currentGoals: string[]) => {
       // Only critique goals the user typed. Goals the agent extracted (or
@@ -974,11 +1006,13 @@ export default function ProjectWorkspace() {
     setSuggestedStories((prev) => prev.filter((s) => s !== story));
   }, []);
 
-  // When navigating to User Stories, kick off a suggestion round
-  // based on the goals we already have (first visit only).
+  // First-visit auto-fetch of story suggestions from the existing goals.
+  // Fires on the combined Goal tab (where the User Stories section lives)
+  // as well as the legacy standalone "users" tab. Once the user has at
+  // least one goal committed, we get a suggestion batch ready in the rail.
   const storyAutoSuggestedRef = useRef(false);
   useEffect(() => {
-    if (activeTab !== "users") return;
+    if (activeTab !== "users" && activeTab !== "goals") return;
     if (storyAutoSuggestedRef.current) return;
     if (storySuggestionsLoading) return;
     if (suggestedStories.length > 0) return;
@@ -2260,6 +2294,8 @@ export default function ProjectWorkspace() {
               onRefreshSkillSuggestions={fetchSkillSuggestions}
               onAcceptSkillSuggestion={handleAcceptSkillSuggestion}
               onDismissSkillSuggestion={handleDismissSkillSuggestion}
+              onGenerateFromGoals={handleGenerateSkillFromGoals}
+              generatingFromGoals={generatingSkillFromGoals}
             />
           )}
 
