@@ -34,7 +34,31 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
     onScorersChange?.(s)
   }
   const [generatingLocal, setGenerating] = useState(false)
-  const generating = generatingLocal || !!externalGenerating
+  // Once scorers populate, generation is observably done — surface that
+  // truth even if a generation flag (parent-driven `externalGenerating` or
+  // a stuck local one) hasn't cleared yet. Without this, a slow parent
+  // state update or an interrupted flow could leave the regenerate button
+  // permanently stuck on "Generating…" after rows already landed.
+  const generating =
+    scorers.length === 0 && (generatingLocal || !!externalGenerating)
+  // The regenerate button in the populated header has its own narrower
+  // signal — only the local action drives it, so kicking off a regenerate
+  // from this panel always has a clean "generating → done" lifecycle and
+  // doesn't get tangled with charter-shortcut state.
+  const headerRegenBusy = generatingLocal
+
+  // Expected scorer count = one per charter criterion, roughly. Surfaced
+  // in the empty-state spinner copy so the user sees rough progress
+  // ("Generating ~6 scorers…") instead of an open-ended spinner.
+  const expectedScorerCount = (() => {
+    const cov = charter.coverage?.criteria?.length || 0
+    const offTarget = charter.coverage?.negative_criteria?.length || 0
+    const bal = charter.balance?.criteria?.length || 0
+    const align = charter.alignment?.length || 0
+    const rot = charter.rot?.criteria?.length || 0
+    const safety = charter.safety?.criteria?.length || 0
+    return Math.max(cov + offTarget + bal + align + rot + safety, 1)
+  })()
   const [expandedScorer, setExpandedScorer] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   // Per-scorer ephemeral state for the Braintrust export button. The success
@@ -191,10 +215,10 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
             {canEdit && (
               <button
                 onClick={handleGenerate}
-                disabled={!hasCriteria || generating}
+                disabled={!hasCriteria || headerRegenBusy}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-border text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                {generating ? (
+                {headerRegenBusy ? (
                   <>
                     <Loader2 className="w-3 h-3 animate-spin" />
                     Generating...
@@ -250,7 +274,8 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
                   {generating ? (
                     <>
                       <Loader2 className="w-4 h-4 animate-spin" />
-                      Generating...
+                      Generating ~{expectedScorerCount} scorer
+                      {expectedScorerCount === 1 ? "" : "s"}…
                     </>
                   ) : (
                     <>

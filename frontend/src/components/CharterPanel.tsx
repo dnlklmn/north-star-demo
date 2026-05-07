@@ -210,7 +210,12 @@ export default function CharterPanel({
   const taskScore = taskFilled / 2;
 
 
-  if (isEmpty && suggestions.length === 0) {
+  // Empty fallback only kicks in when there's truly nothing to show AND
+  // we're not generating. While loading we fall through to the tabbed view
+  // so the user still sees the charter chrome (tabs + radar) under the
+  // loading overlay — a blank centered spinner makes the page feel like it
+  // navigated away.
+  if (isEmpty && suggestions.length === 0 && !loading) {
     return (
       <PanelLayout
         title="Charter"
@@ -219,16 +224,9 @@ export default function CharterPanel({
         rightBottomExpanded={rightBottomExpanded}
       >
         <div className="flex items-center justify-center py-24">
-          {loading ? (
-            <div className="text-center">
-              <Loader2 className="w-6 h-6 text-fg-dim animate-spin mx-auto mb-3" />
-              <p className="text-sm text-fg-dim">Generating...</p>
-            </div>
-          ) : (
-            <p className="text-sm text-fg-dim">
-              No charter yet. Go back and generate one.
-            </p>
-          )}
+          <p className="text-sm text-fg-dim">
+            No charter yet. Go back and generate one.
+          </p>
         </div>
       </PanelLayout>
     );
@@ -323,19 +321,6 @@ export default function CharterPanel({
       }
     >
       <div className="relative">
-        {/* Loading overlay — fires when the caller flags loading=true.
-            Shows over an existing charter (regenerate) or the empty
-            scaffold (first-time generate). Label flips on hasCharter. */}
-        {loading && (
-          <div className="absolute inset-0 z-10 flex items-center justify-center bg-bg-default/70 backdrop-blur-[1px] min-h-[12rem]">
-            <div className="flex items-center gap-2 px-4 py-2 bg-surface-raised border border-border shadow-lg">
-              <Loader2 className="w-4 h-4 text-fg-dim animate-spin" />
-              <span className="text-sm text-fg-contrast">
-                {hasCharter ? "Regenerating charter…" : "Generating charter…"}
-              </span>
-            </div>
-          </div>
-        )}
       {(() => {
         // Tab definitions kept inline so labels, help copy, and readiness
         // scores are declared side-by-side. Safety stays hidden until the
@@ -433,7 +418,20 @@ export default function CharterPanel({
 
             {/* Body — each section renders its own title + help + status
                 row inline so "60% ready" and the Add button sit beside the
-                title, not on a separate line. */}
+                title, not on a separate line. The loading overlay sits
+                here, below the tab bar, so the user can still click
+                between tabs while a regeneration is in flight. */}
+            <div className="relative">
+            {loading && (
+              <div className="absolute inset-0 z-10 flex items-center justify-center bg-bg-default/70 backdrop-blur-[1px] min-h-[12rem]">
+                <div className="flex items-center gap-2 px-4 py-2 bg-surface-raised border border-border shadow-lg">
+                  <Loader2 className="w-4 h-4 text-fg-dim animate-spin" />
+                  <span className="text-sm text-fg-contrast">
+                    {hasCharter ? "Regenerating charter…" : "Generating charter…"}
+                  </span>
+                </div>
+              </div>
+            )}
             {current?.id === "task" && (
               <SchemaSection
                 task={charter.task}
@@ -534,6 +532,7 @@ export default function CharterPanel({
                 </div>
               );
             })()}
+            </div>
           </>
         );
       })()}

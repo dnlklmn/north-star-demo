@@ -97,6 +97,19 @@ interface Props {
    *  while the seed + submit-intake passes run, instead of leaving the
    *  user staring at the Skill page for ~10s. */
   onBeforeAnalyze?: () => void
+  /** Counterpart to `onBeforeAnalyze` — fires if the analyze call throws
+   *  (e.g. a GitHub URL fetch fails or the seed pass errors out). The
+   *  parent uses this to unflip whatever loading flag `onBeforeAnalyze`
+   *  set, otherwise the user is stranded with a permanent "Generating
+   *  charter…" overlay on the Charter tab. */
+  onAnalyzeError?: () => void
+  /** Seed for the version history list. The parent already has the full
+   *  history in `state.skill_versions` (it ships with the session payload)
+   *  so passing it down lets the panel paint synchronously instead of
+   *  blocking on a separate `/skill-versions` fetch on every mount.
+   *  When provided, the on-mount network refresh is skipped — mutations
+   *  still refresh in-place. */
+  initialVersions?: SkillVersion[]
 }
 
 /**
@@ -137,9 +150,16 @@ export default function SkillPanel({
   autoGenerateSuggestions = true,
   hasCharter = false,
   onBeforeAnalyze,
+  onAnalyzeError,
+  initialVersions,
 }: Props) {
   const [draft, setDraft] = useState(skillBody)
-  const [versions, setVersions] = useState<SkillVersion[]>([])
+  // Seed history from the parent so the list renders synchronously — without
+  // this we used to block on a /skill-versions fetch on every mount, which
+  // showed a noticeable empty flash on every Skill-tab visit.
+  const [versions, setVersions] = useState<SkillVersion[]>(
+    () => initialVersions ?? [],
+  )
   const [notes, setNotes] = useState('')
   const [working, setWorking] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -167,9 +187,29 @@ export default function SkillPanel({
     }
   }, [sessionId])
 
+  // Keep local state in sync with the parent — the session-state SSE feed
+  // overwrites `state.skill_versions` after every mutation, so we mirror it
+  // here. The catch is that `handleSave` does an optimistic local prepend
+  // (a v+1 row) BEFORE the SSE round-trip lands, so a parent re-render that
+  // happens for unrelated reasons in that window would otherwise clobber
+  // the optimistic row back to the stale list. We only mirror when the seed
+  // is at least as fresh as what we already have — if the local list has
+  // strictly more rows or a higher top version, the seed is mid-flight and
+  // we hold off until SSE catches up. No on-mount network fetch: the seed
+  // already painted synchronously.
   useEffect(() => {
-    refreshVersions()
-  }, [refreshVersions])
+    if (!initialVersions) {
+      void refreshVersions()
+      return
+    }
+    setVersions((prev) => {
+      if (prev.length > initialVersions.length) return prev
+      const prevTop = prev[0]?.version ?? 0
+      const seedTop = initialVersions[0]?.version ?? 0
+      if (prevTop > seedTop) return prev
+      return initialVersions
+    })
+  }, [initialVersions, refreshVersions])
 
   const activeVersion = versions[0]
   const hasVersions = versions.length > 0
@@ -234,11 +274,15 @@ export default function SkillPanel({
     } catch (err) {
       console.error('Seed failed', err)
       setError(err instanceof Error ? err.message : 'Failed to analyze SKILL.md')
+      // Notify parent so it can unflip whatever loading flag onBeforeAnalyze
+      // set — without this, a failed analyze leaves the Charter tab stuck on
+      // the "Generating charter…" overlay forever.
+      onAnalyzeError?.()
     } finally {
       setWorking(false)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canAnalyze, draft, sessionId, onSkillBodyChange, onSeeded, refreshVersions, onBeforeAnalyze])
+  }, [canAnalyze, draft, sessionId, onSkillBodyChange, onSeeded, refreshVersions, onBeforeAnalyze, onAnalyzeError])
 
   const handleRerunAnalysis = async () => {
     setWorking(true)
