@@ -426,4 +426,37 @@ export interface RunEvalRequest {
   include_triggering?: boolean
   model?: string
   judge_model?: string
+  /** When true, run each row in a real tool-use loop with a sandboxed
+   *  filesystem instead of bare messages.create(). Required to honestly
+   *  evaluate skills that produce file artifacts. */
+  agent_mode?: boolean
+  /** With agent_mode, expose the run_bash tool. Off by default. */
+  allow_bash?: boolean
+  /** With agent_mode, max tool-use turns per row (default 10). */
+  max_iterations?: number
+}
+
+export interface AgentToolCall {
+  name: string
+  input: Record<string, unknown>
+  result: string
+  is_error: boolean
+  duration_ms: number
+}
+
+export interface AgentArtifact {
+  path: string
+  size: number
+  sha256: string
+  preview: string | null
+  binary: boolean
+}
+
+export interface AgentRowMetadata {
+  tool_calls: AgentToolCall[]
+  artifacts: AgentArtifact[]
+  iterations: number
+  stop_reason: string | null
+  halted: string | null
+  workspace: string | null
 }

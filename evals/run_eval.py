@@ -101,6 +101,23 @@ def main() -> None:
     run.add_argument("--judge-model", default=DEFAULT_JUDGE_MODEL)
     run.add_argument("--include-triggering", action="store_true")
     run.add_argument("--limit", type=int)
+    run.add_argument(
+        "--agent-mode",
+        action="store_true",
+        help="Run the skill inside a tool-use loop with a sandboxed filesystem. "
+             "Produces real file artifacts so tool-using skills can be honestly evaluated.",
+    )
+    run.add_argument(
+        "--allow-bash",
+        action="store_true",
+        help="With --agent-mode, also expose the run_bash tool. Off by default — bash can side-step the sandbox.",
+    )
+    run.add_argument(
+        "--max-iterations",
+        type=int,
+        default=None,
+        help="With --agent-mode, cap on tool-use turns per row (default 10).",
+    )
 
     args = parser.parse_args()
 
@@ -123,6 +140,13 @@ def main() -> None:
         file=sys.stderr,
     )
 
+    extra_kwargs: dict = {}
+    if args.agent_mode:
+        extra_kwargs["agent_mode"] = True
+        extra_kwargs["allow_bash"] = args.allow_bash
+        if args.max_iterations is not None:
+            extra_kwargs["max_iterations"] = args.max_iterations
+
     result = run_eval_sync(
         skill_body=skill_body,
         scorer_defs=scorers,
@@ -134,6 +158,7 @@ def main() -> None:
         judge_model=args.judge_model,
         include_triggering=args.include_triggering,
         limit=args.limit,
+        **extra_kwargs,
     )
 
     print(f"\nEvaluated {result.rows_evaluated}/{result.rows_total} rows")
