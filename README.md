@@ -263,6 +263,25 @@ Safety scorers are strict — their judge prompts are instructed that violations
 - **View charter** link on each run — opens the exact charter used (not the live one).
 - **Improve skill** button — jumps to Improve tab with auto-analyze triggered.
 
+#### Agent mode (tool-using skills)
+
+The default task runs `messages.create(system=skill_body, messages=[user_input])` — a single LLM call, no tools. That's the right shape for text-centric skills (`internal-comms`, `claude-api`, `skill-creator`) where the skill's job is *what to say*. But it's actively misleading for tool-using skills (`docx`, `pdf`, `xlsx`, `webapp-testing`, anything producing file artifacts): the model returns prose like *"I've written the file to /tmp/foo.docx"* with no file, and judges happily score the prose. You'd see all-green scorers and ship something that doesn't work.
+
+Toggle **Agent mode** in the Evaluations panel (or pass `--agent-mode` to `evals/run_eval.py`) to fix that. Each row runs inside a real tool-use loop:
+
+- **Per-row sandbox.** Each row gets a fresh dir under `tmp/eval-runs/<run_id>/<row_id>/`. The agent's only filesystem reach is via the four built-in tools (`read_file`, `write_file`, `edit_file`, `list_dir`), all of which refuse paths that resolve outside the workspace.
+- **Tool-use loop.** The runner calls `messages.create(..., tools=[...])`, dispatches every `tool_use` block against the sandbox, feeds the results back, and loops until the model stops requesting tools (or hits the iteration cap, default 10).
+- **Captured trace.** Every tool call (name, input, result, latency, error flag) plus a manifest of every file the run produced (path, size, sha256, inline preview) lands on the row's `metadata.agent` blob. The Per-row drawer renders this as a tool-call timeline + artifact list — so you can see exactly what the skill *did*, not just what it *said*.
+- **Bash, opt-in.** A `run_bash` tool is also available behind a separate **Allow bash** checkbox. It bypasses the path allowlist (a determined skill could `cd /` and escape), so it's off by default and reserved for skills you've reviewed.
+
+What this is *not*:
+
+- An OS-level sandbox. The path allowlist is pure-Python; bash escapes it. For untrusted skills, run inside a container.
+- The official `claude-agent-sdk`. We use the Anthropic SDK we already depend on with a manual tool loop — it's functionally equivalent for eval purposes and avoids pulling Node + the Claude Code CLI into the deploy matrix. The seam (`backend/app/agent_task.py`) is small enough that a future SDK swap touches one file.
+- A skill *router* test. Agent mode evaluates execution; the description-based skill loader the real CLI uses is not simulated.
+
+Defaults stay backwards-compatible: agent mode is off, and old runs are unaffected. Cost is bounded by `max_iterations` (default 10) and per-call `max_tokens` (4096). Tool inputs/results are truncated to 4KB inline; the full payload remains on disk under the per-row workspace.
+
 ---
 
 ### Improve
@@ -490,19 +509,9 @@ The CLI prints the trace filter to use when attaching each scorer in the Braintr
 
 These are discussed but not built. Listed roughly by value / effort.
 
-### Claude Agent SDK integration *(biggest unlock)*
+### Routing eval *(was: Claude Agent SDK integration)*
 
-Today the eval's `task()` function calls the bare Anthropic Messages API with SKILL.md as a system prompt. This tests whether the skill's **instructions** produce good text, but:
-
-- Tool-using skills (file writes, image generation, URL fetches) produce *hallucinated* outputs — "I've generated the image at /tmp/foo.png" with no file.
-- **Routing** (does Claude Code actually load this skill?) is side-stepped — we pre-inject the body rather than letting the description-based router decide.
-
-Integrating the Claude Agent SDK would fix both. The `task()` becomes an agent loop that loads the skill by description, allows tool calls, and captures real artifacts. You'd also get:
-- **Tool-call traces** per row (critical for multi-step skills where step 3 fails).
-- **Runtime safety signal** (did the skill actually call `curl evil.com`, did it write outside the sandbox).
-- **Token + latency budgets** under realistic tool usage.
-
-Estimated scope: ~1 week. Requires sandboxing for file writes, a domain allow-list, and Braintrust tracing for tool-call spans.
+The execution-half of this is **shipped** — see [Agent mode](#agent-mode-tool-using-skills) below. What's still on the wishlist is the *routing* signal: does the description-based skill router actually pick this skill up when a real Claude Code session sees a relevant prompt? We don't simulate that today; agent-mode runs always load the skill. A future hook against the real Claude Code CLI (or a routing-only scorer that grades the skill's `description` field against `should_trigger` rows) would close that gap.
 
 ### Two-way connectors
 
@@ -544,7 +553,7 @@ The Safety charter dimension scores output-level violations today (prompt inject
 
 **Less strong fit (as of today):**
 
-- **Tool-using skills** (`docx`, `pdf`, `xlsx`, `slack-gif-creator`, `webapp-testing`, anything producing file artifacts). The `task()` runs bare Claude, so tool-produced artifacts don't actually materialize. Wait for Agent SDK integration or scope evals to the text-portion of output.
+- **Tool-using skills** (`docx`, `pdf`, `xlsx`, `slack-gif-creator`, `webapp-testing`, anything producing file artifacts). Default `task()` runs bare Claude, so tool-produced artifacts don't actually materialize. Toggle **Agent mode** on the Evaluations tab (or `--agent-mode` on the CLI) to run inside a sandboxed tool-use loop — file writes land on disk and the per-row drawer shows the tool-call trace.
 - **Very large datasets** (1000+ rows). Current UI renders all rows; per-row API calls to the judge aren't batched aggressively. Fine for demo-sized iteration, not production-scale benchmarking.
 - **Multi-agent flows** where routing happens across multiple skills. The harness only evaluates one skill at a time.
 - **Continuous production monitoring.** This is an authoring + iteration tool. For prod monitoring you'd wire Braintrust or Langfuse directly into your app and consume North Star's dataset as a seed.

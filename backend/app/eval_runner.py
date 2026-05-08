@@ -21,6 +21,8 @@ from typing import Any, Callable
 import anthropic
 import braintrust
 
+from . import agent_task
+
 
 DEFAULT_MODEL = os.environ.get("EVAL_MODEL", "claude-opus-4-7")
 DEFAULT_JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "claude-sonnet-4-5-20250929")
@@ -446,6 +448,10 @@ def run_eval_sync(
     limit: int | None = None,
     prompt_target: str | None = None,
     prompt_body_template: str | None = None,
+    agent_mode: bool = False,
+    allow_bash: bool = False,
+    max_iterations: int = agent_task.MAX_ITERATIONS_DEFAULT,
+    sandbox_root: Any | None = None,
 ) -> EvalResult:
     """Synchronously run a Braintrust Eval. Blocks. Call via asyncio.to_thread.
 
@@ -540,12 +546,44 @@ def run_eval_sync(
             detail += ". Approve at least one row in the Dataset tab before running the eval."
         raise ValueError(f"No eligible rows to evaluate — {detail}")
 
+    # Per-row trace storage for agent mode. The Braintrust task fn must return
+    # a string, so we collect rich traces here via a side-channel sink and
+    # merge them into per_row metadata after Eval() finishes.
+    agent_traces: dict[str, agent_task.AgentRunTrace] = {}
+
     if is_prompt_mode:
+        if agent_mode:
+            # Agent mode is about giving a SKILL.md tools to call; prompt-eval
+            # mode evaluates a prompt template against state snapshots, where
+            # tool use isn't meaningful. Refuse instead of silently ignoring.
+            raise ValueError("agent_mode is not supported for prompt-eval projects.")
         task = make_task_for_prompt(
             task_client,
             prompt_target,  # type: ignore[arg-type]
             task_model,
             body_template=prompt_body_template,
+        )
+    elif agent_mode:
+        # Agent mode: per-row sandbox + tool loop. Sandbox root defaults to
+        # tmp/eval-runs/<experiment_name or auto>/ so concurrent runs don't
+        # collide. Caller can override via sandbox_root for tests.
+        from pathlib import Path as _Path
+        if sandbox_root is None:
+            sandbox_root = agent_task.default_sandbox_root(experiment_name)
+        else:
+            sandbox_root = _Path(sandbox_root)
+
+        def _trace_sink(rid: str, trace: agent_task.AgentRunTrace) -> None:
+            agent_traces[rid] = trace
+
+        task = agent_task.make_agent_task(
+            task_client,
+            skill_body,
+            task_model,
+            sandbox_root=sandbox_root,
+            allow_bash=allow_bash,
+            max_iterations=max_iterations,
+            trace_sink=_trace_sink,
         )
     else:
         task = make_task(task_client, skill_body, task_model)
@@ -560,6 +598,8 @@ def run_eval_sync(
         )
 
         url, name, averages, per_row = _extract_summary(handle)
+        if agent_mode and agent_traces:
+            agent_task.attach_traces_to_per_row(per_row, agent_traces)
         return EvalResult(
             experiment_url=url,
             experiment_name=name or experiment_name,

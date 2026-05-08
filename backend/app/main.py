@@ -2982,6 +2982,11 @@ async def _execute_eval_run(
     })
 
     try:
+        from .agent_task import MAX_ITERATIONS_DEFAULT
+        # Use the run_id as the sandbox subfolder so concurrent runs from the
+        # same experiment_name never trample each other.
+        from .agent_task import default_sandbox_root
+        sandbox_root = default_sandbox_root(run_id) if req.agent_mode else None
         result: EvalResult = await asyncio.to_thread(
             run_eval_sync,
             skill_body=skill_body,
@@ -2997,6 +3002,10 @@ async def _execute_eval_run(
             limit=req.limit,
             prompt_target=prompt_target,
             prompt_body_template=prompt_body_template,
+            agent_mode=req.agent_mode,
+            allow_bash=req.allow_bash,
+            max_iterations=req.max_iterations or MAX_ITERATIONS_DEFAULT,
+            sandbox_root=sandbox_root,
         )
         # Braintrust returns Done even when every row's task threw — auth
         # errors against Anthropic, rate limits, etc. Surface that as 'failed'

@@ -123,6 +123,35 @@ Braintrust stores: input, output, expected, per-scorer scores, trace
 
 `braintrust.wrap_anthropic()` wraps the task's client so every Claude call becomes a child span under the row — you see tokens, latency, and the raw response without writing logging yourself.
 
+### Agent mode (`--agent-mode`)
+
+Add `--agent-mode` to evaluate skills that produce file artifacts (docx, pdf, xlsx, etc). The default task can't tell whether the model actually wrote a file or just *said* it did — for those skills the scorers grade hallucinated prose. Agent mode replaces the bare LLM call with a tool-use loop:
+
+```
+row {input, expected_output}
+  │
+  ▼
+spin up tmp/eval-runs/<experiment>/<row_id>/        # per-row sandbox
+  │
+  ▼
+loop (max 10 iterations):
+    messages.create(system=skill_body, tools=[read_file, write_file, edit_file, list_dir, run_bash?])
+    for each tool_use block:
+        execute tool inside sandbox (path allowlist enforced)
+        feed tool_result back
+    if no more tool_use → break
+  │
+  ▼
+collect artifacts (path, size, sha256, preview) + tool-call timeline
+  │
+  ▼
+return final assistant text  +  attach trace to row metadata.agent
+```
+
+Add `--allow-bash` if the skill genuinely needs shell access (off by default — bash side-steps the path allowlist). Cap iterations with `--max-iterations N`.
+
+The per-row trace lands on `metadata.agent` in `EvalResult.per_row` and is rendered as a tool-call timeline + artifact list in the UI's Per-row drawer.
+
 ---
 
 ## What this eval DOES NOT do
