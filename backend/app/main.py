@@ -1663,7 +1663,15 @@ async def session_events(
                     yield ": ping\n\n"
                     continue
                 event_type = event.get("type", "message")
-                yield f"event: {event_type}\ndata: {{}}\n\n"
+                # Forward the payload so progress events (e.g. dataset-synth
+                # cell completions) can carry generated/total counts. Default
+                # to "{}" so existing state_changed listeners that ignore the
+                # payload keep working.
+                payload = event.get("data") or {}
+                yield (
+                    f"event: {event_type}\n"
+                    f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+                )
         except asyncio.CancelledError:
             # Cancellation flows through here when the request is torn down
             # — re-raise so FastAPI unwinds correctly.
@@ -2369,42 +2377,132 @@ async def synthesize_examples(
     req: SynthesizeRequest,
     access: Access = Depends(resolve_dataset_access),
 ):
-    """Generate synthetic examples from the charter."""
+    """Generate synthetic examples from the charter.
+
+    Rows persist per-cell (rather than one bulk insert at the end) so each
+    cell completion publishes a `synth_progress` SSE event with the running
+    `{generated, total}` counts. Frontends use this to show real progress
+    instead of a guessed expected total.
+    """
     require_writer(access)
     dataset = await db.get_dataset(dataset_id)
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
     charter = dataset["charter_snapshot"]
-    generated, call_meta = await call_synthesize_examples(
+    session_id = dataset["session_id"]
+
+    # Compute the cell total upfront so progress events have a denominator
+    # the frontend can paint against. Mirrors the cell-fan-out logic in
+    # call_synthesize_examples — keep the two heuristics aligned.
+    target_areas = req.feature_areas or [
+        a.get("feature_area", "")
+        for a in (charter.get("alignment") or [])
+    ]
+    target_areas = [a for a in target_areas if a]
+    target_coverage = req.coverage_criteria or (
+        (charter.get("coverage") or {}).get("criteria") or []
+    )
+    target_coverage = [c for c in target_coverage if c]
+    cell_count = len(target_areas) * len(target_coverage)
+    expected_total = max(cell_count, 1) * (req.count_per_scenario or 2)
+
+    # Tell the frontend we're kicking off — `generated=0, total=expected`
+    # gives the overlay something to render before the first cell lands.
+    await broadcaster.publish(
+        session_id,
+        {
+            "type": "synth_progress",
+            "data": {
+                "dataset_id": dataset_id,
+                "generated": 0,
+                "total": expected_total,
+                "phase": "started",
+            },
+        },
+    )
+
+    created_total = 0
+    all_created: list[dict] = []
+
+    async def on_cell(cell_examples: list[dict]) -> None:
+        """Persist this cell's rows and broadcast running progress.
+
+        Lives inside the endpoint so it can close over `dataset_id` /
+        `session_id` / counters without plumbing them through tools.py.
+        Best-effort by design — if the publish or insert hiccups we log
+        and move on; the synth itself is the source of truth.
+        """
+        nonlocal created_total
+        for ex in cell_examples:
+            ex["source"] = "synthetic"
+        try:
+            inserted = await db.bulk_create_examples(dataset_id, cell_examples)
+        except Exception as err:
+            logger.warning(
+                f"synthesize_examples: cell insert failed: "
+                f"{type(err).__name__}: {err}"
+            )
+            return
+        all_created.extend(inserted)
+        created_total += len(inserted)
+        await broadcaster.publish(
+            session_id,
+            {
+                "type": "synth_progress",
+                "data": {
+                    "dataset_id": dataset_id,
+                    "generated": created_total,
+                    "total": max(expected_total, created_total),
+                    "phase": "in_progress",
+                },
+            },
+        )
+
+    _, call_meta = await call_synthesize_examples(
         charter,
         feature_areas=req.feature_areas,
         coverage_criteria=req.coverage_criteria,
         count=req.count_per_scenario,
+        on_cell=on_cell,
     )
 
-    # Add source marker and persist
-    for ex in generated:
-        ex["source"] = "synthetic"
-
-    created = await db.bulk_create_examples(dataset_id, generated)
+    # Final progress beat — pin generated/total to the actual created count
+    # so the frontend can clear its overlay cleanly even when expected_total
+    # diverges (LLM returned fewer rows than asked, cell failures, etc.).
+    await broadcaster.publish(
+        session_id,
+        {
+            "type": "synth_progress",
+            "data": {
+                "dataset_id": dataset_id,
+                "generated": created_total,
+                "total": created_total,
+                "phase": "done",
+            },
+        },
+    )
 
     # Log the turn
     await db.create_turn(
-        session_id=dataset["session_id"],
+        session_id=session_id,
         turn_type="synthesize",
         input_snapshot={"charter": charter, "request": req.model_dump()},
         llm_calls=call_meta,
-        parsed_output={"examples_generated": len(created)},
+        parsed_output={"examples_generated": len(all_created)},
     )
 
     # Stamp lineage — dataset generated against the current active skill version.
-    state, conversation = await _load_state(dataset["session_id"])
+    state, conversation = await _load_state(session_id)
     _stamp_lineage(state, "dataset")
-    await _save_state(dataset["session_id"], state, conversation)
+    await _save_state(session_id, state, conversation)
 
     stats = await db.update_dataset_stats(dataset_id)
-    return {"generated": len(created), "examples": created, "stats": stats}
+    return {
+        "generated": len(all_created),
+        "examples": all_created,
+        "stats": stats,
+    }
 
 
 @app.get("/datasets/{dataset_id}/examples")

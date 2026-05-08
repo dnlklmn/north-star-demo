@@ -94,7 +94,7 @@ import { computeCoverageScore } from "../components/coverage";
 import GenerateModal from "../components/examples/GenerateModal";
 import SettingsPanel from "../components/SettingsPanel";
 import ShareModal from "../components/ShareModal";
-import { useProjectEvents } from "../hooks/useProjectEvents";
+import { useProjectEvents, type SynthProgressEvent } from "../hooks/useProjectEvents";
 import { useShareToken } from "../hooks/useShareToken";
 
 type ActiveTab =
@@ -530,7 +530,21 @@ export default function ProjectWorkspace() {
       // No dataset yet, or fetch failed — non-fatal.
     }
   }, [sessionId]);
-  useProjectEvents(sessionId, handleLiveStateChange);
+  // Live dataset-synth progress, driven by the backend's per-cell
+  // `synth_progress` SSE event. Cleared back to null on the "done" phase
+  // so the dataset overlay knows when to drop the live count and hide.
+  const [synthProgress, setSynthProgress] = useState<{
+    generated: number;
+    total: number;
+  } | null>(null);
+  const handleSynthProgress = useCallback((event: SynthProgressEvent) => {
+    if (event.phase === "done") {
+      setSynthProgress(null);
+      return;
+    }
+    setSynthProgress({ generated: event.generated, total: event.total });
+  }, []);
+  useProjectEvents(sessionId, handleLiveStateChange, handleSynthProgress);
 
   // Mirror React state → in-memory cache. Every setState((prev) => …) call
   // (charter edits, scorer toggles, skill body updates, etc.) trips this
@@ -2872,6 +2886,7 @@ export default function ProjectWorkspace() {
                     charter={state.charter}
                     loading={loading}
                     generating={generatingDataset || generatingBoth}
+                    generatingProgress={synthProgress}
                     generatingTotal={(() => {
                       // Best-effort upper bound on rows we're about to land
                       // — coverage criteria × alignment areas × default
@@ -2982,7 +2997,9 @@ export default function ProjectWorkspace() {
                           {generating ? (
                             <>
                               <Loader2 className="w-4 h-4 animate-spin" />
-                              Generating ~{expected} rows…
+                              {synthProgress
+                                ? `Generated ${synthProgress.generated} of ${synthProgress.total} rows…`
+                                : `Generating ~${expected} rows…`}
                             </>
                           ) : (
                             <>
