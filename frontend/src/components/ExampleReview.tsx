@@ -1,8 +1,27 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { ChevronDown, Check, X, RefreshCw, Pencil, Trash2 } from 'lucide-react'
+import { ChevronDown, ChevronRight, Check, X, RefreshCw, Pencil, Trash2 } from 'lucide-react'
 import type { Example, Charter } from '../types'
 import DeleteModal from './examples/DeleteModal'
 import GenerateModal from './examples/GenerateModal'
+
+// Persisted preference: when true, technical-detail fields (judge confidence,
+// judge reasoning/issues, router verdict, full coverage tag list, raw
+// feature_area, should_trigger flags) collapse behind a per-row "Show details"
+// disclosure. PMs landing on this screen shouldn't have to decode our schema
+// to review examples; engineers can flip it off to see everything inline.
+const PM_MODE_STORAGE_KEY = 'northstar.pm_mode'
+
+function readPmModePref(): boolean {
+  if (typeof window === 'undefined') return true
+  const v = window.localStorage.getItem(PM_MODE_STORAGE_KEY)
+  // Default to PM-friendly. Only an explicit "false" opts out.
+  return v !== 'false'
+}
+
+function writePmModePref(v: boolean) {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(PM_MODE_STORAGE_KEY, v ? 'true' : 'false')
+}
 
 type CellId = 'scenario' | 'input' | 'output' | 'labels' | 'status'
 type ActionId = 'approve' | 'reject' | 'relabel' | 'edit' | 'delete'
@@ -91,6 +110,20 @@ export default function ExampleReview({
   }
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [focusedCell, setFocusedCell] = useState<CellId>('status')
+  const [pmMode, setPmMode] = useState<boolean>(() => readPmModePref())
+  // When the user explicitly opens "Show details" on a row, remember it so
+  // navigating away and back doesn't slam it shut again. Keyed by example id.
+  const [openDetails, setOpenDetails] = useState<Record<string, boolean>>({})
+  const togglePmMode = useCallback(() => {
+    setPmMode(prev => {
+      const next = !prev
+      writePmModePref(next)
+      return next
+    })
+  }, [])
+  const toggleDetailsFor = useCallback((id: string) => {
+    setOpenDetails(prev => ({ ...prev, [id]: !prev[id] }))
+  }, [])
   // Edit state carries both row id and which cell is being edited so only
   // that one cell becomes a textarea. The other cells stay read-only.
   const [editing, setEditing] = useState<{ id: string; cell: 'input' | 'output' } | null>(null)
@@ -368,7 +401,7 @@ export default function ExampleReview({
                 onClick={onRetagAgainstCharter}
                 disabled={loading || retagLoading || stats.total === 0}
                 className="px-2 py-1 text-xs border border-border-hint hover:bg-fill-neutral transition-colors disabled:opacity-50"
-                title="Re-tag every row's feature_area and coverage_tags against the current charter. Useful after generating or editing the charter so the Coverage Map matrix lines up."
+                title="Re-tag every row's feature area and scenarios covered against the current charter. Useful after generating or editing the charter so the Coverage Map matrix lines up."
               >
                 {retagLoading ? 'Retagging…' : 'Retag against charter'}
               </button>
@@ -429,6 +462,7 @@ export default function ExampleReview({
                 { value: 'needs_edit', label: 'Needs edit' },
               ]}
             />
+            <DetailsToggle pmMode={pmMode} onToggle={togglePmMode} />
           </div>
 
           {canEdit && (
@@ -550,6 +584,9 @@ export default function ExampleReview({
                         onDismissRevision={onDismissRevision}
                         onSuggestRevision={onSuggestRevision}
                         onStartEdit={() => beginEdit(ex.id)}
+                        pmMode={pmMode}
+                        detailsOpen={openDetails[ex.id] ?? !pmMode}
+                        onToggleDetails={() => toggleDetailsFor(ex.id)}
                       />
                     ))}
                   </div>
@@ -690,6 +727,9 @@ function ExampleRow({
   onDismissRevision,
   onSuggestRevision,
   onStartEdit,
+  pmMode,
+  detailsOpen,
+  onToggleDetails,
 }: {
   example: Example
   isSelected: boolean
@@ -704,6 +744,9 @@ function ExampleRow({
   onDismissRevision?: (exampleId: string) => void
   onSuggestRevision?: (exampleId: string) => void
   onStartEdit: () => void
+  pmMode: boolean
+  detailsOpen: boolean
+  onToggleDetails: () => void
 }) {
   // Light-grey wash on the focused cell, with a 2px transparent gap on all
   // sides (achieved via padding + bg-clip-content). Padding stays applied
@@ -872,6 +915,16 @@ function ExampleRow({
         </div>
       </div>
 
+      {/* Details disclosure (plain-English view of the technical fields) */}
+      {isSelected && (
+        <DetailsPanel
+          example={example}
+          pmMode={pmMode}
+          open={detailsOpen}
+          onToggle={onToggleDetails}
+        />
+      )}
+
       {/* Revision suggestion drawer */}
       {isSelected && showRevision && hasRevision && example.revision_suggestion && (
         <div className="px-4 py-3 bg-fill-neutral border-l-2 border-l-border-primary">
@@ -1014,6 +1067,155 @@ function StatusDot({ status }: { status: Example['review_status'] }) {
           ? 'bg-warning'
           : 'bg-gray-500'
   return <span className={`w-2 h-2 rounded-full ${color}`} />
+}
+
+function DetailsToggle({ pmMode, onToggle }: { pmMode: boolean; onToggle: () => void }) {
+  // Two-segment pill mirroring the rest of the toolbar's filled/outline
+  // styling. Active segment uses bg-fill-neutral; inactive is transparent.
+  const seg = (active: boolean) =>
+    `h-10 px-3 text-sm font-mono font-semibold transition-colors ${
+      active
+        ? 'bg-fill-neutral text-fg-contrast'
+        : 'bg-transparent text-fg-dim hover:text-fg-contrast'
+    }`
+  return (
+    <div
+      className="inline-flex items-center border border-border-hint"
+      title="Hide or show the technical fields (judge confidence, judge reasoning, router check, full scenario tags). PMs can leave these hidden; engineers debugging the dataset can flip them on."
+    >
+      <span className="px-3 text-xs text-fg-dim border-r border-border-hint h-10 inline-flex items-center">
+        Technical details
+      </span>
+      <button onClick={() => { if (pmMode) return; onToggle() }} className={seg(pmMode)}>
+        Hidden
+      </button>
+      <button onClick={() => { if (!pmMode) return; onToggle() }} className={seg(!pmMode)}>
+        Shown
+      </button>
+    </div>
+  )
+}
+
+function DetailsPanel({
+  example,
+  pmMode,
+  open,
+  onToggle,
+}: {
+  example: Example
+  pmMode: boolean
+  open: boolean
+  onToggle: () => void
+}) {
+  const v = example.judge_verdict ?? null
+  const tv = v?.trigger_verdict ?? null
+  const hasJudge = !!(v && (v.confidence || v.reasoning || (v.issues && v.issues.length > 0)))
+  const hasRouter = !!tv
+  const hasTags = (example.coverage_tags?.length ?? 0) > 0
+  const hasTrigger = example.should_trigger === true || example.should_trigger === false
+  const hasArea = !!example.feature_area
+  const hasAdv = example.is_adversarial === true
+
+  // If literally nothing populates, don't render the panel at all — empty
+  // disclosures are noise.
+  const anything = hasJudge || hasRouter || hasTags || hasTrigger || hasArea || hasAdv
+  if (!anything) return null
+
+  // PM-mode default: collapsed, with a subtle "Show details" affordance.
+  // Engineers (PM mode off) get it expanded, but they can still collapse.
+  const showHeader = pmMode || !open
+  return (
+    <div className="px-4 py-2 bg-fill-neutral/40 border-l-2 border-l-border-hint">
+      {showHeader ? (
+        <button
+          onClick={onToggle}
+          className="text-[11px] text-fg-dim hover:text-fg-contrast inline-flex items-center gap-1"
+        >
+          {open ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+          {open ? 'Hide details' : 'Show details'}
+        </button>
+      ) : (
+        <button
+          onClick={onToggle}
+          className="text-[11px] text-fg-dim hover:text-fg-contrast inline-flex items-center gap-1"
+        >
+          <ChevronDown className="w-3 h-3" /> Hide details
+        </button>
+      )}
+
+      {open && (
+        <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-2 text-xs">
+          {hasArea && <DetailRow label="Feature area" value={example.feature_area} />}
+          {hasTrigger && (
+            <DetailRow
+              label="Should trigger?"
+              value={example.should_trigger ? 'Yes — the feature should fire on this input' : 'No — the feature should NOT fire on this input'}
+            />
+          )}
+          {hasAdv && (
+            <DetailRow
+              label="Adversarial probe"
+              value="Yes — this row tests the feature's safety boundary (e.g. prompt injection)"
+            />
+          )}
+          {hasTags && (
+            <DetailRow
+              label="Scenarios covered"
+              value={
+                <div className="flex gap-1 flex-wrap">
+                  {example.coverage_tags.map((t, i) => (
+                    <span key={i} className="px-1.5 py-0.5 bg-fill-neutral text-fg-dim border border-border-hint">
+                      {t}
+                    </span>
+                  ))}
+                </div>
+              }
+            />
+          )}
+          {v?.confidence && (
+            <DetailRow
+              label="Judge confidence"
+              value={
+                v.confidence === 'high'
+                  ? 'High — the auto-reviewer is sure about its take on this row'
+                  : v.confidence === 'medium'
+                    ? 'Medium — the auto-reviewer has a take but isn’t certain'
+                    : 'Low — the auto-reviewer is guessing; worth a human eye'
+              }
+            />
+          )}
+          {v?.reasoning && <DetailRow label="Judge says" value={v.reasoning} />}
+          {v?.issues && v.issues.length > 0 && (
+            <DetailRow
+              label="Issues flagged"
+              value={
+                <ul className="list-disc pl-4 space-y-0.5 text-warning">
+                  {v.issues.map((iss, i) => (
+                    <li key={i}>{iss}</li>
+                  ))}
+                </ul>
+              }
+            />
+          )}
+          {tv && (
+            <DetailRow
+              label="Router check"
+              value={`Expected to ${tv.expected_fire ? 'fire' : 'not fire'}; would actually ${tv.would_fire ? 'fire' : 'not fire'} — ${tv.correct ? 'correct' : 'wrong'}. ${tv.reasoning}`}
+            />
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function DetailRow({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="flex flex-col gap-0.5 col-span-2 sm:col-span-1">
+      <span className="text-[10px] uppercase tracking-wide text-fg-dim">{label}</span>
+      <span className="text-fg-contrast leading-[1.5]">{value}</span>
+    </div>
+  )
 }
 
 function RevisionDiff({ label, before, after }: { label: string; before: string; after: string }) {
