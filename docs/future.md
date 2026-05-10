@@ -252,3 +252,81 @@ If the loop feels good, then invest in:
 - Tight, visible loop: edit charter in North Star → next ticket draft scores differently. Easy to show in a 2-minute video.
 - Tool-agnostic story beats a Zendesk-only app for breadth of audience.
 - Forces us to prove the charter is useful as a runtime artifact, not just a design artifact — which is the strongest version of North Star's pitch.
+
+## Bundled reference files alongside SKILL.md
+
+Today North Star generates a `SKILL.md` body from goals + stories + charter.
+A skill bundle can ship more than the markdown file — Claude Code skills
+support *progressive disclosure*, where SKILL.md points at additional files
+Claude reads on demand. North Star already owns the data needed to generate
+those files; the open questions are which to add and when.
+
+### What to generate
+
+Three reference file types fall cleanly out of state North Star already owns:
+
+- **`examples.md`** — canonical input → ideal output pairs, sourced from the
+  highest-scoring positive rows in the dataset. The skill body says "see
+  examples.md for the shape" and Claude reads it on demand.
+- **`off-target.md`** — adjacent requests that should NOT trigger the skill,
+  sourced from `kind: "off_target"` stories. Unique leverage: most
+  hand-written skills forget to document anti-examples.
+- **`criteria.md`** — coverage / alignment criteria from the charter,
+  formatted as a self-check list the skill can consult before responding.
+
+Scripts (Python / shell helpers the skill invokes via Bash) are a natural
+further extension, but not for the first cut — they pull North Star into
+code-gen territory where evals get harder. Stick to data-derived references
+first.
+
+### When to generate / refresh
+
+Trigger generation at the moment a candidate skill version is promoted to
+**active**. Activation is already the user's "I endorse this version"
+gesture, so piggybacking reference generation avoids a second approval loop
+and guarantees references match a known-good skill body.
+
+UX shape:
+
+- Inline with the activation action — single confirm with a "refresh
+  references" toggle (default on), not a follow-up modal.
+- First activation → toggle reads "generate" (refs don't exist yet).
+- Subsequent activations → toggle reads "refresh."
+- Skip-if-unchanged: if the dataset / charter inputs haven't moved since
+  the last activation, skip silently rather than churning identical files.
+
+### Staleness after activation
+
+Activation-time generation handles the common case but doesn't cover drift:
+users keep relabeling the dataset after activating, and references built at
+activation time fall behind. Reuse the existing `generated_at_skill_version`
+pattern (already used for SKILL.md regenerate banners) per reference file —
+each ref tracks the dataset/charter version it was built from, banner
+appears when underlying state moves.
+
+Per-ref staleness, not one global flag. The three ref types have different
+volatility:
+
+| Reference     | Changes when                          | Volatility |
+|---------------|---------------------------------------|------------|
+| examples.md   | Dataset rows added / relabeled        | High       |
+| off-target.md | Off-target stories edited             | Medium     |
+| criteria.md   | Charter coverage/alignment edited     | Low        |
+
+A single global "references stale" banner would cry wolf every relabel.
+
+### Approval model
+
+Human-gated, mirroring SKILL.md regen — agent regenerates → diff modal →
+user accepts. References ship inside the skill bundle and shape Claude's
+behavior at runtime, so silent updates from a relabel could quietly change
+skill output in ways the author didn't intend. Auto-publish is tempting for
+`examples.md` but the cost of getting it wrong outweighs the cost of one
+click.
+
+### Why this is North Star's leverage
+
+The win is not "we generate more files." It's that every reference file is
+grounded in evaluated data — examples come from rows the user labeled good,
+off-target patterns come from stories the user marked as such, criteria
+come from a charter the user approved. The skill ships with receipts.
