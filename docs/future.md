@@ -43,14 +43,134 @@ product, different infra, lives alongside.
 ### What's already built and what isn't
 
 - **Scenario A — score the dataset (evaluation)** is essentially done in
-  `north-star-eval.py`. Future work there is optimization, not architecture:
-  `asyncio.gather` over `AsyncAnthropic`, prompt caching on the judge system
-  prompt, structured outputs to replace the regex JSON parse, optionally
-  Batches API at 50% cost if eval volume grows.
+  `north-star-eval.py`. The architecture is correct; what's left is
+  optimization (see next section).
 - **Scenario B — iterate the prompt until it passes** is the unbuilt piece and
   the more compelling product surface. It's something users genuinely can't
   easily build themselves, and it's the logical next step after charter +
   dataset authoring.
+
+## Scenario A optimizations — how to build them
+
+These are improvements to the existing `north-star-eval.py`. None require
+architectural changes; do them in this order, each is independent.
+
+### 1. Parallelize judge calls with `AsyncAnthropic`
+
+Today the eval loop is `for example in dataset: judge(good); judge(bad)` —
+2N sequential calls. With `asyncio.gather` over `AsyncAnthropic` the entire
+eval runs in roughly the latency of a single judge call.
+
+```python
+import asyncio
+from anthropic import AsyncAnthropic
+
+client = AsyncAnthropic()
+
+async def judge_charter(charter: dict) -> dict | None:
+    response = await client.messages.create(
+        model=MODEL, max_tokens=1024, system=judge_prompt,
+        messages=[{"role": "user", "content": format_for_judge(charter)}],
+    )
+    ...
+
+async def run_eval():
+    tasks = []
+    for ex in dataset:
+        tasks.append(judge_charter(ex["good_output"]))
+        tasks.append(judge_charter(ex["bad_output"]))
+    verdicts = await asyncio.gather(*tasks)
+    # zip back into rows
+```
+
+Cap concurrency with `asyncio.Semaphore(10)` if the API rate-limits.
+
+### 2. Cache the judge system prompt
+
+The judge prompt is identical across every call. Wrap the system field in
+the cached form so we pay full cost once per 5-minute window and ~0.1× on
+every subsequent call:
+
+```python
+response = await client.messages.create(
+    model=MODEL,
+    max_tokens=1024,
+    system=[{
+        "type": "text",
+        "text": judge_prompt,
+        "cache_control": {"type": "ephemeral"},
+    }],
+    messages=[{"role": "user", "content": format_for_judge(charter)}],
+)
+```
+
+Verify it's working by checking `response.usage.cache_read_input_tokens` is
+non-zero on the second call onward. The judge prompt needs to be ≥ 2048
+tokens on Sonnet 4.6 / ≥ 4096 on Opus to cache at all — check
+`shared/prompt-caching.md` for the full table if we change models.
+
+### 3. Replace regex JSON parsing with structured outputs
+
+The `re.search(r"\{.*\}", text, re.DOTALL)` step is a known failure mode —
+the judge can return prose, double-encoded JSON, or wrapped fences and the
+parse silently fails. Use `output_config.format` with a JSON schema:
+
+```python
+response = await client.messages.create(
+    model=MODEL,
+    max_tokens=1024,
+    system=[{"type": "text", "text": judge_prompt,
+             "cache_control": {"type": "ephemeral"}}],
+    messages=[{"role": "user", "content": format_for_judge(charter)}],
+    output_config={
+        "format": {
+            "type": "json_schema",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "overall": {"type": "string", "enum": ["good", "bad"]},
+                    "violations": {"type": "array", "items": {"type": "string"}},
+                    "dimensions": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "object",
+                            "properties": {
+                                "status": {"type": "string", "enum": ["pass", "fail"]},
+                                "reason": {"type": "string"},
+                            },
+                            "required": ["status", "reason"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["overall", "violations", "dimensions"],
+                "additionalProperties": False,
+            },
+        },
+    },
+)
+verdict = json.loads(response.content[0].text)  # guaranteed parseable
+```
+
+Or use `client.messages.parse()` with a Pydantic model for typed access —
+slightly cleaner, same effect.
+
+### 4. Migrate the model and bump tokens
+
+`north-star-eval.py` pins `claude-opus-4-5-20251101`. Move to
+`claude-opus-4-7` (or `claude-sonnet-4-6` if the eval can tolerate the
+intelligence drop for the cost win). On Opus 4.7, drop any sampling params
+if we ever add them, and use `thinking={"type": "adaptive"}` if we want the
+judge to reason more carefully on borderline cases. `max_tokens=1024` is
+fine for the current verdict shape, but bump to 2048 if we add `thinking`.
+
+### 5. Batches API — only if eval volume grows
+
+Skip until we're running this in CI on every prompt change or sweeping over
+judge variants. At current dataset size (handful of examples × 2 charters)
+the per-request latency win from parallelization matters more than the 50%
+cost reduction from batching. Revisit when an eval run starts to feel
+expensive.
 
 ### Open questions before building
 
