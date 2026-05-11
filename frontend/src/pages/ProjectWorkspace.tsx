@@ -13,8 +13,6 @@ import {
 } from "lucide-react";
 import {
   GearIcon,
-  ChatBubbleIcon,
-  CloseIcon,
   AIIcon,
   StarIcon,
   GoalsIcon,
@@ -63,7 +61,6 @@ import {
   saveScorers,
   generateScorers,
   suggestRevisions,
-  getActivity,
   listSessions,
   type SkillSuggestion,
 } from "../api";
@@ -99,7 +96,7 @@ import {
   useRegisterPolarisNav,
   usePolaris,
 } from "../polaris/usePolaris";
-import PolarisChat from "../polaris/PolarisChat";
+import PolarisAgentButton from "../polaris/PolarisAgentButton";
 
 type ActiveTab =
   | "skill"
@@ -136,27 +133,8 @@ const EMPTY_STATE: SessionState = {
   agent_status: "drafting",
 };
 
-const ACTIVITY_LABELS: Record<string, string> = {
-  discovery: "Thinking about your input",
-  generate: "Generating charter draft",
-  validate: "Validating criteria",
-  suggest: "Generating suggestions",
-  synthesize: "Synthesizing examples",
-  review: "Auto-reviewing examples",
-  gap_analysis: "Analyzing coverage gaps",
-  enrich: "Enriching examples",
-  detect_schema: "Detecting schema",
-  import_from_url: "Importing from URL",
-  infer_schema: "Inferring schema",
-  generate_scorers: "Generating scorers",
-  suggest_revisions: "Suggesting revisions",
-};
-
-function activityLabel(turnType: string): string | null {
-  // chat/dataset_chat are already surfaced as assistant messages — skip as hints
-  if (turnType === "chat" || turnType === "dataset_chat") return null;
-  return ACTIVITY_LABELS[turnType] || null;
-}
+// (ACTIVITY_LABELS / activityLabel removed with the rail's ConversationPanel.
+//  Polaris emits its own inline activity markers in the chat transcript.)
 
 function formatStoryGroups(groups: StoryGroup[]): string {
   return groups
@@ -179,7 +157,6 @@ export default function ProjectWorkspace() {
 
   // --- Navigation ---
   const [activeTab, setActiveTab] = useState<ActiveTab>("goals");
-  const [showAssistant, setShowAssistant] = useState(false);
   // Latched dataset filter: when the Evaluations panel sends the user to
   // the Dataset tab via the unmapped-rows banner, we stash the filter
   // here. ExampleReview reads it on mount and calls a clear callback so
@@ -822,56 +799,10 @@ export default function ProjectWorkspace() {
     seenActivityIdsRef.current = new Set();
   }, [sessionId]);
 
-  // --- Polaris activity polling ---
-  useEffect(() => {
-    if (!showAssistant || !sessionId) return;
-
-    // Seed cursor to "now" so we only surface activity that occurs while the
-    // drawer is open — prior turns already live in replayable history.
-    if (activityCursorRef.current === null) {
-      activityCursorRef.current = new Date().toISOString();
-    }
-
-    let cancelled = false;
-
-    const poll = async () => {
-      try {
-        const res = await getActivity(
-          sessionId,
-          activityCursorRef.current ?? undefined,
-        );
-        if (cancelled || res.activity.length === 0) return;
-
-        const newHints: Message[] = [];
-        for (const event of res.activity) {
-          if (seenActivityIdsRef.current.has(event.id)) continue;
-          seenActivityIdsRef.current.add(event.id);
-          activityCursorRef.current = event.created_at;
-          const label = activityLabel(event.turn_type);
-          if (!label) continue;
-          newHints.push({
-            role: "assistant",
-            kind: "hint",
-            content: label,
-            detail: event.detail ?? null,
-            id: event.id,
-          });
-        }
-        if (newHints.length > 0) {
-          setMessages((prev) => [...prev, ...newHints]);
-        }
-      } catch (err) {
-        console.error("Activity poll failed:", err);
-      }
-    };
-
-    poll();
-    const interval = window.setInterval(poll, 2000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, [showAssistant, sessionId]);
+  // (Activity polling for the rail's old ConversationPanel was removed when
+  // Polaris moved into the header. Inline activity markers from Polaris
+  // itself cover the same "what just happened" surface in the chat
+  // transcript.)
 
   // --- Goals handlers ---
 
@@ -2524,34 +2455,9 @@ export default function ProjectWorkspace() {
     );
   }
 
-  const aiAssistButton = (
-    <button
-      onClick={() => setShowAssistant(!showAssistant)}
-      className="flex items-center gap-1.5 px-6 py-6 w-full text-left hover:bg-fill-neutral/30 transition-colors"
-    >
-      <ChatBubbleIcon />
-      <span className="text-base font-semibold text-fg-contrast">Polaris</span>
-    </button>
-  );
-
-  const polarisPanel = (
-    <div className="flex flex-col h-full min-h-0">
-      <div className="px-6 py-6 border-b border-border-hint flex items-center justify-between flex-shrink-0">
-        <div className="flex items-center gap-1.5">
-          <ChatBubbleIcon />
-          <span className="text-base font-semibold text-fg-contrast">
-            Polaris
-          </span>
-        </div>
-        <IconButton tone="dim" onClick={() => setShowAssistant(false)}>
-          <CloseIcon />
-        </IconButton>
-      </div>
-      <div className="flex-1 min-h-0 flex flex-col">
-        <PolarisChat />
-      </div>
-    </div>
-  );
+  // Polaris lives in the header (PolarisAgentButton) — the right rail no
+  // longer hosts it. The rail itself stays for other panels (radar, etc.)
+  // but its bottom slot is empty now.
 
   // --- Next-button state per panel ---
 
@@ -2631,6 +2537,7 @@ export default function ProjectWorkspace() {
           </div>
         </div>
         <div className="flex items-center gap-3">
+          <PolarisAgentButton />
           {role === "owner" && sessionId && (
             <Button
               size="small"
@@ -2932,8 +2839,7 @@ export default function ProjectWorkspace() {
               nextVariant={goalNextVariant}
               nextDisabled={goalNextDisabled}
               loading={loading}
-              rightBottom={showAssistant ? undefined : aiAssistButton}
-              rightBottomExpanded={showAssistant ? polarisPanel : undefined}
+              // Polaris moved to the header — no chat in the rail bottom.
               canEdit={canEdit}
             />
           )}
@@ -2960,8 +2866,7 @@ export default function ProjectWorkspace() {
               onCriteriaChanged={scheduleCharterSuggestionRegen}
               suggestionsLoading={charterSuggestionsLoading}
               loading={loading}
-              rightBottom={showAssistant ? undefined : aiAssistButton}
-              rightBottomExpanded={showAssistant ? polarisPanel : undefined}
+              // Polaris moved to the header — no chat in the rail bottom.
               onGenerateDataset={handleShortcutDataset}
               onGenerateScorers={handleShortcutScorers}
               onGenerateBoth={handleShortcutBoth}
