@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { Plus, Trash2, Loader2, ChevronDown } from "lucide-react";
+import { Plus, Trash2, Loader2, ChevronDown, BookOpen } from "lucide-react";
 import type { ProjectSummary } from "../types";
 import {
   createPromptEvalSession,
@@ -252,6 +252,14 @@ export default function Home() {
           <StarIcon />
         </IconButton>
         <div className="flex items-center gap-3">
+          <Button
+            size="small"
+            variant="neutral"
+            onClick={() => navigate("/docs")}
+          >
+            <BookOpen className="w-4 h-4" />
+            Docs
+          </Button>
           <Button
             size="small"
             variant="neutral"
