@@ -14,6 +14,7 @@ import re
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
+from typing import Awaitable, Callable
 
 import anthropic
 import braintrust
@@ -1042,6 +1043,7 @@ async def call_synthesize_examples(
     feature_areas: list[str] | None = None,
     coverage_criteria: list[str] | None = None,
     count: int = 2,
+    on_cell: Callable[[list[dict]], Awaitable[None]] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """Generate synthetic examples from charter. Returns (examples, call metadata list).
 
@@ -1053,6 +1055,12 @@ async def call_synthesize_examples(
     - Fallback path: when the charter has off-target or safety rows, do one
       single call. Those populations cut across the grid and don't slot into
       a per-cell scope cleanly.
+
+    ``on_cell`` is an optional async hook fired once per cell as soon as that
+    cell's rows arrive (default path) or once at the end (fallback path).
+    Callers use it to persist + emit progress events incrementally so the
+    user sees rows landing as they're generated, instead of one big flush
+    after all cells finish.
     """
     await _refresh_settings()
 
@@ -1068,7 +1076,12 @@ async def call_synthesize_examples(
         prompt = build_synthesize_examples_prompt(charter, feature_areas, coverage_criteria, count)
         text, meta = _call_llm(prompt, max_tokens=8192)
         data = _extract_json(text)
-        return data.get("examples", []), [meta]
+        examples = data.get("examples", [])
+        # Single call: fire the hook once at the end so callers can still
+        # persist + emit a "done" progress event uniformly.
+        if on_cell is not None and examples:
+            await on_cell(examples)
+        return examples, [meta]
 
     # Per-cell fan-out. Build the cacheable prefix once and reuse — Anthropic
     # caches it on the first call, and every subsequent call reads from the
@@ -1076,7 +1089,7 @@ async def call_synthesize_examples(
     prefix = build_synthesize_examples_cell_prefix(charter)
     semaphore = asyncio.Semaphore(_SYNTH_CELL_CONCURRENCY)
     tasks = [
-        _synth_one_cell(prefix, fa, crit, count, semaphore)
+        asyncio.create_task(_synth_one_cell(prefix, fa, crit, count, semaphore))
         for fa in target_areas
         for crit in target_coverage
     ]
@@ -1085,23 +1098,41 @@ async def call_synthesize_examples(
         f"({len(target_coverage)} criteria × {len(target_areas)} areas, "
         f"concurrency={_SYNTH_CELL_CONCURRENCY})"
     )
-    results = await asyncio.gather(*tasks, return_exceptions=True)
 
     examples: list[dict] = []
     metas: list[dict] = []
     failures = 0
-    for r in results:
-        if isinstance(r, BaseException):
+    # Walk completions as they finish so `on_cell` fires incrementally —
+    # progress events surface in real time instead of all at once at the end.
+    for fut in asyncio.as_completed(tasks):
+        try:
+            cell_examples, cell_meta = await fut
+        except BaseException as exc:
             failures += 1
-            logger.warning(f"call_synthesize_examples: cell failed: {type(r).__name__}: {r}")
+            logger.warning(
+                f"call_synthesize_examples: cell failed: {type(exc).__name__}: {exc}"
+            )
             # Re-raise billing errors so the API surfaces them — non-billing
-            # failures are tolerated so a partial grid still saves.
-            if isinstance(r, LLMBillingError):
-                raise r
+            # failures are tolerated so a partial grid still saves. Cancel
+            # the rest so we don't keep spending tokens on a doomed run.
+            if isinstance(exc, LLMBillingError):
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
+                raise
             continue
-        cell_examples, cell_meta = r
         examples.extend(cell_examples)
         metas.append(cell_meta)
+        if on_cell is not None and cell_examples:
+            try:
+                await on_cell(cell_examples)
+            except Exception as cb_err:
+                # The progress hook is best-effort — never fail the synth
+                # because a UI-side persistence call hiccupped.
+                logger.warning(
+                    f"call_synthesize_examples: on_cell hook raised "
+                    f"{type(cb_err).__name__}: {cb_err}"
+                )
     if failures:
         logger.warning(
             f"call_synthesize_examples: {failures}/{len(tasks)} cell(s) failed; "

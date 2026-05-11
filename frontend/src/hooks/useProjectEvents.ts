@@ -17,11 +17,22 @@ import { getShareToken } from '../shareToken'
  */
 const MAX_RETRIES = 10
 
+/** Payload of a `synth_progress` SSE event — fired during dataset
+ *  synthesis as cells complete. The frontend reads it to drive the
+ *  "X of N rows generated" copy in the dataset regeneration overlay. */
+export interface SynthProgressEvent {
+  dataset_id: string
+  generated: number
+  total: number
+  phase: 'started' | 'in_progress' | 'done'
+}
+
 export function useProjectEvents(
   sessionId: string | null,
   onStateChange: () => void,
+  onSynthProgress?: (event: SynthProgressEvent) => void,
 ): void {
-  // Hold the latest callback in a ref so we can keep the EventSource open
+  // Hold the latest callbacks in refs so we can keep the EventSource open
   // across renders without resubscribing every time the parent rebuilds the
   // closure. Re-subscribing flickers the live feed and causes spurious
   // reconnect chatter on the server.
@@ -29,6 +40,10 @@ export function useProjectEvents(
   useEffect(() => {
     cbRef.current = onStateChange
   }, [onStateChange])
+  const synthRef = useRef(onSynthProgress)
+  useEffect(() => {
+    synthRef.current = onSynthProgress
+  }, [onSynthProgress])
 
   const esRef = useRef<EventSource | null>(null)
 
@@ -93,6 +108,19 @@ export function useProjectEvents(
           cbRef.current()
         } catch (err) {
           console.error('state_changed handler threw:', err)
+        }
+      })
+
+      // Per-cell dataset synthesis progress. Optional — older callers that
+      // only pass `onStateChange` see no behaviour change.
+      mine.addEventListener('synth_progress', (e: MessageEvent) => {
+        const cb = synthRef.current
+        if (!cb) return
+        try {
+          const payload = JSON.parse(e.data || '{}') as SynthProgressEvent
+          cb(payload)
+        } catch (err) {
+          console.error('synth_progress handler threw:', err)
         }
       })
 

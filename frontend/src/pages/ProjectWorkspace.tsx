@@ -94,7 +94,7 @@ import { computeCoverageScore } from "../components/coverage";
 import GenerateModal from "../components/examples/GenerateModal";
 import SettingsPanel from "../components/SettingsPanel";
 import ShareModal from "../components/ShareModal";
-import { useProjectEvents } from "../hooks/useProjectEvents";
+import { useProjectEvents, type SynthProgressEvent } from "../hooks/useProjectEvents";
 import { useShareToken } from "../hooks/useShareToken";
 
 type ActiveTab =
@@ -530,7 +530,21 @@ export default function ProjectWorkspace() {
       // No dataset yet, or fetch failed — non-fatal.
     }
   }, [sessionId]);
-  useProjectEvents(sessionId, handleLiveStateChange);
+  // Live dataset-synth progress, driven by the backend's per-cell
+  // `synth_progress` SSE event. Cleared back to null on the "done" phase
+  // so the dataset overlay knows when to drop the live count and hide.
+  const [synthProgress, setSynthProgress] = useState<{
+    generated: number;
+    total: number;
+  } | null>(null);
+  const handleSynthProgress = useCallback((event: SynthProgressEvent) => {
+    if (event.phase === "done") {
+      setSynthProgress(null);
+      return;
+    }
+    setSynthProgress({ generated: event.generated, total: event.total });
+  }, []);
+  useProjectEvents(sessionId, handleLiveStateChange, handleSynthProgress);
 
   // Mirror React state → in-memory cache. Every setState((prev) => …) call
   // (charter edits, scorer toggles, skill body updates, etc.) trips this
@@ -579,6 +593,13 @@ export default function ProjectWorkspace() {
   // have a synthetic body, so they're allowed through.
   const hasSkillBody = !!state.charter.task.skill_body;
   const skillReady = hasSkillBody || isPromptEval;
+  // Memoize so the empty-array fallback doesn't churn SkillPanel's
+  // initialVersions identity on every parent render — that would refire
+  // its mirror effect and could clobber an optimistic local prepend.
+  const skillVersionsSeed = useMemo(
+    () => state.skill_versions ?? [],
+    [state.skill_versions],
+  );
   const datasetAvailable = skillReady && (isPromptEval ? !!dataset : hasCharter);
   const scorersAvailable = skillReady && hasCharter;
   const evaluateAvailable = skillReady && !!dataset;
@@ -2028,7 +2049,12 @@ export default function ProjectWorkspace() {
 
   const handleGenerateDataset = useCallback(async () => {
     if (!sessionId) return;
+    // Drive both the global `loading` flag (for inline button states like
+    // disabling "Auto-review") and the dataset-specific `generatingDataset`
+    // flag (for the full-area overlay in ExampleReview that blocks per-row
+    // actions while rows are being regenerated).
     setLoading(true);
+    setGeneratingDataset(true);
     try {
       if (!dataset) {
         await createDataset(sessionId);
@@ -2042,6 +2068,7 @@ export default function ProjectWorkspace() {
       console.error("Failed to generate dataset:", err);
     } finally {
       setLoading(false);
+      setGeneratingDataset(false);
     }
   }, [sessionId, dataset]);
 
@@ -2051,6 +2078,7 @@ export default function ProjectWorkspace() {
     async (count?: number) => {
       if (!dataset) return;
       setLoading(true);
+      setGeneratingDataset(true);
       try {
         await synthesizeExamples(
           dataset.id,
@@ -2063,6 +2091,7 @@ export default function ProjectWorkspace() {
         console.error("Failed to synthesize:", err);
       } finally {
         setLoading(false);
+        setGeneratingDataset(false);
       }
     },
     [dataset],
@@ -2634,6 +2663,7 @@ export default function ProjectWorkspace() {
               }}
               activeVersionId={state.active_skill_version_id ?? null}
               candidateVersionId={state.candidate_skill_version_id ?? null}
+              initialVersions={skillVersionsSeed}
               onCandidateChanged={async () => {
                 if (!urlSessionId) return;
                 const s = await getSession(urlSessionId);
@@ -2647,6 +2677,14 @@ export default function ProjectWorkspace() {
                 // renders without waiting for handleSubmitIntake.
                 setActiveTab("charter");
                 setLoading(true);
+              }}
+              onAnalyzeError={() => {
+                // Counterpart to onBeforeAnalyze — if the seed call throws
+                // (bad URL, network blip, LLM rejection) we have to clear
+                // the loading flag we just set, otherwise the Charter tab
+                // sits stuck behind a permanent "Generating charter…"
+                // overlay with no way to recover.
+                setLoading(false);
               }}
               onSeeded={async () => {
                 // Re-hydrate session state so the freshly-extracted
@@ -2847,6 +2885,20 @@ export default function ProjectWorkspace() {
                     examples={dataset.examples || []}
                     charter={state.charter}
                     loading={loading}
+                    generating={generatingDataset || generatingBoth}
+                    generatingProgress={synthProgress}
+                    generatingTotal={(() => {
+                      // Best-effort upper bound on rows we're about to land
+                      // — coverage criteria × alignment areas × default
+                      // count-per-scenario. Synthesize falls back to a single
+                      // grid call when off-target/safety rows exist; either
+                      // way this is a reasonable "expected" hint.
+                      const cov =
+                        state.charter.coverage?.criteria?.length || 0;
+                      const align = state.charter.alignment?.length || 0;
+                      const cells = Math.max(cov * align, 1);
+                      return cells * 2;
+                    })()}
                     onUpdateExample={handleUpdateExample}
                     onDeleteExample={handleDeleteExample}
                     onSynthesize={handleSynthesize}
@@ -2928,9 +2980,15 @@ export default function ProjectWorkspace() {
                       // dataset content — direct click, charter shortcut, or
                       // the combined "both" action. Without this the user
                       // lands here from a charter shortcut and sees a static
-                      // button while work is happening.
+                      // button while work is happening. Once examples land
+                      // in `dataset` we leave this branch entirely, so the
+                      // spinner can't outlive the generation it's reporting.
                       const generating = loading || generatingDataset || generatingBoth;
+                      const cov = state.charter.coverage?.criteria?.length || 0;
+                      const align = state.charter.alignment?.length || 0;
+                      const expected = Math.max(cov * align, 1) * 2;
                       return (
+                        <>
                         <button
                           onClick={handleGenerateDataset}
                           disabled={generating || !hasCharter}
@@ -2939,7 +2997,9 @@ export default function ProjectWorkspace() {
                           {generating ? (
                             <>
                               <Loader2 className="w-4 h-4 animate-spin" />
-                              Generating...
+                              {synthProgress
+                                ? `Generated ${synthProgress.generated} of ${synthProgress.total} rows…`
+                                : `Generating ~${expected} rows…`}
                             </>
                           ) : (
                             <>
@@ -2948,6 +3008,7 @@ export default function ProjectWorkspace() {
                             </>
                           )}
                         </button>
+                        </>
                       );
                     })()}
                   </div>

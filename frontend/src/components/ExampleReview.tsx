@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { ChevronDown, Check, X, RefreshCw, Pencil, Trash2 } from 'lucide-react'
+import { ChevronDown, Check, X, RefreshCw, Pencil, Trash2, Loader2 } from 'lucide-react'
 import type { Example, Charter } from '../types'
 import DeleteModal from './examples/DeleteModal'
 import GenerateModal from './examples/GenerateModal'
@@ -24,6 +24,21 @@ interface ExampleReviewProps {
   examples: Example[]
   charter: Charter
   loading: boolean
+  /** Distinguishes "generating new examples" (long-running, blocking) from
+   *  smaller utility loads like Auto-review or Suggest revisions. When true,
+   *  we render a full-area overlay with a centered spinner that blocks all
+   *  dataset interactions until generation finishes. Other `loading=true`
+   *  paths just disable the affected buttons inline. */
+  generating?: boolean
+  /** Approximate row count we're about to generate, surfaced in the overlay
+   *  copy ("Generating ~24 rows…"). Computed at the parent from
+   *  charter dimensions × the count requested. Used as a fallback when
+   *  no live progress event has landed yet. */
+  generatingTotal?: number
+  /** Live progress driven by the backend's per-cell `synth_progress` SSE
+   *  event. When present, the overlay swaps the rough estimate for an
+   *  actual count ("12 of 24 rows generated"). */
+  generatingProgress?: { generated: number; total: number } | null
   onUpdateExample: (exampleId: string, fields: Partial<Example>) => void
   onDeleteExample: (exampleId: string) => void
   onSynthesize: (count?: number) => void
@@ -56,6 +71,9 @@ export default function ExampleReview({
   examples,
   charter,
   loading,
+  generating = false,
+  generatingTotal,
+  generatingProgress,
   onUpdateExample,
   onDeleteExample,
   onSynthesize,
@@ -196,6 +214,9 @@ export default function ExampleReview({
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      // Block per-row shortcuts while a regeneration is in flight — actions
+      // would race against the upcoming row reset and lose work.
+      if (generating) return
       if (editingId || deleteConfirmId) {
         if (e.key === 'Escape') setEditing(null)
         return
@@ -282,7 +303,7 @@ export default function ExampleReview({
           break
       }
     },
-    [editingId, deleteConfirmId, selectedIndex, orderedExamples, selectedExample, focusedCell, onUpdateExample, onSuggestRevision, beginEdit],
+    [editingId, deleteConfirmId, selectedIndex, orderedExamples, selectedExample, focusedCell, onUpdateExample, onSuggestRevision, beginEdit, generating],
   )
 
   useEffect(() => {
@@ -319,9 +340,75 @@ export default function ExampleReview({
   }
 
   return (
-    <div className="h-full flex flex-col overflow-hidden">
+    <div className="h-full flex flex-col overflow-hidden relative">
+      {/* Generation overlay — covers the dataset surface while a synth is in
+          flight so the user can't approve/reject/edit/delete rows that are
+          about to be replaced. Centered spinner + row count gives them
+          something to look at. Lives outside the inner padded body so the
+          backdrop reaches the page edges. */}
+      {generating && (
+        <div
+          className="absolute inset-0 z-30 flex items-center justify-center bg-bg-default/70 backdrop-blur-[2px]"
+          aria-busy="true"
+        >
+          <div
+            className="flex flex-col items-center gap-3 px-6 py-5 bg-surface-raised border border-border shadow-lg"
+            role="status"
+            aria-live="polite"
+          >
+            <Loader2 className="w-8 h-8 text-accent animate-spin" />
+            <div className="text-center min-w-[14rem]">
+              <p className="text-sm font-medium text-fg-contrast">
+                {examples.length > 0
+                  ? "Regenerating dataset…"
+                  : "Generating dataset…"}
+              </p>
+              {(() => {
+                // Live count when we have one, fall back to the rough
+                // estimate before the first cell lands. Total can grow
+                // beyond the estimate if the LLM returns more rows than
+                // asked — clamp the bar via Math.min for sanity.
+                const live = generatingProgress
+                if (live && live.total > 0) {
+                  const pct = Math.min(
+                    100,
+                    Math.round((live.generated / live.total) * 100),
+                  )
+                  return (
+                    <>
+                      <p className="text-xs text-fg-dim mt-1">
+                        {live.generated} of {live.total} rows generated
+                      </p>
+                      <div className="mt-3 h-1 w-full bg-fill-neutral overflow-hidden">
+                        <div
+                          className="h-full bg-accent transition-[width] duration-300 ease-out"
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                    </>
+                  )
+                }
+                if (generatingTotal && generatingTotal > 0) {
+                  return (
+                    <p className="text-xs text-fg-dim mt-1">
+                      About {generatingTotal} row
+                      {generatingTotal === 1 ? "" : "s"} expected
+                    </p>
+                  )
+                }
+                return null
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Page body — title + filters + grouped table */}
-      <div className="flex-1 min-h-0 flex flex-col gap-6 p-6 overflow-hidden">
+      <div
+        className={`flex-1 min-h-0 flex flex-col gap-6 p-6 overflow-hidden ${
+          generating ? "pointer-events-none select-none" : ""
+        }`}
+      >
         {/* Title */}
         <h1 className="text-xl font-semibold text-fg-contrast leading-none">Dataset</h1>
 
