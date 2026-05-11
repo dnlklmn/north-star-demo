@@ -27,6 +27,17 @@ export function PolarisProvider({ children }: { children: ReactNode }) {
   const [contextSlice, setContextSliceState] = useState<PolarisContext>({})
   const handlersRef = useRef<Map<string, PolarisNavHandler>>(new Map())
 
+  // Sidebar visibility — toggled by the header button, read by the
+  // sidebar component. Lives here so any surface (button, keyboard
+  // shortcut, programmatic) can open/close from the same state.
+  const [open, setOpenState] = useState(false)
+  const setOpen = useCallback(
+    (next: boolean | ((prev: boolean) => boolean)) => {
+      setOpenState(prev => (typeof next === 'function' ? next(prev) : next))
+    },
+    [],
+  )
+
   // Conversation lives in the provider so the rail and the (future) panel
   // chat inputs are the same transcript. Hydrated by whichever page mounts
   // first via `hydrateMessages`.
@@ -111,6 +122,8 @@ export function PolarisProvider({ children }: { children: ReactNode }) {
       setContextSlice,
       registerNavHandler,
       dispatchNav,
+      open,
+      setOpen,
       messages,
       setMessages,
       hydrateMessages,
@@ -124,6 +137,8 @@ export function PolarisProvider({ children }: { children: ReactNode }) {
       setContextSlice,
       registerNavHandler,
       dispatchNav,
+      open,
+      setOpen,
       messages,
       setMessages,
       hydrateMessages,

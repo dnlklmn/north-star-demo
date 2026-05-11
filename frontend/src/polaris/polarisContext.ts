@@ -28,6 +28,10 @@ export interface PolarisCtxShape {
   registerNavHandler: (target: string, handler: PolarisNavHandler) => () => void
   dispatchNav: (nav: { target: string; props: Record<string, unknown> }) => void
 
+  // Sidebar visibility — header button toggles, sidebar reads.
+  open: boolean
+  setOpen: (next: boolean | ((prev: boolean) => boolean)) => void
+
   // Conversation
   messages: PolarisMessage[]
   setMessages: (next: PolarisMessage[] | ((prev: PolarisMessage[]) => PolarisMessage[])) => void
