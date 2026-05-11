@@ -905,6 +905,109 @@ async def _generate_scorers(ctx: ToolCtx, args: dict) -> dict:
 
 
 @tool(
+    "analyze_eval_run",
+    "Analyze an eval run for what to fix — runs the same 'Analyze' button on the Evaluate tab. "
+    "If no run_id is given, defaults to the active run (or the latest done/failed one). "
+    "Costs LLM tokens; confirms first.",
+    _confirm_schema({
+        "run_id": {
+            "type": "string",
+            "description": "Specific eval-run id. Omit to analyze the active/latest run.",
+        },
+    }),
+    tier="confirm",
+)
+async def _analyze_eval_run(ctx: ToolCtx, args: dict) -> dict:
+    if not ctx.session_id:
+        return {"error": "no session in context"}
+    if not args.get("confirmed"):
+        return _proposal(
+            "analyze_eval_run", args,
+            label="Analyze this eval run",
+            reason="Runs the suggest-improvements pass over the run's failed rows. Costs LLM tokens.",
+        )
+    return {
+        **_nav("eval_run_analyze", {"run_id": args.get("run_id")}),
+        "note": "Analysis started — improvement suggestions will populate on the Evaluate tab.",
+    }
+
+
+@tool(
+    "promote_skill_version",
+    "Promote the candidate skill version to active. Irreversible without restoring the previous version manually.",
+    _confirm_schema({
+        "version_id": {
+            "type": "string",
+            "description": "Specific version id. Omit to promote the current candidate.",
+        },
+    }),
+    tier="confirm",
+)
+async def _promote_skill_version(ctx: ToolCtx, args: dict) -> dict:
+    if not ctx.session_id:
+        return {"error": "no session in context"}
+    if not args.get("confirmed"):
+        return _proposal(
+            "promote_skill_version", args,
+            label="Promote the candidate version",
+            reason="The candidate becomes the active skill body. The previous active stays in history.",
+        )
+    return {
+        **_nav("skill_version_promote", {"version_id": args.get("version_id")}),
+        "note": "Promotion in flight.",
+    }
+
+
+@tool(
+    "discard_skill_version",
+    "Discard the candidate skill version so the active body stays. Reversible only by re-running the analyze + apply flow.",
+    _confirm_schema({
+        "version_id": {
+            "type": "string",
+            "description": "Specific version id. Omit to discard the current candidate.",
+        },
+    }),
+    tier="confirm",
+)
+async def _discard_skill_version(ctx: ToolCtx, args: dict) -> dict:
+    if not ctx.session_id:
+        return {"error": "no session in context"}
+    if not args.get("confirmed"):
+        return _proposal(
+            "discard_skill_version", args,
+            label="Discard the candidate version",
+            reason="The candidate is removed and the active body stays as-is.",
+        )
+    return {
+        **_nav("skill_version_discard", {"version_id": args.get("version_id")}),
+        "note": "Discard in flight.",
+    }
+
+
+@tool(
+    "cancel_eval_run",
+    "Cancel an in-flight eval run.",
+    _confirm_schema({
+        "run_id": {"type": "string", "description": "Run id. Omit to cancel the active run."},
+    }),
+    tier="confirm",
+)
+async def _cancel_eval_run(ctx: ToolCtx, args: dict) -> dict:
+    if not ctx.session_id:
+        return {"error": "no session in context"}
+    if not args.get("confirmed"):
+        return _proposal(
+            "cancel_eval_run", args,
+            label="Cancel the eval run",
+            reason="In-flight rows stop; completed rows stay in history.",
+        )
+    return {
+        **_nav("eval_run_cancel", {"run_id": args.get("run_id")}),
+        "note": "Cancellation requested.",
+    }
+
+
+@tool(
     "finalize_charter",
     "Open the charter view so the user can lock the charter as final. Polaris does not finalize charters itself yet.",
     _confirm_schema(),

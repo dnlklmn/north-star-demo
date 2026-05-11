@@ -183,6 +183,22 @@ function ChatBubble({
   msg: PolarisMessage
   onConfirmProposal: (p: PolarisProposal) => void
 }) {
+  // Activity-only messages render as a single muted line with no bubble —
+  // they're narration of out-of-chat actions, not part of the dialogue.
+  if (
+    msg.role === 'assistant' &&
+    msg.activity &&
+    !msg.content &&
+    !msg.toolSummary?.length &&
+    !msg.proposals?.length
+  ) {
+    return (
+      <div className="px-1 text-[11px] text-muted-foreground flex items-baseline gap-1.5">
+        <span className="text-blue-600" aria-hidden>↳</span>
+        <span className="truncate">{msg.activity}</span>
+      </div>
+    )
+  }
   if (msg.role === 'user') {
     return (
       <div className="flex justify-end">

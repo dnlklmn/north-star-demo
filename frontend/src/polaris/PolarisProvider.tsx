@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -51,6 +52,52 @@ export function PolarisProvider({ children }: { children: ReactNode }) {
     },
     [],
   )
+
+  // Emit a route-level activity whenever the URL changes. First render is
+  // silent (the user didn't navigate, they just landed). Provider lives
+  // here because react-router's useLocation is available; pages would
+  // otherwise each have to wire this for every route.
+  const routeActivityFirstRenderRef = useRef(true)
+  useEffect(() => {
+    if (routeActivityFirstRenderRef.current) {
+      routeActivityFirstRenderRef.current = false
+      return
+    }
+    const path = location.pathname
+    if (path === '/') {
+      window.dispatchEvent(
+        new CustomEvent('polaris:activity', {
+          detail: { activity: 'returned to home' },
+        }),
+      )
+    } else if (path.startsWith('/project/')) {
+      window.dispatchEvent(
+        new CustomEvent('polaris:activity', {
+          detail: { activity: `opened project ${path.slice('/project/'.length, '/project/'.length + 8)}…` },
+        }),
+      )
+    }
+  }, [location.pathname])
+
+  // Listen for `polaris:activity` events fired anywhere in the app and
+  // append them to the transcript as muted "↳ X" markers. Lets the user
+  // follow what's happening even when they're driving the UI by hand.
+  // De-dupes runs of the same activity (e.g. an effect that fires twice
+  // back-to-back) so the transcript stays clean.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ activity: string }>).detail
+      const activity = detail?.activity?.trim()
+      if (!activity) return
+      setMessagesState(prev => {
+        const last = prev[prev.length - 1]
+        if (last && last.activity === activity) return prev
+        return [...prev, { role: 'assistant', content: '', activity }]
+      })
+    }
+    window.addEventListener('polaris:activity', handler)
+    return () => window.removeEventListener('polaris:activity', handler)
+  }, [])
 
   const hydrateMessages = useCallback((initial: PolarisMessage[]) => {
     // Only replace if the incoming history isn't already what we're showing.

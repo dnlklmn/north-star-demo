@@ -8,6 +8,7 @@ import {
   type ScorerIdea,
 } from '../api'
 import { AIIcon } from './ui/Icons'
+import { notePolarisActivity } from '../polaris/activity'
 import SuggestionBox, { SuggestionCard } from './SuggestionBox'
 import { getAutoGenerateSuggestions } from '../utils/uiPrefs'
 
@@ -124,9 +125,11 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
   const runGenerate = useCallback(async () => {
     setGenerating(true)
     setError(null)
+    notePolarisActivity('drafting scorers')
     try {
       const result = await generateScorers(sessionId)
       setScorers(result.scorers)
+      notePolarisActivity('scorer draft complete')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to generate scorers')
     } finally {

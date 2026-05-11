@@ -97,6 +97,7 @@ import {
   usePolaris,
 } from "../polaris/usePolaris";
 import PolarisAgentButton from "../polaris/PolarisAgentButton";
+import { notePolarisActivity } from "../polaris/activity";
 
 type ActiveTab =
   | "skill"
@@ -330,19 +331,44 @@ export default function ProjectWorkspace() {
   // Register handlers for nav targets that this page owns. The provider
   // dispatches `home` / `project` itself (it owns react-router); everything
   // else delegates to whichever page is mounted.
+  // Suppress the next activity-emission on tab change when Polaris itself
+  // is the one switching tabs — the agent's tool_summary already shows the
+  // nav, so doubling up would be noisy.
+  const suppressNextTabActivityRef = useRef(false);
   useRegisterPolarisNav("phase", (props) => {
     const phase = props.phase as string | undefined;
     if (!phase) return;
     // The agent's nav_phase enum is kept in sync with ActiveTab in
     // polaris_tools.py; cast is safe so long as that stays true.
+    suppressNextTabActivityRef.current = true;
     setActiveTab(phase as ActiveTab);
   });
+  // Same suppression rule for example focus.
+  const suppressNextExampleActivityRef = useRef(false);
+
+  // Emit "opened X tab" into the Polaris transcript when the user (or any
+  // non-Polaris code path) changes tabs. First render is silent — the
+  // initial activeTab isn't a user action.
+  const tabActivityFirstRenderRef = useRef(true);
+  useEffect(() => {
+    if (tabActivityFirstRenderRef.current) {
+      tabActivityFirstRenderRef.current = false;
+      return;
+    }
+    if (suppressNextTabActivityRef.current) {
+      suppressNextTabActivityRef.current = false;
+      return;
+    }
+    notePolarisActivity(`opened ${activeTab} tab`);
+  }, [activeTab]);
   useRegisterPolarisNav("coverage_map", () => setShowCoverageMap(true));
   useRegisterPolarisNav("settings", () => setShowSettings(true));
   useRegisterPolarisNav("share", () => setShowShareModal(true));
   useRegisterPolarisNav("example", (props) => {
     const id = props.example_id as string | undefined;
     if (!id) return;
+    suppressNextTabActivityRef.current = true;
+    suppressNextExampleActivityRef.current = true;
     setActiveTab("dataset");
     // ExampleReview owns the row-selection state. Broadcast so it can
     // focus the row without lifting that state up to the page.
@@ -366,6 +392,54 @@ export default function ProjectWorkspace() {
     setActiveTab("scorers");
     window.setTimeout(() => {
       window.dispatchEvent(new CustomEvent("polaris:generate-scorers"));
+    }, 120);
+  });
+  // Analyze the active (or named) eval run from chat — same as clicking the
+  // "Analyze" button on the Evaluate tab.
+  useRegisterPolarisNav("eval_run_analyze", (props) => {
+    suppressNextTabActivityRef.current = true;
+    setActiveTab("evaluate");
+    window.setTimeout(() => {
+      window.dispatchEvent(
+        new CustomEvent("polaris:analyze-run", {
+          detail: { run_id: props.run_id as string | undefined },
+        }),
+      );
+    }, 120);
+  });
+  // Cancel an in-flight eval run from chat.
+  useRegisterPolarisNav("eval_run_cancel", (props) => {
+    suppressNextTabActivityRef.current = true;
+    setActiveTab("evaluate");
+    window.setTimeout(() => {
+      window.dispatchEvent(
+        new CustomEvent("polaris:cancel-run", {
+          detail: { run_id: props.run_id as string | undefined },
+        }),
+      );
+    }, 120);
+  });
+  // Promote / discard the candidate skill version from chat.
+  useRegisterPolarisNav("skill_version_promote", (props) => {
+    suppressNextTabActivityRef.current = true;
+    setActiveTab("evaluate");
+    window.setTimeout(() => {
+      window.dispatchEvent(
+        new CustomEvent("polaris:promote-skill-version", {
+          detail: { version_id: props.version_id as string | undefined },
+        }),
+      );
+    }, 120);
+  });
+  useRegisterPolarisNav("skill_version_discard", (props) => {
+    suppressNextTabActivityRef.current = true;
+    setActiveTab("evaluate");
+    window.setTimeout(() => {
+      window.dispatchEvent(
+        new CustomEvent("polaris:discard-skill-version", {
+          detail: { version_id: props.version_id as string | undefined },
+        }),
+      );
     }, 120);
   });
   useRegisterPolarisNav("dataset_filter", (props) => {
@@ -777,6 +851,7 @@ export default function ProjectWorkspace() {
       updateSessionName(sessionId, trimmed).catch((err) => {
         console.error("Failed to save project name:", err);
       });
+      notePolarisActivity(`renamed project to "${trimmed}"`);
     }
   };
 
@@ -1458,6 +1533,8 @@ export default function ProjectWorkspace() {
     const storiesText = formatStoryGroups(storyGroups);
     if (!goalsText && !storiesText) return;
 
+    notePolarisActivity("generating charter");
+    suppressNextTabActivityRef.current = true;
     setActiveTab("charter");
     setLoading(true);
 
@@ -2033,6 +2110,8 @@ export default function ProjectWorkspace() {
     }
     // Switch tabs first so the user immediately sees the spinner instead of
     // staring at the charter page wondering whether anything happened.
+    notePolarisActivity(dataset ? "regenerating dataset" : "generating dataset");
+    suppressNextTabActivityRef.current = true;
     setActiveTab("dataset");
     setGeneratingDataset(true);
     try {
@@ -2054,6 +2133,8 @@ export default function ProjectWorkspace() {
       );
       if (!ok) return;
     }
+    notePolarisActivity(scorers.length ? "regenerating scorers" : "drafting scorers");
+    suppressNextTabActivityRef.current = true;
     setActiveTab("scorers");
     setGeneratingScorersShortcut(true);
     try {
@@ -2161,6 +2242,9 @@ export default function ProjectWorkspace() {
   const handleSynthesize = useCallback(
     async (count?: number) => {
       if (!dataset) return;
+      notePolarisActivity(
+        `started synthesizing examples${count ? ` (${count}/scenario)` : ""}`,
+      );
       setLoading(true);
       setGeneratingDataset(true);
       try {
@@ -2171,6 +2255,7 @@ export default function ProjectWorkspace() {
         const fullDs = await getDataset(dataset.session_id);
         setDataset(fullDs);
         setDatasetStale(false);
+        notePolarisActivity("synthesis complete");
       } catch (err) {
         console.error("Failed to synthesize:", err);
       } finally {
@@ -2210,6 +2295,22 @@ export default function ProjectWorkspace() {
             ),
           };
         });
+        // Narrate the change into the Polaris transcript so the agent's
+        // user can see what the click did. Most update flows are a single
+        // field — describe that specifically; otherwise fall back to a
+        // generic "edited" line.
+        const short = exampleId.slice(0, 8);
+        if (fields.review_status === 'approved') {
+          notePolarisActivity(`approved example ${short}…`);
+        } else if (fields.review_status === 'rejected') {
+          notePolarisActivity(`rejected example ${short}…`);
+        } else if (fields.label) {
+          notePolarisActivity(`relabeled example ${short}… as ${fields.label}`);
+        } else if (fields.input !== undefined || fields.expected_output !== undefined) {
+          notePolarisActivity(`edited example ${short}…`);
+        } else {
+          notePolarisActivity(`updated example ${short}…`);
+        }
       } catch (err) {
         console.error("Failed to update example:", err);
         // Roll back to the pre-update row so the UI doesn't lie about a
@@ -2249,6 +2350,7 @@ export default function ProjectWorkspace() {
       });
       try {
         await apiDeleteExample(dataset.id, exampleId);
+        notePolarisActivity(`deleted example ${exampleId.slice(0, 8)}…`);
       } catch (err) {
         console.error("Failed to delete example:", err);
         // Roll back so the row reappears.
@@ -2265,11 +2367,13 @@ export default function ProjectWorkspace() {
 
   const handleAutoReview = useCallback(async () => {
     if (!dataset) return;
+    notePolarisActivity("started auto-review");
     setLoading(true);
     try {
       await autoReviewExamples(dataset.id);
       const fullDs = await getDataset(dataset.session_id);
       setDataset(fullDs);
+      notePolarisActivity("auto-review complete");
     } catch (err) {
       console.error("Failed to auto-review:", err);
     } finally {

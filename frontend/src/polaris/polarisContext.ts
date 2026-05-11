@@ -20,6 +20,9 @@ export interface PolarisMessage {
   // pill-style markers ("↳ approved example abc"), not collapsible cards.
   toolSummary?: PolarisToolSummary[]
   proposals?: PolarisProposal[]
+  // Out-of-chat activity (manual button click, tab switch, nav). Rendered
+  // as a muted "↳ X" line with no bubble — informational only.
+  activity?: string
 }
 
 export interface PolarisCtxShape {

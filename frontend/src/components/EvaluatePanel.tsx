@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronDown, ChevronUp, Eye, ExternalLink, FileText, KeyRound, Loader2, RotateCcw, Settings as SettingsIcon, Sparkles, X } from 'lucide-react'
 import type { Charter, Dataset, EvalRunSummary, ImprovementSuggestion, SkillVersion } from '../types'
+import { notePolarisActivity } from '../polaris/activity'
 import CharterDocument from './CharterDocument'
 import DiffModal from './DiffModal'
 import PanelLayout from './PanelLayout'
@@ -565,6 +566,7 @@ export default function EvaluatePanel({
     async (overrides?: { project?: string; experiment_name?: string; limit?: number; include_triggering?: boolean; agent_mode?: boolean; allow_bash?: boolean }) => {
       setStartError(null)
       setStarting(true)
+      notePolarisActivity('started eval run')
       try {
         const run = await runEval(sessionId, {
           project: (overrides?.project ?? project).trim() || 'northstar-eval',
@@ -618,6 +620,11 @@ export default function EvaluatePanel({
     return () => window.removeEventListener('polaris:start-eval', handler)
   }, [canRun, runWithConfig])
 
+  // The remaining Polaris-triggered handlers (analyze / cancel / promote /
+  // discard) need access to state + handlers that are defined further down
+  // in this file. They're wired in a single useEffect at the bottom of the
+  // hooks section — see "Polaris event listeners".
+
   // --- Improvement handlers (merged from ImprovePanel) ---
   // Caller can pin a specific run id; otherwise we analyze the currently-open
   // run, or fall back to the latest done/failed run. The in-context "Analyze
@@ -655,6 +662,83 @@ export default function EvaluatePanel({
       setSuggesting(false)
     }
   }
+
+  // --- Polaris event listeners ---
+  // Each Polaris-triggered nav target (analyze / cancel / promote / discard)
+  // fires a window event after switching to the Evaluate tab. We refresh
+  // refs to the latest handlers + state on every render so the listeners
+  // capture current values without re-binding the event listener.
+  const handleSuggestRef = useRef(handleSuggest)
+  handleSuggestRef.current = handleSuggest
+  const activeRunRef = useRef(activeRun)
+  activeRunRef.current = activeRun
+  const candidateVersionIdRef = useRef(candidateVersionId)
+  candidateVersionIdRef.current = candidateVersionId
+  useEffect(() => {
+    const onAnalyze = (e: Event) => {
+      const runId =
+        (e as CustomEvent<{ run_id?: string }>).detail?.run_id ||
+        activeRunRef.current?.run_id
+      void handleSuggestRef.current(runId)
+    }
+    const onCancel = async (e: Event) => {
+      const runId =
+        (e as CustomEvent<{ run_id?: string }>).detail?.run_id ||
+        activeRunRef.current?.run_id
+      if (!runId) return
+      try {
+        const fresh = await cancelEvalRun(sessionId, runId)
+        setActiveRun(fresh)
+        await refreshRuns()
+      } catch (err) {
+        setStartError(err instanceof Error ? err.message : 'Failed to cancel')
+      }
+    }
+    const onPromote = async (e: Event) => {
+      const id =
+        (e as CustomEvent<{ version_id?: string }>).detail?.version_id ||
+        candidateVersionIdRef.current
+      if (!id) return
+      setCandidateActionError(null)
+      setCandidateActionBusy(true)
+      try {
+        await promoteSkillVersion(sessionId, id)
+        await refreshSkillVersions()
+        await onCandidateChanged?.()
+      } catch (err) {
+        setCandidateActionError(err instanceof Error ? err.message : 'Failed to promote')
+      } finally {
+        setCandidateActionBusy(false)
+      }
+    }
+    const onDiscard = async (e: Event) => {
+      const id =
+        (e as CustomEvent<{ version_id?: string }>).detail?.version_id ||
+        candidateVersionIdRef.current
+      if (!id) return
+      setCandidateActionError(null)
+      setCandidateActionBusy(true)
+      try {
+        await discardSkillVersion(sessionId, id)
+        await refreshSkillVersions()
+        await onCandidateChanged?.()
+      } catch (err) {
+        setCandidateActionError(err instanceof Error ? err.message : 'Failed to discard')
+      } finally {
+        setCandidateActionBusy(false)
+      }
+    }
+    window.addEventListener('polaris:analyze-run', onAnalyze)
+    window.addEventListener('polaris:cancel-run', onCancel)
+    window.addEventListener('polaris:promote-skill-version', onPromote)
+    window.addEventListener('polaris:discard-skill-version', onDiscard)
+    return () => {
+      window.removeEventListener('polaris:analyze-run', onAnalyze)
+      window.removeEventListener('polaris:cancel-run', onCancel)
+      window.removeEventListener('polaris:promote-skill-version', onPromote)
+      window.removeEventListener('polaris:discard-skill-version', onDiscard)
+    }
+  }, [sessionId, refreshRuns, refreshSkillVersions, onCandidateChanged])
 
   const acceptedSuggestions = useMemo(
     () => suggestions.filter((s) => accepted.has(s.id)),
