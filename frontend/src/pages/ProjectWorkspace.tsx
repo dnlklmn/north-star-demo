@@ -808,7 +808,15 @@ export default function ProjectWorkspace() {
   // "both" button reflects its own parallel run, not a false positive from
   // clicking the single-action ones while that's in flight.
   const [generatingDataset, setGeneratingDataset] = useState(false);
-  const [generatingScorersShortcut, setGeneratingScorersShortcut] = useState(false);
+  // Unified scorer-generation state — lifted out of ScorersPanel so the
+  // spinner + error survive tab switches and Polaris-triggered draftings
+  // don't race the panel's mount.
+  const [scorersGenerating, setScorersGenerating] = useState(false);
+  const [scorersError, setScorersError] = useState<string | null>(null);
+  // Legacy name kept because charter-shortcut handlers below reference it;
+  // it now mirrors the unified flag exactly.
+  const generatingScorersShortcut = scorersGenerating;
+  const setGeneratingScorersShortcut = setScorersGenerating;
   const [generatingBoth, setGeneratingBoth] = useState(false);
 
   // Watchdog: while a generation is in flight, poll the session + dataset
@@ -2093,6 +2101,57 @@ export default function ProjectWorkspace() {
     }
   }, [sessionId, ensureCharter]);
 
+  // Unified entry-point for kicking off scorer generation from any surface
+  // (panel button, charter-shortcut, Polaris). Owns the busy/error state so
+  // the user sees consistent feedback regardless of where they triggered
+  // it. `skipConfirm` is set by Polaris (it already showed its own confirm
+  // chip) and by the charter shortcut (it has its own confirm dialog
+  // upstream).
+  const handleGenerateScorers = useCallback(
+    async (opts?: { skipConfirm?: boolean }) => {
+      if (!sessionId) return;
+      if (
+        scorers.length > 0 &&
+        !opts?.skipConfirm &&
+        !window.confirm(
+          "Regenerate scorers?\n\nThis replaces the current scorer code — any manual edits will be lost.",
+        )
+      ) {
+        return;
+      }
+      notePolarisActivity(
+        scorers.length ? "regenerating scorers" : "drafting scorers",
+      );
+      setScorersError(null);
+      setScorersGenerating(true);
+      try {
+        await runGenerateScorers();
+        setScorersStale(false);
+        notePolarisActivity("scorer draft complete");
+      } catch (err) {
+        const msg =
+          err instanceof Error ? err.message : "Failed to generate scorers";
+        setScorersError(msg);
+        notePolarisActivity(`scorer draft failed: ${msg}`);
+      } finally {
+        setScorersGenerating(false);
+      }
+    },
+    [sessionId, scorers.length, runGenerateScorers],
+  );
+
+  // Parent listens for Polaris-triggered draft requests so the flow works
+  // even when the Scorers tab isn't mounted yet (the 120ms nav delay would
+  // otherwise race with panel mount + listener registration).
+  useEffect(() => {
+    const handler = () => {
+      void handleGenerateScorers({ skipConfirm: true });
+    };
+    window.addEventListener("polaris:generate-scorers", handler);
+    return () =>
+      window.removeEventListener("polaris:generate-scorers", handler);
+  }, [handleGenerateScorers]);
+
   const handleShortcutDataset = useCallback(async () => {
     // "Go to" short-circuit: artifact exists and isn't marked stale, so just
     // navigate — no point regenerating over a fresh dataset.
@@ -2133,17 +2192,13 @@ export default function ProjectWorkspace() {
       );
       if (!ok) return;
     }
-    notePolarisActivity(scorers.length ? "regenerating scorers" : "drafting scorers");
     suppressNextTabActivityRef.current = true;
     setActiveTab("scorers");
-    setGeneratingScorersShortcut(true);
-    try {
-      await runGenerateScorers();
-      setScorersStale(false);
-    } finally {
-      setGeneratingScorersShortcut(false);
-    }
-  }, [scorers.length, scorersStale, runGenerateScorers]);
+    // Routes through the unified handler so the generating + error state
+    // lives in one place and survives tab switches. `skipConfirm` because
+    // the charter shortcut already handled its own confirm dialog.
+    await handleGenerateScorers({ skipConfirm: true });
+  }, [scorers.length, scorersStale, handleGenerateScorers]);
 
   const handleShortcutBoth = useCallback(async () => {
     const datasetFresh = !!dataset && !datasetStale;
@@ -2210,7 +2265,7 @@ export default function ProjectWorkspace() {
       setGeneratingDataset(false);
       setGeneratingScorersShortcut(false);
     }
-  }, [ensureCharter, runGenerateDataset, runGenerateScorers, dataset, datasetStale, scorers.length, scorersStale]);
+  }, [ensureCharter, runGenerateDataset, runGenerateScorers, dataset, datasetStale, scorers.length, scorersStale, setGeneratingScorersShortcut]);
 
   const handleGenerateDataset = useCallback(async () => {
     if (!sessionId) return;
@@ -3185,7 +3240,9 @@ export default function ProjectWorkspace() {
                   }
                 }}
                 onNavigateToEvaluate={() => setActiveTab("evaluate")}
-                externalGenerating={generatingScorersShortcut || generatingBoth}
+                externalGenerating={scorersGenerating || generatingBoth}
+                externalError={scorersError}
+                onGenerate={() => handleGenerateScorers()}
                 canEdit={canEdit}
               />
             </>

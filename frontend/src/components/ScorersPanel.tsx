@@ -2,13 +2,11 @@ import { useCallback, useEffect, useState } from 'react'
 import { Sparkles, ChevronRight, Copy, Download, Loader2, ArrowRight, Check, Upload } from 'lucide-react'
 import type { Charter, ScorerDef } from '../types'
 import {
-  generateScorers,
   getBraintrustScorerPrompt,
   suggestScorerIdeas,
   type ScorerIdea,
 } from '../api'
 import { AIIcon } from './ui/Icons'
-import { notePolarisActivity } from '../polaris/activity'
 import SuggestionBox, { SuggestionCard } from './SuggestionBox'
 import { getAutoGenerateSuggestions } from '../utils/uiPrefs'
 
@@ -19,19 +17,25 @@ interface Props {
   scorers?: ScorerDef[]
   onScorersChange?: (scorers: ScorerDef[]) => void
   onNavigateToEvaluate?: () => void
-  /** Set true while a parent-driven shortcut is generating scorers (e.g. the
-   *  charter page kicked off `Generate dataset and scorers`). The empty-state
-   *  spinner picks this up so the user sees feedback when they land here. */
+  /** Parent-owned generating flag. Was previously local to this panel, but
+   *  that made the spinner die on tab switch (panel unmounts → state lost)
+   *  and made Polaris-triggered generation race the panel's mount. Now the
+   *  parent owns it and the panel is purely presentational for this state. */
   externalGenerating?: boolean
+  /** Parent-owned error from the last generation attempt. Survives tab
+   *  switches the same way `externalGenerating` does. */
+  externalError?: string | null
+  /** Parent-supplied generate handler. Replaces the panel's own fetch.
+   *  Called by the "Generate scorers" / "Regenerate" buttons. */
+  onGenerate?: () => Promise<void> | void
   /** Read-only when false: generate/regenerate, save and download buttons hide. */
   canEdit?: boolean
 }
 
-export default function ScorersPanel({ charter, hasDataset: _hasDataset, sessionId, scorers: externalScorers, onScorersChange, onNavigateToEvaluate, externalGenerating, canEdit = true }: Props) {
+export default function ScorersPanel({ charter, hasDataset: _hasDataset, sessionId, scorers: externalScorers, onScorersChange, onNavigateToEvaluate, externalGenerating, externalError, onGenerate, canEdit = true }: Props) {
   const [localScorers, setLocalScorers] = useState<ScorerDef[]>([])
   const scorers = externalScorers ?? localScorers
-  // Memoized so callbacks that depend on it (e.g. `runGenerate`) stay
-  // stable across renders.
+  // Memoized so callbacks that depend on it stay stable across renders.
   const setScorers = useCallback(
     (s: ScorerDef[]) => {
       setLocalScorers(s)
@@ -39,19 +43,14 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
     },
     [onScorersChange],
   )
-  const [generatingLocal, setGenerating] = useState(false)
-  // Once scorers populate, generation is observably done — surface that
-  // truth even if a generation flag (parent-driven `externalGenerating` or
-  // a stuck local one) hasn't cleared yet. Without this, a slow parent
-  // state update or an interrupted flow could leave the regenerate button
-  // permanently stuck on "Generating…" after rows already landed.
-  const generating =
-    scorers.length === 0 && (generatingLocal || !!externalGenerating)
-  // The regenerate button in the populated header has its own narrower
-  // signal — only the local action drives it, so kicking off a regenerate
-  // from this panel always has a clean "generating → done" lifecycle and
-  // doesn't get tangled with charter-shortcut state.
-  const headerRegenBusy = generatingLocal
+  // Generation is parent-owned now — no local flag, no local error. Both
+  // survive tab switches and stay coherent across Polaris-triggered and
+  // button-triggered paths.
+  const generating = !!externalGenerating
+  // The regenerate-button busy state is the same generation flag — losing
+  // the per-button distinction is the cost of a single source of truth,
+  // which is worth it for surviving tab switches.
+  const headerRegenBusy = generating
 
   // Expected scorer count = one per charter criterion, roughly. Surfaced
   // in the empty-state spinner copy so the user sees rough progress
@@ -122,41 +121,13 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
     || charter.alignment.length > 0
     || charter.rot.criteria.length > 0
 
-  const runGenerate = useCallback(async () => {
-    setGenerating(true)
-    setError(null)
-    notePolarisActivity('drafting scorers')
-    try {
-      const result = await generateScorers(sessionId)
-      setScorers(result.scorers)
-      notePolarisActivity('scorer draft complete')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to generate scorers')
-    } finally {
-      setGenerating(false)
-    }
-  }, [sessionId, setScorers])
-
+  // Generation is delegated to the parent (ProjectWorkspace) so the
+  // generating + error state survives tab switches and Polaris-triggered
+  // and button-triggered paths share the same flow. The regenerate
+  // confirm dialog lives in the parent now too.
   const handleGenerate = async () => {
-    // If scorers exist, regeneration replaces the code — confirm so manual
-    // edits to a scorer body aren't lost to an accidental click.
-    if (scorers.length > 0) {
-      const ok = window.confirm(
-        "Regenerate scorers?\n\nThis replaces the current scorer code — any manual edits will be lost.",
-      )
-      if (!ok) return
-    }
-    await runGenerate()
+    await onGenerate?.()
   }
-
-  // Polaris-triggered draft: Polaris already showed its own confirm chip
-  // before sending this event, so we skip the second window.confirm and go
-  // straight to the generate call.
-  useEffect(() => {
-    const handler = () => { void runGenerate() }
-    window.addEventListener('polaris:generate-scorers', handler)
-    return () => window.removeEventListener('polaris:generate-scorers', handler)
-  }, [runGenerate])
 
   const handleCopy = (code: string) => {
     navigator.clipboard.writeText(code)
@@ -267,9 +238,11 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
 
       <div className="flex-1 flex min-h-0">
         <div className="flex-1 overflow-y-auto p-6">
-        {error && (
+        {/* Show the parent-owned generate error first (survives tab switch),
+            fall back to the panel-local Braintrust-prompt error. */}
+        {(externalError || error) && (
           <div className="mb-4 p-3 bg-danger/10 border border-danger/20 text-xs text-danger">
-            {error}
+            {externalError || error}
           </div>
         )}
         {scorers.length === 0 ? (
