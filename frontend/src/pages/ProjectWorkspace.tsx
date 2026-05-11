@@ -2109,7 +2109,18 @@ export default function ProjectWorkspace() {
   // upstream).
   const handleGenerateScorers = useCallback(
     async (opts?: { skipConfirm?: boolean }) => {
-      if (!sessionId) return;
+      if (!sessionId) {
+        const msg = "no session loaded yet — open a project first";
+        console.warn("[scorers] generate skipped:", msg);
+        setScorersError(msg);
+        notePolarisActivity(`scorer draft failed: ${msg}`);
+        return;
+      }
+      // Guard against multiple concurrent runs (double-click, double-event).
+      if (scorersGenerating) {
+        console.warn("[scorers] generate already in flight");
+        return;
+      }
       if (
         scorers.length > 0 &&
         !opts?.skipConfirm &&
@@ -2119,6 +2130,23 @@ export default function ProjectWorkspace() {
       ) {
         return;
       }
+      // Charter is a hard prerequisite — without criteria the backend has
+      // nothing to draft from. Surface it explicitly so the user sees why
+      // nothing happened.
+      if (!hasCharter) {
+        const msg =
+          "this project has no charter yet — fill in goals / stories and generate the charter first";
+        console.warn("[scorers] generate skipped:", msg);
+        setScorersError(msg);
+        notePolarisActivity(`scorer draft failed: ${msg}`);
+        return;
+      }
+      console.log("[scorers] handleGenerateScorers start", {
+        sessionId,
+        scorerCount: scorers.length,
+        skipConfirm: !!opts?.skipConfirm,
+        hasCharter,
+      });
       notePolarisActivity(
         scorers.length ? "regenerating scorers" : "drafting scorers",
       );
@@ -2127,30 +2155,39 @@ export default function ProjectWorkspace() {
       try {
         await runGenerateScorers();
         setScorersStale(false);
+        console.log("[scorers] handleGenerateScorers complete");
         notePolarisActivity("scorer draft complete");
       } catch (err) {
         const msg =
           err instanceof Error ? err.message : "Failed to generate scorers";
+        console.error("[scorers] handleGenerateScorers failed:", err);
         setScorersError(msg);
         notePolarisActivity(`scorer draft failed: ${msg}`);
       } finally {
         setScorersGenerating(false);
       }
     },
-    [sessionId, scorers.length, runGenerateScorers],
+    [sessionId, scorers.length, scorersGenerating, hasCharter, runGenerateScorers],
   );
 
-  // Parent listens for Polaris-triggered draft requests so the flow works
-  // even when the Scorers tab isn't mounted yet (the 120ms nav delay would
-  // otherwise race with panel mount + listener registration).
+  // Parent listens for Polaris-triggered draft requests via a stable
+  // listener (bound once at mount). The ref pattern keeps the latest
+  // handler in scope without re-binding the event listener on every
+  // scorers.length / hasCharter change — that re-bind churn was creating
+  // a small window where the polaris:generate-scorers event could land
+  // between teardown and re-setup and be silently dropped.
+  const handleGenerateScorersRef = useRef(handleGenerateScorers);
+  useEffect(() => {
+    handleGenerateScorersRef.current = handleGenerateScorers;
+  });
   useEffect(() => {
     const handler = () => {
-      void handleGenerateScorers({ skipConfirm: true });
+      void handleGenerateScorersRef.current({ skipConfirm: true });
     };
     window.addEventListener("polaris:generate-scorers", handler);
     return () =>
       window.removeEventListener("polaris:generate-scorers", handler);
-  }, [handleGenerateScorers]);
+  }, []);
 
   const handleShortcutDataset = useCallback(async () => {
     // "Go to" short-circuit: artifact exists and isn't marked stale, so just
