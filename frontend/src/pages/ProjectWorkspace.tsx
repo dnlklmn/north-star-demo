@@ -26,7 +26,6 @@ import {
 import type {
   Message,
   SessionState,
-  AgentStatus,
   StoryGroup,
   Suggestion,
   SuggestedStory,
@@ -87,7 +86,6 @@ import CharterPanel from "../components/CharterPanel";
 import ScorersPanel from "../components/ScorersPanel";
 import EvaluatePanel from "../components/EvaluatePanel";
 import SkillPanel from "../components/SkillPanel";
-import ConversationPanel from "../components/ConversationPanel";
 import ExampleReview from "../components/ExampleReview";
 import CoverageMap from "../components/CoverageMap";
 import { computeCoverageScore } from "../components/coverage";
@@ -99,7 +97,9 @@ import { useShareToken } from "../hooks/useShareToken";
 import {
   useRegisterPolarisContext,
   useRegisterPolarisNav,
+  usePolaris,
 } from "../polaris/usePolaris";
+import PolarisChat from "../polaris/PolarisChat";
 
 type ActiveTab =
   | "skill"
@@ -187,6 +187,13 @@ export default function ProjectWorkspace() {
   // navigates to Dataset normally.
   const [pendingDatasetFilter, setPendingDatasetFilter] = useState<string | null>(null);
 
+  // --- Polaris transcript hydration ---
+  // Read from the global Polaris provider so the rail chat stays in sync
+  // with whatever conversation lives in `session.conversation`. The rail is
+  // mounted by this page, but the transcript itself outlives any single
+  // tab — that's the whole point of "one agent, one conversation."
+  const { hydrateMessages: hydratePolarisMessages } = usePolaris();
+
   // --- Project metadata ---
   const [projectName, setProjectName] = useState("Untitled project");
   const [editingName, setEditingName] = useState(false);
@@ -197,7 +204,13 @@ export default function ProjectWorkspace() {
     urlSessionId || null,
   );
   const [state, setState] = useState<SessionState>(EMPTY_STATE);
-  const [messages, setMessages] = useState<Message[]>([]);
+  // Legacy discovery-flow message log. Polaris (rail chat) owns its own
+  // transcript via the PolarisProvider — these writes feed the dead
+  // ConversationPanel that used to live in the rail. The underscore
+  // tells eslint we know it's unused; full removal happens when the
+  // discovery state machine is collapsed into Polaris tools.
+  const [_messages, setMessages] = useState<Message[]>([]);
+  void _messages;
   const [loading, setLoading] = useState(false);
   const [hydrating, setHydrating] = useState(!!urlSessionId);
 
@@ -280,9 +293,13 @@ export default function ProjectWorkspace() {
 
   // --- Dataset phase state ---
   const [dataset, setDataset] = useState<Dataset | null>(null);
-  const [actionSuggestions, setActionSuggestions] = useState<
+  // Legacy dataset-chat action suggestions. Polaris surfaces proposals
+  // inline in the rail chat now; this state is still written by the old
+  // datasetChat path until that's collapsed into Polaris tools.
+  const [_actionSuggestions, setActionSuggestions] = useState<
     Array<{ action: string; label: string; reason: string }>
   >([]);
+  void _actionSuggestions;
 
   // --- Scorers state (lifted up for persistence across tab switches) ---
   const [scorers, setScorers] = useState<ScorerDef[]>([]);
@@ -422,12 +439,16 @@ export default function ProjectWorkspace() {
       const s = session.state as SessionState;
       setSessionId(urlSessionId);
       setState(s);
-      setMessages(
+      const hydrated =
         session.conversation?.map((m: { role: string; content: string }) => ({
           role: m.role as "user" | "assistant",
           content: m.content,
-        })) || [],
-      );
+        })) || [];
+      setMessages(hydrated);
+      // Polaris owns its own transcript (rail chat). Hydrate it from the
+      // same conversation so the user sees one continuous thread no matter
+      // which surface they used to chat.
+      hydratePolarisMessages(hydrated);
 
       if (s.input.goals && s.input.goals.length > 0) {
         setGoals([...s.input.goals, ""]);
@@ -598,7 +619,7 @@ export default function ProjectWorkspace() {
     return () => {
       cancelled = true;
     };
-  }, [urlSessionId, navigate]);
+  }, [urlSessionId, navigate, hydratePolarisMessages]);
 
   // --- Live updates: re-fetch session + dataset on SSE state_changed ---
   // The hook subscribes to /sessions/:id/events and calls this on every push.
@@ -666,7 +687,10 @@ export default function ProjectWorkspace() {
     return () => window.removeEventListener("polaris:state-changed", handler);
   }, [handleLiveStateChange]);
 
-  const status: AgentStatus = state.agent_status;
+  // `status` was passed to the legacy ConversationPanel — Polaris owns its
+  // own loading/error state. Kept commented as a breadcrumb if a future
+  // status surface needs it.
+  // const status: AgentStatus = state.agent_status;
   const hasCharter = !!(
     state.charter.coverage.criteria.length || state.charter.alignment.length
   );
@@ -1625,7 +1649,11 @@ export default function ProjectWorkspace() {
     [dataset],
   );
 
-  const handleSend = useCallback(
+  // Legacy chat handler — the rail no longer uses it (Polaris handles its
+  // own send). Kept because the discovery state machine still emits
+  // sendMessage / datasetChat calls from other code paths; will be
+  // removed when those are collapsed into Polaris tools.
+  const _handleSend = useCallback(
     async (message: string) => {
       if (!sessionId) return;
       setMessages((prev) => [...prev, { role: "user", content: message }]);
@@ -1672,6 +1700,7 @@ export default function ProjectWorkspace() {
     },
     [sessionId, dataset, executeAgentAction],
   );
+  void _handleSend;
 
   const handleEditCriterion = useCallback(
     async (dimension: string, index: number, value: string) => {
@@ -2519,19 +2548,7 @@ export default function ProjectWorkspace() {
         </IconButton>
       </div>
       <div className="flex-1 min-h-0 flex flex-col">
-        <ConversationPanel
-          messages={messages}
-          status={status}
-          validation={state.validation}
-          loading={loading}
-          onSend={handleSend}
-          onProceed={() => {}}
-          onKeepRefining={() => {}}
-          actionSuggestions={actionSuggestions}
-          onActionSuggestion={(action) => {
-            executeAgentAction({ action });
-          }}
-        />
+        <PolarisChat />
       </div>
     </div>
   );

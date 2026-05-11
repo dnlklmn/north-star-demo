@@ -6,7 +6,6 @@ import { checkHealth, hasApiKey } from './api'
 import ApiKeyBanner from './components/ApiKeyBanner'
 import LLMBillingBanner from './components/LLMBillingBanner'
 import { PolarisProvider } from './polaris/PolarisProvider'
-import PolarisDrawer from './polaris/PolarisDrawer'
 
 export default function App() {
   const [needsKey, setNeedsKey] = useState(() => !hasApiKey())
@@ -34,7 +33,6 @@ export default function App() {
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </div>
-        <PolarisDrawer />
       </div>
     </PolarisProvider>
   )

@@ -10,6 +10,7 @@ import type { PolarisContext, PolarisNav } from '../api'
 import {
   PolarisCtx,
   type PolarisCtxShape,
+  type PolarisMessage,
   type PolarisNavHandler,
 } from './polarisContext'
 
@@ -17,18 +18,38 @@ import {
  * Polaris context bus.
  *
  * Tracks the `context` blob that's sent with every chat call (route,
- * session_id, dataset_id, phase, selected_example_id), and dispatches nav
- * tool results to whichever handler is registered. The provider owns
- * `home` / `project` (it has access to react-router's `navigate`); pages
- * register their own handlers for `phase`, `example`, `coverage_map`,
- * `settings`, `share`, etc.
+ * session_id, dataset_id, phase, selected_example_id), owns the
+ * conversation transcript, and dispatches nav tool results.
  */
 export function PolarisProvider({ children }: { children: ReactNode }) {
   const navigate = useNavigate()
   const location = useLocation()
-  const [open, setOpen] = useState(false)
   const [contextSlice, setContextSliceState] = useState<PolarisContext>({})
   const handlersRef = useRef<Map<string, PolarisNavHandler>>(new Map())
+
+  // Conversation lives in the provider so the rail and the (future) panel
+  // chat inputs are the same transcript. Hydrated by whichever page mounts
+  // first via `hydrateMessages`.
+  const [messages, setMessagesState] = useState<PolarisMessage[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const setMessages = useCallback(
+    (next: PolarisMessage[] | ((prev: PolarisMessage[]) => PolarisMessage[])) => {
+      setMessagesState(prev => (typeof next === 'function' ? next(prev) : next))
+    },
+    [],
+  )
+
+  const hydrateMessages = useCallback((initial: PolarisMessage[]) => {
+    // Only replace if the incoming history isn't already what we're showing.
+    // Avoids clobbering an in-flight conversation when the project page
+    // re-mounts (e.g. tab switch triggers a state refetch).
+    setMessagesState(prev => {
+      if (prev.length === 0 && initial.length > 0) return initial
+      return prev
+    })
+  }, [])
 
   // Keep `context.route` in sync with the URL automatically — pages don't
   // have to remember to push it.
@@ -39,8 +60,6 @@ export function PolarisProvider({ children }: { children: ReactNode }) {
 
   const setContextSlice = useCallback((slice: Partial<PolarisContext>) => {
     setContextSliceState(prev => {
-      // Identity-preserving update — when nothing changed, return the same
-      // object so consumers don't re-render.
       let dirty = false
       const next = { ...prev }
       for (const k of Object.keys(slice) as (keyof PolarisContext)[]) {
@@ -58,8 +77,6 @@ export function PolarisProvider({ children }: { children: ReactNode }) {
     (target: string, handler: PolarisNavHandler) => {
       handlersRef.current.set(target, handler)
       return () => {
-        // Only remove if it's still our handler — prevents a re-render race
-        // from clearing a freshly-registered one.
         if (handlersRef.current.get(target) === handler) {
           handlersRef.current.delete(target)
         }
@@ -70,9 +87,6 @@ export function PolarisProvider({ children }: { children: ReactNode }) {
 
   const dispatchNav = useCallback(
     (nav: PolarisNav) => {
-      // Provider-owned defaults: `home` and `project` need `navigate`, which
-      // is hooked into react-router and not available to leaf pages without
-      // ceremony. Anything else falls through to a registered handler.
       if (nav.target === 'home') {
         navigate('/')
         return
@@ -97,10 +111,25 @@ export function PolarisProvider({ children }: { children: ReactNode }) {
       setContextSlice,
       registerNavHandler,
       dispatchNav,
-      open,
-      setOpen,
+      messages,
+      setMessages,
+      hydrateMessages,
+      loading,
+      setLoading,
+      error,
+      setError,
     }),
-    [fullContext, setContextSlice, registerNavHandler, dispatchNav, open],
+    [
+      fullContext,
+      setContextSlice,
+      registerNavHandler,
+      dispatchNav,
+      messages,
+      setMessages,
+      hydrateMessages,
+      loading,
+      error,
+    ],
   )
 
   return <PolarisCtx.Provider value={value}>{children}</PolarisCtx.Provider>
