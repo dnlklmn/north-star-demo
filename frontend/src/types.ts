@@ -344,6 +344,25 @@ export interface EvalRunPerRow {
   scores: Record<string, number>
   error: string | null
   metadata: Record<string, unknown>
+  /** Free-text note attached to this row by the user. Used as input to the
+   *  upcoming cluster-notes step that produces named failure-mode buckets.
+   *  Optional / undefined when no note has been saved yet. */
+  note?: string
+  /** Per-scorer judge trace captured by the runner. Keyed by scorer name.
+   *  Carries the judge's free-text reasoning, parsed score, skip reason
+   *  (when the scorer gated out of this row), and any parse warnings —
+   *  enough to answer "why did this scorer give 30%?" without re-running. */
+  scorer_metadata?: Record<string, ScorerTrace>
+}
+
+export interface ScorerTrace {
+  description?: string
+  judge_response?: string
+  score?: number
+  skipped?: boolean
+  skip_reason?: string
+  parse_warning?: string
+  error?: string
 }
 
 export interface EvalRunSummary {
@@ -372,6 +391,26 @@ export interface EvalRunSummary {
    *  Null = never analyzed. Empty array = analyzed, no patterns found. */
   improvement_suggestions?: ImprovementSuggestion[] | null
   improvement_summary?: string | null
+  /** ISO timestamp of the most recent per-row note edit on this run.
+   *  Null until the first note is saved. Compared against
+   *  clusters_generated_at to render the "notes changed since last
+   *  analysis — re-analyze" pill. */
+  notes_updated_at?: string | null
+  /** Cached output of the cluster-notes step from the last Analyze. Null
+   *  until the first analysis that had any notes to cluster. */
+  clusters?: FailureCluster[] | null
+  /** ISO timestamp the clusters above were produced. Null when clusters
+   *  is null. */
+  clusters_generated_at?: string | null
+}
+
+/** A named failure-mode bucket — the user's notes grouped by an LLM into
+ *  a small taxonomy. Each cluster's row_ids point back at the per-row
+ *  entries whose notes seeded the bucket. */
+export interface FailureCluster {
+  label: string
+  count: number
+  row_ids: string[]
 }
 
 // --- Skill versioning + improvement suggestions (Path A) ---
@@ -403,6 +442,11 @@ export interface ImprovementSuggestion {
   source_row_ids: string[]
   source_scorer_names: string[]
   confidence: ImprovementConfidence
+  /** Failure-mode cluster label this suggestion is targeting. Null/empty
+   *  when the analysis ran without clusters (no notes) or the model
+   *  couldn't tie this suggestion to a single bucket. The UI groups
+   *  suggestions by this label when present. */
+  target_label?: string | null
 }
 
 export interface SuggestImprovementsResponse {
@@ -410,6 +454,10 @@ export interface SuggestImprovementsResponse {
   summary: string
   run_id: string
   skill_version_id: string | null
+  /** Failure-mode clusters used as input to this analysis, mirroring
+   *  what the eval_run now stores. Null when no notes drove the run. */
+  clusters?: FailureCluster[] | null
+  clusters_generated_at?: string | null
 }
 
 export interface CreateSkillVersionRequest {

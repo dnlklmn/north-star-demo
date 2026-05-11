@@ -77,6 +77,7 @@ from .models import (
     SendMessageResponse,
     SessionState,
     SessionKind,
+    SetEvalRunRowNoteRequest,
     SetModeRequest,
     ShareTokenSummary,
     Settings,
@@ -119,7 +120,6 @@ from .tools import (
     call_synthesize_examples,
     call_retag_examples_against_charter,
     call_review_examples,
-    call_gap_analysis,
     call_generate_scorers,
     call_revise_examples,
     call_detect_schema,
@@ -277,20 +277,20 @@ app.add_middleware(ApiKeyMiddleware)
 
 # --- Helpers ---
 
-async def _load_state(session_id: str) -> tuple[SessionState, list[dict]]:
-    """Load session state from DB, raise 404 if not found.
-
-    Backfills prompt-eval metadata (prompt_source_path / prompt_builder_name)
+async def _maybe_backfill_prompt_meta(
+    session_id: str,
+    state: SessionState,
+    conversation: list[dict],
+) -> tuple[SessionState, list[dict]]:
+    """Backfill prompt-eval metadata (prompt_source_path / prompt_builder_name)
     from the registry for sessions created before those fields existed, so
     the Prompt panel can show provenance without forcing the user to recreate.
-    Persists silently — no separate migration step needed.
-    """
-    row = await db.get_session(session_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    state = SessionState.model_validate(row["state"])
-    conversation = row["conversation"]
+    Persists silently when needed — no separate migration step.
 
+    Pure on already-loaded state so callers that already have the row don't
+    pay for a second DB fetch. _load_state and the GET /sessions/{id}
+    handler both go through this helper now.
+    """
     if (
         state.kind == SessionKind.prompt
         and state.prompt_target
@@ -307,8 +307,17 @@ async def _load_state(session_id: str) -> tuple[SessionState, list[dict]]:
                 mutated = True
             if mutated:
                 await db.update_session(session_id, state.model_dump(), conversation)
-
     return state, conversation
+
+
+async def _load_state(session_id: str) -> tuple[SessionState, list[dict]]:
+    """Load session state from DB, raise 404 if not found."""
+    row = await db.get_session(session_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    state = SessionState.model_validate(row["state"])
+    conversation = row["conversation"]
+    return await _maybe_backfill_prompt_meta(session_id, state, conversation)
 
 
 async def _save_state(session_id: str, state: SessionState, conversation: list[dict]) -> None:
@@ -765,6 +774,31 @@ async def seed_from_skill(
     """
     require_writer(access)
     state, conversation = await _load_state(session_id)
+
+    # Idempotency: if this session already has a seed version pointing at
+    # the same body, skip the whole flow. The user shows up here twice
+    # when they retry a stuck request, when /skill-seed double-fires from
+    # the home-page modal, or when an SSE reconnect re-issues the POST.
+    # Without this guard, every retry re-runs the LLM AND appends another
+    # v2/v3/etc. with `created_from="seed"` — exactly the duplicate-v1
+    # the user reported.
+    existing_seed = next(
+        (
+            v for v in state.skill_versions
+            if v.get("created_from") == "seed" and (v.get("body") or "") == (req.skill_body or "")
+        ),
+        None,
+    )
+    if existing_seed is not None:
+        # Frontend reads `state` to repopulate goals/users/stories on the
+        # success path. Returning the in-memory state here matches that
+        # shape, so the second-call client gets the same payload as the
+        # first-call client without re-running the LLM or appending a
+        # duplicate v1.
+        return SkillSeedResponse(
+            state=state,
+            message="Skill already seeded; returning the existing snapshot.",
+        )
 
     data, call_meta = await call_skill_seed(
         req.skill_body, req.skill_name, req.skill_description,
@@ -1375,6 +1409,126 @@ def _export_generated_scorers(state: SessionState, scorers: list[dict]) -> int:
     return written
 
 
+UNMAPPED_FEATURE_AREA = "(unmapped)"
+
+
+def _normalize_synthesized_feature_areas(generated: list[dict], charter: dict) -> int:
+    """Snap each synthesized row's `feature_area` to a known alignment entry,
+    or to ``UNMAPPED_FEATURE_AREA`` when it doesn't match any.
+
+    Why: scorer gating compares row.feature_area to charter.alignment[*].
+    feature_area exactly. If the LLM emits a paraphrased or wrong-dimension
+    string (a common synthesis bug — confusing alignment with coverage),
+    the row's alignment scorers all silently gate out and the row scores
+    only on coverage + safety. Snapping here makes the failure visible:
+    rows tagged ``(unmapped)`` sit clearly outside any alignment scorer's
+    target and surface in the UI's "unmapped rows" banner.
+
+    Three branches:
+      1. exact match against an alignment feature_area → keep as-is.
+      2. case/whitespace-insensitive match → snap to the canonical form.
+      3. otherwise → ``(unmapped)``.
+
+    Returns the count of rows that got snapped to ``(unmapped)`` so the
+    caller can log how often synthesis is producing out-of-range labels.
+    """
+    alignment_areas = [
+        a.get("feature_area", "")
+        for a in (charter.get("alignment") or [])
+        if isinstance(a, dict) and a.get("feature_area")
+    ]
+    if not alignment_areas:
+        # No alignment dimensions defined → nothing to snap to. Leave rows
+        # alone so the user can decide whether to flesh out the charter.
+        return 0
+    canonical = {a.casefold().strip(): a for a in alignment_areas}
+    unmapped_count = 0
+    for ex in generated:
+        if not isinstance(ex, dict):
+            continue
+        fa = ex.get("feature_area")
+        if not isinstance(fa, str):
+            ex["feature_area"] = UNMAPPED_FEATURE_AREA
+            unmapped_count += 1
+            continue
+        # Off-target rows in triggered mode legitimately use this sentinel
+        # — leave it alone.
+        if fa == "(off-target)":
+            continue
+        if fa in alignment_areas:
+            continue
+        snapped = canonical.get(fa.casefold().strip())
+        if snapped is not None:
+            ex["feature_area"] = snapped
+            continue
+        ex["feature_area"] = UNMAPPED_FEATURE_AREA
+        unmapped_count += 1
+    return unmapped_count
+
+
+def _slugify_for_scorer_match(text: str) -> str:
+    """Lowercase + strip non-alphanumerics. Used to match a generated scorer
+    name against the charter entry it grades, when the LLM-emitted
+    `target_tag` is missing or malformed.
+
+    Why this exists: the gating runner needs the EXACT charter text to
+    filter rows, but the LLM that emits scorers occasionally drops the
+    `target_tag` field. The scorer name itself (e.g. `coverage_3p_updates`)
+    is a slug of the criterion text the LLM picked, so we can recover the
+    gate by slugifying every charter entry the same way and finding the
+    one whose slug appears in the scorer name.
+    """
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
+def _ensure_scorer_target_tags(scorers: list[dict], charter: dict) -> None:
+    """Mutate `scorers` in place: backfill missing target_tag fields by
+    slug-matching each scorer's name against charter entries.
+
+    Coverage scorers map to `coverage.criteria` strings; alignment scorers
+    map to `alignment[i].feature_area` strings. Safety scorers don't gate
+    so they're left alone. If we can't find a charter entry whose slug
+    appears in the scorer name, we leave target_tag as None and the runner
+    falls back to ungated execution with a stderr warning — same behavior
+    as legacy sessions that pre-date the field, so nothing breaks.
+    """
+    coverage_criteria = list(charter.get("coverage", {}).get("criteria") or [])
+    alignment_areas = [
+        a.get("feature_area", "")
+        for a in (charter.get("alignment") or [])
+        if isinstance(a, dict) and a.get("feature_area")
+    ]
+
+    coverage_slugs = [(c, _slugify_for_scorer_match(c)) for c in coverage_criteria if c]
+    alignment_slugs = [(a, _slugify_for_scorer_match(a)) for a in alignment_areas if a]
+
+    for sc in scorers:
+        if not isinstance(sc, dict):
+            continue
+        existing = sc.get("target_tag")
+        if isinstance(existing, str) and existing.strip():
+            continue  # LLM emitted it — trust it
+        scorer_type = (sc.get("type") or "").strip().lower()
+        if scorer_type not in ("coverage", "alignment"):
+            continue  # safety / unknown — no gate needed
+        name_slug = _slugify_for_scorer_match(sc.get("name") or "")
+        if not name_slug:
+            continue
+        candidates = coverage_slugs if scorer_type == "coverage" else alignment_slugs
+        # Pick the longest slug that appears in the scorer name. Longer
+        # wins so ambiguous prefixes (e.g. "3p" vs "3p_update") resolve to
+        # the more specific charter entry; ties fall through to the first
+        # match in charter order.
+        best: tuple[str, str] | None = None
+        for original, slug in candidates:
+            if not slug or slug not in name_slug:
+                continue
+            if best is None or len(slug) > len(best[1]):
+                best = (original, slug)
+        if best is not None:
+            sc["target_tag"] = best[0]
+
+
 def _agent_contract_for_session(state: SessionState) -> str | None:
     """Resolve the system-prompt / SKILL.md the scorers are grading outputs of.
 
@@ -1424,6 +1578,11 @@ async def generate_scorers_endpoint(
     charter = state.charter.model_dump()
     agent_contract = _agent_contract_for_session(state)
     scorers, call_meta = await call_generate_scorers(charter, agent_contract=agent_contract)
+    # Backstop for the LLM occasionally forgetting `target_tag`. Each
+    # scorer maps 1:1 to a charter entry; we can recover the gate from
+    # the scorer name alone — no LLM judgment, just slug matching against
+    # the charter we know.
+    _ensure_scorer_target_tags(scorers, charter)
     state.scorers = scorers
     _stamp_lineage(state, "scorers")
     await _save_state(session_id, state, conversation)
@@ -1844,10 +2003,15 @@ async def get_session(
     session_id: str,
     access: Access = Depends(resolve_access),
 ):
+    # Single DB read — _load_state used to call db.get_session itself, so
+    # this handler was hitting the row twice. Inline the load here so we
+    # can pull `name` and `state`/`conversation` out of one fetchrow.
     row = await db.get_session(session_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    state, conversation = await _load_state(session_id)
+    state = SessionState.model_validate(row["state"])
+    conversation = row["conversation"]
+    state, conversation = await _maybe_backfill_prompt_meta(session_id, state, conversation)
     state_dict = state.model_dump()
     # Frontend reads state._access.role to hide write affordances for viewers.
     state_dict["_access"] = {"role": access.role}
@@ -2434,6 +2598,16 @@ async def synthesize_examples(
         and move on; the synth itself is the source of truth.
         """
         nonlocal created_total
+        # Snap out-of-range feature_area values to "(unmapped)" before
+        # persisting. Per-cell synth makes this still a per-cell concern
+        # (each cell can independently emit a coverage-name-in-alignment-
+        # slot row); doing it here keeps the snap close to the LLM output.
+        unmapped = _normalize_synthesized_feature_areas(cell_examples, charter)
+        if unmapped:
+            logger.warning(
+                "synthesize: %d/%d rows in this cell had out-of-range feature_area, snapped to %r",
+                unmapped, len(cell_examples), UNMAPPED_FEATURE_AREA,
+            )
         for ex in cell_examples:
             ex["source"] = "synthetic"
         try:
@@ -2872,7 +3046,24 @@ async def suggest_revisions(
 
 @app.get("/datasets/{dataset_id}/gaps")
 async def analyze_gaps(dataset_id: str):
-    """Run coverage and balance gap analysis."""
+    """Coverage and balance gap analysis — fully deterministic.
+
+    The earlier implementation called the LLM here, which paid 30-60s
+    of latency to do work that's just counting cells in a matrix:
+      - "criteria with 0 examples"
+      - "feature areas with 0 examples"
+      - "feature areas missing good or bad examples"
+    None of those need a model. Now they're computed in Python from
+    the same coverage matrix the LLM was being handed as input. The
+    endpoint returns instantly (single DB read for examples + stats).
+
+    Trade-off: the human-readable `summary` field used to be free-form
+    LLM prose. We now build it from the counts deterministically — less
+    flowery, more honest, and the user can read the matrix below for
+    detail. No turn is logged because no LLM call ran.
+    """
+    from .prompt import _build_coverage_matrix
+
     dataset = await db.get_dataset(dataset_id)
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -2881,17 +3072,77 @@ async def analyze_gaps(dataset_id: str):
     examples = await db.get_examples(dataset_id)
     stats = await db.update_dataset_stats(dataset_id)
 
-    gaps, call_meta = await call_gap_analysis(charter, stats, examples)
+    coverage_criteria = list(charter.get("coverage", {}).get("criteria") or [])
+    feature_areas = [
+        a.get("feature_area", "")
+        for a in (charter.get("alignment") or [])
+        if isinstance(a, dict) and a.get("feature_area")
+    ]
+    matrix = _build_coverage_matrix(charter, examples)
 
-    await db.create_turn(
-        session_id=dataset["session_id"],
-        turn_type="gap_analysis",
-        input_snapshot={"charter": charter, "stats": stats},
-        llm_calls=call_meta,
-        parsed_output=gaps,
-    )
+    coverage_gaps = [
+        c for c in coverage_criteria
+        if sum((matrix.get(c) or {}).values()) == 0
+    ]
+    feature_area_gaps: list[str] = []
+    for fa in feature_areas:
+        total = sum(
+            (matrix.get(c) or {}).get(fa, 0) for c in coverage_criteria
+        )
+        if total == 0:
+            feature_area_gaps.append(fa)
 
-    return gaps
+    # `label_gaps`: per (feature_area, label) pair, does at least one
+    # non-rejected example exist? Computed from the raw examples since
+    # the matrix only carries totals, not label splits.
+    by_fa_label: dict[str, set[str]] = {}
+    for ex in examples:
+        if ex.get("review_status") == "rejected":
+            continue
+        fa = ex.get("feature_area")
+        lbl = ex.get("label")
+        if not isinstance(fa, str) or fa not in feature_areas:
+            continue
+        if not isinstance(lbl, str):
+            continue
+        by_fa_label.setdefault(fa, set()).add(lbl)
+    label_gaps: list[dict[str, str]] = []
+    for fa in feature_areas:
+        labels_present = by_fa_label.get(fa, set())
+        if "good" not in labels_present:
+            label_gaps.append({"feature_area": fa, "missing": "good"})
+        if "bad" not in labels_present:
+            label_gaps.append({"feature_area": fa, "missing": "bad"})
+
+    # `balance_issues` is hard to derive purely structurally — it's
+    # really "is the distribution close to what the charter's balance
+    # criteria asked for?". Without the LLM we don't have a free-text
+    # interpreter, so leave it empty rather than fabricate. The summary
+    # below covers the high-level signal.
+    balance_issues: list[str] = []
+
+    total_examples = stats.get("total", len(examples)) if isinstance(stats, dict) else len(examples)
+    parts: list[str] = [f"{total_examples} examples"]
+    if coverage_criteria:
+        parts.append(
+            f"{len(coverage_criteria) - len(coverage_gaps)}/{len(coverage_criteria)} coverage criteria covered"
+        )
+    if feature_areas:
+        parts.append(
+            f"{len(feature_areas) - len(feature_area_gaps)}/{len(feature_areas)} feature areas covered"
+        )
+    if label_gaps:
+        parts.append(f"{len(label_gaps)} feature-area × label slots missing")
+    summary = "; ".join(parts) + "."
+
+    return {
+        "coverage_gaps": coverage_gaps,
+        "feature_area_gaps": feature_area_gaps,
+        "balance_issues": balance_issues,
+        "label_gaps": label_gaps,
+        "coverage_matrix": matrix,
+        "summary": summary,
+    }
 
 
 @app.post("/datasets/{dataset_id}/enrich")
@@ -2918,6 +3169,13 @@ async def enrich_dataset(
         )
     else:
         raise HTTPException(status_code=400, detail=f"Unknown gap type: {req.gap_type}")
+
+    unmapped = _normalize_synthesized_feature_areas(generated, charter)
+    if unmapped:
+        logger.warning(
+            "enrich (%s): %d/%d rows had out-of-range feature_area, snapped to %r",
+            req.gap_type, unmapped, len(generated), UNMAPPED_FEATURE_AREA,
+        )
 
     for ex in generated:
         ex["source"] = "synthetic"
@@ -3037,6 +3295,9 @@ def _eval_run_to_summary(run: dict) -> EvalRunSummary:
         charter_snapshot=run.get("charter_snapshot"),
         improvement_suggestions=run.get("improvement_suggestions"),
         improvement_summary=run.get("improvement_summary"),
+        notes_updated_at=run.get("notes_updated_at"),
+        clusters=run.get("clusters"),
+        clusters_generated_at=run.get("clusters_generated_at"),
     )
 
 
@@ -3210,6 +3471,12 @@ async def run_eval_for_session(
         s for s in (state.scorers or [])
         if s.get("enabled", True) is not False
     ]
+    # Backfill target_tag on the in-memory copy for sessions whose scorers
+    # were generated before the gating field existed (or whose LLM dropped
+    # it). Pure slug match against the charter — no LLM. Mutates the local
+    # copy only; the persisted scorers stay as-is until the user
+    # regenerates, so this is safe to run on every eval.
+    _ensure_scorer_target_tags(scorer_defs, state.charter.model_dump())
     if not scorer_defs:
         total = len(state.scorers or [])
         if total == 0:
@@ -3348,6 +3615,44 @@ async def list_eval_runs_endpoint(session_id: str):
     """List all eval runs for this session (most recent first)."""
     runs = await db.list_eval_runs(session_id)
     return [_eval_run_to_summary(r) for r in runs]
+
+
+@app.patch(
+    "/sessions/{session_id}/eval-runs/{run_id}/rows/{example_id}/note",
+    response_model=EvalRunSummary,
+)
+async def set_eval_run_row_note_endpoint(
+    session_id: str,
+    run_id: str,
+    example_id: str,
+    req: SetEvalRunRowNoteRequest,
+    access: Access = Depends(resolve_access),
+):
+    """Attach (or clear) a free-text note to a single per-row result.
+
+    The note is the first half of the failure-analysis flow: the user marks
+    rows as they review them ("over-triggers on greeting", "ignored
+    off-target marker"), and a later analyze step (Phase 2) clusters those
+    notes into named buckets that feed the improve prompt.
+
+    Rows are addressed by example_id (== examples.id from the dataset),
+    which is stable across run-to-run resorts and survives reordering of
+    the per_row JSONB array.
+    """
+    require_writer(access)
+    run = await db.get_eval_run(run_id)
+    if run is None or run.get("session_id") != session_id:
+        raise HTTPException(status_code=404, detail="Eval run not found")
+    updated = await db.set_eval_run_row_note(run_id, example_id, req.note)
+    if updated is None:
+        # Either the run vanished between the two reads (TOCTOU — rare) or
+        # the example_id doesn't appear in this run's per_row. Same 404
+        # response either way; the client just heard "no such row."
+        raise HTTPException(
+            status_code=404,
+            detail="Row not found in this eval run",
+        )
+    return _eval_run_to_summary(updated)
 
 
 # --- Skill version endpoints (Path A: iterate SKILL.md from eval failures) ---
@@ -3517,11 +3822,22 @@ async def suggest_skill_improvements(
 ):
     """Analyze a completed eval run and propose targeted SKILL.md edits.
 
-    Reads the run (in-memory for MVP), the current SKILL.md body, and the
-    charter. Returns a list of suggestions with rationale + row citations.
+    Two-step internally when the user has written per-row notes:
+      1. Cluster the notes into named failure-mode buckets (cached on the
+         eval_run as `clusters`).
+      2. Pass those clusters into the suggest-improvements prompt so each
+         suggestion can target a specific bucket via `target_label`.
+
+    When no notes exist, step 1 is skipped and the suggest-improvements
+    prompt sees the raw failing rows the way it always has.
+
+    Failures from step 1 surface to the caller — we don't silently fall
+    back to "improve without clusters" because the user clicked Analyze
+    expecting the cluster taxonomy to drive the suggestions.
     """
     require_writer(access)
-    from .tools import call_suggest_improvements
+    from datetime import datetime, timezone
+    from .tools import call_cluster_notes, call_suggest_improvements
 
     run = await db.get_eval_run(req.run_id)
     if run is None or run.get("session_id") != session_id:
@@ -3541,16 +3857,111 @@ async def suggest_skill_improvements(
     if not skill_body.strip():
         raise HTTPException(status_code=400, detail="Session has no active SKILL.md to improve.")
 
+    # ---- Step 1: cluster notes (only if any rows have notes) -----------
+    notes_input: list[dict] = []
+    for row in run.get("per_row", []) or []:
+        if not isinstance(row, dict):
+            continue
+        note = row.get("note")
+        if not isinstance(note, str) or not note.strip():
+            continue
+        meta = row.get("metadata") or {}
+        row_id = meta.get("id") if isinstance(meta, dict) else None
+        if not isinstance(row_id, str):
+            continue
+        notes_input.append({"row_id": row_id, "note": note.strip()})
+
+    clusters: list[dict] | None = None
+    clusters_generated_at = None
+    if notes_input:
+        # Seed clustering with the previous run's labels (same session +
+        # project) so a recurring failure mode keeps its name across runs.
+        # The prompt explicitly permits new labels, so genuinely new modes
+        # still surface cleanly — this just prevents gratuitous renames.
+        prior_labels: list[str] | None = None
+        prior_run = await db.get_previous_clustered_run(
+            session_id=session_id,
+            project=run.get("project", ""),
+            excluding_run_id=req.run_id,
+        )
+        if prior_run is not None:
+            raw_prior = prior_run.get("clusters") or []
+            seen = set()
+            collected: list[str] = []
+            for c in raw_prior:
+                if not isinstance(c, dict):
+                    continue
+                lbl = c.get("label")
+                if isinstance(lbl, str) and lbl and lbl not in seen:
+                    seen.add(lbl)
+                    collected.append(lbl)
+            prior_labels = collected or None
+        try:
+            cluster_data, cluster_meta = await call_cluster_notes(notes_input, prior_labels)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(
+                status_code=502,
+                detail=f"Clustering notes failed: {e}",
+            ) from e
+        raw_clusters = cluster_data.get("clusters") or []
+        # Normalize: keep only well-formed entries. The prompt may emit
+        # row_ids that aren't in the input (hallucination); we accept those
+        # since the UI only uses row_ids for cross-run delta queries
+        # (Phase 3) and treats any missing ones as a no-op.
+        clusters = []
+        for c in raw_clusters:
+            if not isinstance(c, dict):
+                continue
+            label = c.get("label")
+            row_ids = c.get("row_ids") or []
+            if not isinstance(label, str) or not label.strip():
+                continue
+            if not isinstance(row_ids, list):
+                row_ids = []
+            clusters.append({
+                "label": label.strip(),
+                "count": len([r for r in row_ids if isinstance(r, str)]) or int(c.get("count") or 0),
+                "row_ids": [r for r in row_ids if isinstance(r, str)],
+            })
+        clusters_generated_at = datetime.now(timezone.utc)
+        await db.create_turn(
+            session_id=session_id,
+            turn_type="cluster_notes",
+            input_snapshot={
+                "run_id": req.run_id,
+                "notes": notes_input,
+                "prior_labels": prior_labels or [],
+                "prior_run_id": prior_run.get("id") if prior_run else None,
+            },
+            llm_calls=cluster_meta,
+            parsed_output={"clusters": clusters},
+        )
+        await db.update_eval_run(req.run_id, {
+            "clusters": clusters,
+            "clusters_generated_at": clusters_generated_at,
+        })
+
+    # ---- Step 2: improve prompt (cluster-aware when clusters exist) ----
+    # Reload run so the suggest-improvements prompt sees the freshly cached
+    # clusters (the prompt itself only reads from its `clusters` arg, but
+    # the persisted state needs to be consistent if step 2 fails).
+    run_after_cluster = await db.get_eval_run(req.run_id) or run
+
     data, call_meta = await call_suggest_improvements(
         skill_body,
-        run,
+        run_after_cluster,
         state.charter.model_dump(),
+        clusters,
     )
 
     await db.create_turn(
         session_id=session_id,
         turn_type="suggest_improvements",
-        input_snapshot={"run_id": req.run_id, "skill_version_id": run.get("skill_version_id")},
+        input_snapshot={
+            "run_id": req.run_id,
+            "skill_version_id": run.get("skill_version_id"),
+            "cluster_count": len(clusters) if clusters else 0,
+        },
         llm_calls=call_meta,
         parsed_output=data,
     )
@@ -3572,6 +3983,8 @@ async def suggest_skill_improvements(
         summary=summary,
         run_id=req.run_id,
         skill_version_id=run.get("skill_version_id"),
+        clusters=clusters,
+        clusters_generated_at=clusters_generated_at,
     )
 
 

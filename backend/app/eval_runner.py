@@ -151,14 +151,56 @@ def make_judge(client: anthropic.Anthropic, model: str) -> Callable[[str], float
 def compile_scorers(
     scorer_defs: list[dict],
     call_judge: Callable[[str], float],
+    scorer_traces: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> list[Callable[..., dict[str, Any]]]:
-    """Execute each scorer's source code, wrap as Braintrust-shaped scorer."""
+    """Execute each scorer's source code, wrap as Braintrust-shaped scorer.
+
+    Modern generated scorers take ``(output, input, metadata)`` and may
+    return ``None`` to skip a row (coverage scorers gate on
+    ``metadata["coverage_tags"]`` so they don't hand out misleading 0%
+    scores on rows that weren't testing their criterion). Older generated
+    scorers (pre-gating, persisted on existing sessions) take
+    ``(output, input)`` only — we detect arity via ``inspect`` and call
+    them with whichever signature fits, so a session created before the
+    gating change keeps working without forcing a regenerate.
+
+    ``scorer_traces`` is an optional out-parameter dict the runner can pass
+    in to capture per-(row, scorer) judge reasoning. The adapter writes
+    every invocation's metadata (judge response text, skip reason, etc.)
+    keyed by ``(row_id, scorer_name)``. Braintrust's own EvalResult only
+    exposes per-row scores as floats, so without this side-channel the
+    judge's reasoning would never reach the UI — there'd be no way to
+    answer "why did this scorer give 30%?" without re-running.
+    """
+    import inspect as _inspect
+
     adapted: list[Callable[..., dict[str, Any]]] = []
 
     for defn in scorer_defs:
         name = defn.get("name") or "unnamed_scorer"
         code = defn.get("code") or ""
         description = defn.get("description") or ""
+        scorer_type = (defn.get("type") or "").strip().lower()
+        # `target_tag` is the gate the runner enforces. The match strategy
+        # depends on scorer_type:
+        #   coverage  → row matches when target_tag ∈ metadata.coverage_tags
+        #   alignment → row matches when target_tag == metadata.feature_area
+        #   safety    → no gate (output-level rules apply universally)
+        # Scorers persisted on older sessions don't carry target_tag; they
+        # fall back to running ungated (the pre-gating behavior) with a
+        # stderr warning so the noise is visible.
+        raw_tag = defn.get("target_tag")
+        target_tag: str | None
+        if isinstance(raw_tag, str) and raw_tag.strip():
+            target_tag = raw_tag.strip()
+        else:
+            target_tag = None
+            if scorer_type in ("coverage", "alignment"):
+                print(
+                    f"[eval_runner] {scorer_type} scorer '{name}' has no target_tag — "
+                    "running ungated; expect off-target rows to add noise",
+                    file=sys.stderr,
+                )
 
         if not code.strip():
             print(f"[eval_runner] skipping scorer '{name}' — no code", file=sys.stderr)
@@ -177,7 +219,32 @@ def compile_scorers(
             print(f"[eval_runner] skipping scorer '{name}' — function not in compiled code", file=sys.stderr)
             continue
 
-        def _adapter(output, expected=None, input=None, _fn=fn, _name=name, _desc=description, _judge=call_judge):  # noqa: ARG001
+        # Probe the signature once at compile time so we don't pay the
+        # introspection cost on every row. >2 positional params (output,
+        # input, metadata, …) → new-style; otherwise legacy two-arg.
+        try:
+            sig = _inspect.signature(fn)
+            takes_metadata = len([p for p in sig.parameters.values() if p.kind in (
+                _inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                _inspect.Parameter.POSITIONAL_ONLY,
+            )]) >= 3
+        except (TypeError, ValueError):
+            takes_metadata = False
+
+        def _adapter(  # noqa: ARG001
+            output,
+            expected=None,
+            input=None,
+            metadata=None,
+            _fn=fn,
+            _name=name,
+            _desc=description,
+            _judge=call_judge,
+            _takes_metadata=takes_metadata,
+            _target_tag=target_tag,
+            _scorer_type=scorer_type,
+            _traces=scorer_traces,
+        ):
             # Braintrust hands scorers whatever we stuffed into the eval row's
             # "input" field — which is the whole dataset row dict. North Star
             # scorers expect a string (the actual prompt). Extract it.
@@ -186,39 +253,97 @@ def compile_scorers(
             else:
                 input_str = input or ""
 
+            row_metadata = metadata if isinstance(metadata, dict) else {}
+
+            # Runner-level gate. Coverage and alignment scorers each map
+            # 1:1 to a charter entry; the row's metadata says which entry
+            # it exercises. We just compare strings — no LLM judgment at
+            # eval time. Coverage uses tag membership (a row can exercise
+            # multiple criteria); alignment uses feature_area equality
+            # (a row sits in exactly one feature area). Safety scorers
+            # don't gate.
+            row_id = row_metadata.get("id") if isinstance(row_metadata, dict) else None
+
+            def _record_trace(payload: dict[str, Any]) -> None:
+                """Record per-(row, scorer) metadata into the optional
+                side-channel so _extract_summary can attach it to per_row.
+                Braintrust's own scores object only exposes floats, so this
+                is the only path the judge's reasoning has to the UI.
+                """
+                if _traces is None or not isinstance(row_id, str):
+                    return
+                _traces[(row_id, _name)] = payload
+
+            if _target_tag is not None and _scorer_type in ("coverage", "alignment"):
+                if _scorer_type == "coverage":
+                    tags = row_metadata.get("coverage_tags") or []
+                    matched = isinstance(tags, list) and _target_tag in tags
+                else:  # alignment
+                    matched = row_metadata.get("feature_area") == _target_tag
+                if not matched:
+                    skip_meta = {
+                        "description": _desc,
+                        "skipped": True,
+                        "skip_reason": (
+                            f"row {('coverage_tags' if _scorer_type == 'coverage' else 'feature_area')} "
+                            f"does not match target {_target_tag!r}"
+                        ),
+                    }
+                    _record_trace(skip_meta)
+                    return {"name": _name, "score": None, "metadata": skip_meta}
+
             # Reset judge side-channel so per-invocation state is fresh.
             _judge.last_response = None  # type: ignore[attr-defined]
             _judge.last_parsed = None  # type: ignore[attr-defined]
 
             try:
-                raw = _fn(output, input_str)
+                if _takes_metadata:
+                    raw = _fn(output, input_str, row_metadata)
+                else:
+                    raw = _fn(output, input_str)
             except Exception as e:  # noqa: BLE001
-                return {
-                    "name": _name,
-                    "score": 0.0,
-                    "metadata": {
-                        "error": f"{type(e).__name__}: {e}",
-                        "description": _desc,
-                    },
+                err_meta = {
+                    "error": f"{type(e).__name__}: {e}",
+                    "description": _desc,
                 }
+                _record_trace(err_meta)
+                return {"name": _name, "score": 0.0, "metadata": err_meta}
+
+            # `None` is a valid return value: the scorer is opting out of
+            # this row (e.g. coverage scorer for FAQ on a row that isn't
+            # tagged FAQ). Surface it as score=None so Braintrust's
+            # per-scorer averaging excludes the row, and so the row's
+            # scores dict in our own per_row payload doesn't carry a
+            # misleading 0%.
+            if raw is None:
+                skip_meta = {
+                    "description": _desc,
+                    "skipped": True,
+                    "skip_reason": "scorer returned None (out-of-scope row)",
+                }
+                _record_trace(skip_meta)
+                return {"name": _name, "score": None, "metadata": skip_meta}
+
             try:
                 score = float(raw)
             except (TypeError, ValueError):
                 score = 0.0
 
-            metadata: dict[str, Any] = {"description": _desc}
+            metadata_out: dict[str, Any] = {"description": _desc}
             judge_text = getattr(_judge, "last_response", None)
             judge_parsed = getattr(_judge, "last_parsed", None)
             if judge_text:
-                metadata["judge_response"] = judge_text[:2000]  # cap to keep rows compact
+                metadata_out["judge_response"] = judge_text[:2000]  # cap to keep rows compact
             if judge_parsed is None and judge_text:
                 # Scorer called the judge but we failed to parse a score.
-                metadata["parse_warning"] = "Judge response did not contain a SCORE: line or 0-1 number."
+                metadata_out["parse_warning"] = "Judge response did not contain a SCORE: line or 0-1 number."
+            metadata_out["score"] = max(0.0, min(1.0, score))
+            _record_trace(metadata_out)
 
             return {
                 "name": _name,
                 "score": max(0.0, min(1.0, score)),
-                "metadata": metadata,
+                "metadata": metadata_out,
             }
 
         _adapter.__name__ = name
@@ -408,27 +533,59 @@ def _extract_summary(eval_handle: Any) -> tuple[str | None, str | None, dict[str
             name = val
             break
 
+    import math
+
     scores = getattr(summary, "scores", None) or {}
     if isinstance(scores, dict):
         for scorer_name, stat in scores.items():
             mean = getattr(stat, "score", None)
             if mean is None and isinstance(stat, dict):
                 mean = stat.get("score") or stat.get("mean")
-            if isinstance(mean, (int, float)):
+            # Drop nan/inf — surfaces when a scorer returned None on every
+            # row in older Braintrust versions that didn't filter Nones
+            # before averaging. We'll recompute from per_row below.
+            if isinstance(mean, (int, float)) and not math.isnan(mean) and not math.isinf(mean):
                 averages[scorer_name] = float(mean)
 
     results = getattr(eval_handle, "results", None) or []
     for r in results[:500]:  # cap — avoid ballooning
+        # Drop None scores from the per-row scores dict — they come from
+        # scorers that opted out of this row (coverage gating). Keeping
+        # them as null would make the UI render an awkward "0%" or break
+        # numeric averaging on the frontend.
+        raw_scores = dict(getattr(r, "scores", {}) or {})
+        clean_scores = {k: v for k, v in raw_scores.items() if isinstance(v, (int, float)) and not math.isnan(v)}
         per_row.append(
             {
                 "input": getattr(r, "input", None),
                 "output": getattr(r, "output", None),
                 "expected": getattr(r, "expected", None),
-                "scores": dict(getattr(r, "scores", {}) or {}),
+                "scores": clean_scores,
                 "error": getattr(r, "error", None),
                 "metadata": getattr(r, "metadata", {}) or {},
             }
         )
+
+    # Backfill any missing per-scorer averages from the cleaned per-row data.
+    # A scorer that returned None on every row won't appear in `averages`
+    # above (Braintrust either dropped it or emitted nan); a scorer that
+    # returned None on some rows but real scores on others may have a
+    # contaminated mean we already filtered. Either way, computing from
+    # the cleaned per_row is correct: average of the rows that scored.
+    scorer_names_seen: set[str] = set()
+    for entry in per_row:
+        for n in (entry.get("scores") or {}).keys():
+            scorer_names_seen.add(n)
+    for n in scorer_names_seen:
+        if n in averages:
+            continue
+        vals = [
+            float(entry["scores"][n])
+            for entry in per_row
+            if isinstance(entry.get("scores", {}).get(n), (int, float))
+        ]
+        if vals:
+            averages[n] = sum(vals) / len(vals)
 
     return url, name, averages, per_row
 
@@ -517,7 +674,13 @@ def run_eval_sync(
     if routed_via_openrouter:
         judge_model_resolved = _resolve_model_for_openrouter(judge_model)
     call_judge = make_judge(judge_client, judge_model_resolved)
-    scorers = compile_scorers(scorer_defs, call_judge)
+    # scorer_traces collects per-(row_id, scorer_name) judge metadata
+    # (response text, parsed score, skip reason). Braintrust's per-row
+    # results only expose scores as floats, so this is the only path the
+    # judge's reasoning has to the UI — without it the user can never
+    # answer "why did this scorer give 30%?" from the eval result alone.
+    scorer_traces: dict[tuple[str, str], dict[str, Any]] = {}
+    scorers = compile_scorers(scorer_defs, call_judge, scorer_traces=scorer_traces)
     if not scorers:
         raise ValueError("No scorers compiled successfully. Check the Scorers tab.")
 
@@ -600,6 +763,34 @@ def run_eval_sync(
         url, name, averages, per_row = _extract_summary(handle)
         if agent_mode and agent_traces:
             agent_task.attach_traces_to_per_row(per_row, agent_traces)
+        # Attach per-scorer judge traces collected by the adapter to each
+        # per-row entry, keyed by row id from metadata. Lets the UI show
+        # the judge's reasoning when the user clicks a score chip — same
+        # data we've always logged to Braintrust traces, just plumbed back
+        # to our own per_row payload too.
+        attached_count = 0
+        for entry in per_row:
+            row_id = (entry.get("metadata") or {}).get("id")
+            if not isinstance(row_id, str):
+                continue
+            sc_meta: dict[str, dict[str, Any]] = {}
+            for (rid, scorer_name), trace in scorer_traces.items():
+                if rid == row_id:
+                    sc_meta[scorer_name] = trace
+            if sc_meta:
+                entry["scorer_metadata"] = sc_meta
+                attached_count += 1
+        # Verifies on every run that scorer reasoning is being captured.
+        # If `attached_count=0` shows up in logs, the runner has fresh
+        # scores but no judge text — meaning the user's UI score chips
+        # will be disabled and the legacy-run hint will show. Most likely
+        # cause when this happens: the backend didn't reload to this code
+        # version. Restart uvicorn.
+        print(
+            f"[eval_runner] scorer_traces captured: {len(scorer_traces)} "
+            f"(scorer, row) pairs across {attached_count}/{len(per_row)} rows",
+            file=sys.stderr,
+        )
         return EvalResult(
             experiment_url=url,
             experiment_name=name or experiment_name,

@@ -401,7 +401,10 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e .
 cp .env.example .env  # fill in values
-uvicorn app.main:app --port 8080 --reload
+uvicorn app.main:app --port 8080 --reload \
+  --reload-exclude 'app/scorers/generated/*' \
+  --reload-exclude 'app/scorers/generated/*/*' \
+  --reload-exclude 'app/scorers/generated/*/*/*'
 
 # frontend (separate terminal)
 cd frontend

@@ -176,6 +176,12 @@ export default function ProjectWorkspace() {
   // --- Navigation ---
   const [activeTab, setActiveTab] = useState<ActiveTab>("goals");
   const [showAssistant, setShowAssistant] = useState(false);
+  // Latched dataset filter: when the Evaluations panel sends the user to
+  // the Dataset tab via the unmapped-rows banner, we stash the filter
+  // here. ExampleReview reads it on mount and calls a clear callback so
+  // the same filter doesn't keep snapping back the next time the user
+  // navigates to Dataset normally.
+  const [pendingDatasetFilter, setPendingDatasetFilter] = useState<string | null>(null);
 
   // --- Project metadata ---
   const [projectName, setProjectName] = useState("Untitled project");
@@ -458,31 +464,60 @@ export default function ProjectWorkspace() {
       setHydrating(false);
     }
 
-    // (2) Background refresh — always run, even on cache hit.
-    const refresh = async () => {
-      try {
-        const [session, dataset] = await Promise.allSettled([
-          getSession(urlSessionId),
-          getDataset(urlSessionId),
-        ]);
-        if (cancelled) return;
-        if (session.status === "rejected") {
-          console.error("Failed to load project:", session.reason);
-          if (!cachedSession) navigate("/", { replace: true });
-          return;
-        }
-        const sessionValue = session.value;
-        applySession(sessionValue as SessionRecord);
-        setCachedSession(urlSessionId, sessionValue as SessionRecord);
+    // (2) Background refresh — fire session + dataset in parallel, but
+    // unblock the page as soon as the session lands. Dataset is optional
+    // for an empty project (404) and shouldn't gate the first paint —
+    // the user was watching a spinner for the full dataset round-trip on
+    // every cache miss, including freshly-created sessions where the
+    // 404 was guaranteed. Tab decision still needs both inputs to pick
+    // the right starting tab, so it runs on the dataset settle path.
+    const sessionPromise = getSession(urlSessionId);
+    const datasetPromise = getDataset(urlSessionId);
 
-        let datasetValue: Dataset | null = null;
-        if (dataset.status === "fulfilled") {
-          datasetValue = dataset.value;
-          // Prompt-eval auto-refresh: pull any new turns landed since the
-          // last visit. Failure is non-fatal — we just show what we have.
+    let sessionDoneValue: SessionRecord | null = null;
+    let sessionDone = false;
+    let datasetSettled = false;
+    let datasetValue: Dataset | null = null;
+
+    const maybeDecideTab = () => {
+      if (cancelled || !sessionDone || !datasetSettled || !sessionDoneValue) return;
+      decideInitialTab(sessionDoneValue, datasetValue);
+    };
+
+    sessionPromise
+      .then((session) => {
+        if (cancelled) return;
+        sessionDoneValue = session as SessionRecord;
+        sessionDone = true;
+        applySession(session as SessionRecord);
+        setCachedSession(urlSessionId, session as SessionRecord);
+        // Render now — don't wait for dataset. For projects that already
+        // have one, the dataset section will pop in when its fetch lands;
+        // for empty projects, this saves a full RTT of staring at a spinner.
+        setHydrating(false);
+        maybeDecideTab();
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error("Failed to load project:", err);
+        if (!cachedSession) navigate("/", { replace: true });
+        // No session means no usable page — leave hydrating in the state
+        // it was, the navigate above takes the user home.
+      });
+
+    datasetPromise
+      .then(async (dataset) => {
+        if (cancelled) return;
+        datasetValue = dataset;
+        // Prompt-eval auto-refresh: pull any new turns landed since the
+        // last visit. Failure is non-fatal — we just show what we have.
+        // Needs the session (for kind), so wait for it.
+        try {
+          const session = await sessionPromise;
+          if (cancelled) return;
           const isPromptEval =
-            (sessionValue.state as SessionState).kind === "prompt";
-          if (isPromptEval) {
+            (session.state as SessionState).kind === "prompt";
+          if (isPromptEval && datasetValue) {
             try {
               const result = await refreshDatasetFromTurns(datasetValue.id);
               if (result.added > 0 && !cancelled) {
@@ -492,15 +527,21 @@ export default function ProjectWorkspace() {
               console.warn("auto-refresh from turns failed:", err);
             }
           }
-          applyDataset(datasetValue);
-          if (datasetValue) setCachedDataset(urlSessionId, datasetValue);
+        } catch {
+          // Session promise already failed — just apply whatever dataset we have.
         }
-        decideInitialTab(sessionValue as SessionRecord, datasetValue);
-      } finally {
-        if (!cancelled) setHydrating(false);
-      }
-    };
-    refresh();
+        if (cancelled) return;
+        applyDataset(datasetValue);
+        if (datasetValue) setCachedDataset(urlSessionId, datasetValue);
+      })
+      .catch(() => {
+        // 404 / network error — empty project most likely. Non-fatal.
+      })
+      .finally(() => {
+        if (cancelled) return;
+        datasetSettled = true;
+        maybeDecideTab();
+      });
 
     return () => {
       cancelled = true;
@@ -2917,6 +2958,8 @@ export default function ProjectWorkspace() {
                     onRetagAgainstCharter={isPromptEval && hasCharter ? handleRetagAgainstCharter : undefined}
                     retagLoading={retagLoading}
                     canEdit={canEdit}
+                    initialFeatureAreaFilter={pendingDatasetFilter}
+                    onInitialFilterApplied={() => setPendingDatasetFilter(null)}
                   />
                   {/* Once every example has been reviewed, surface the tri-state
                       scorers CTA — Generate / Regenerate / Go to — mirroring the
@@ -3080,6 +3123,11 @@ export default function ProjectWorkspace() {
               onGoToSkill={() => setActiveTab("skill")}
               onGoToDataset={() => setActiveTab("dataset")}
               onGoToScorers={() => setActiveTab("scorers")}
+              onGoToCharter={() => setActiveTab("charter")}
+              onGoToUnmappedRows={() => {
+                setPendingDatasetFilter("(unmapped)");
+                setActiveTab("dataset");
+              }}
               onGenerateScorersInline={async () => {
                 if (!urlSessionId) return
                 const res = await generateScorers(urlSessionId)

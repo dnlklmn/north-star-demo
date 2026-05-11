@@ -65,7 +65,23 @@ interface ExampleReviewProps {
   /** Read-only when false: synthesize, auto-review, delete, inline edit, and
    *  revision-acceptance buttons all hide. The list itself remains visible. */
   canEdit?: boolean
+  /** When set, applies as the initial value of the feature_area filter on
+   *  mount. Used by the Evaluations → "Open in Dataset" deep-link to
+   *  pre-narrow the list to rows the eval flagged as out-of-charter. The
+   *  sentinel value `(unmapped)` filters to rows whose feature_area isn't
+   *  one of the charter's alignment entries. */
+  initialFeatureAreaFilter?: string | null
+  /** Called once the deep-link initial filter has been applied so the parent
+   *  can clear the latched value — without this, navigating away and back
+   *  would re-apply the same filter on every mount. */
+  onInitialFilterApplied?: () => void
 }
+
+/** Sentinel filter value for "rows whose feature_area is not in the charter
+ *  alignment list". Picked to match the same string the backend uses when
+ *  it snaps an out-of-range synthesis output, so the UI filter and the
+ *  data tag match without further mapping. */
+const UNMAPPED_FEATURE_AREA = '(unmapped)'
 
 export default function ExampleReview({
   examples,
@@ -93,8 +109,24 @@ export default function ExampleReview({
   onRetagAgainstCharter,
   retagLoading,
   canEdit = true,
+  initialFeatureAreaFilter,
+  onInitialFilterApplied,
 }: ExampleReviewProps) {
-  const [filterArea, setFilterArea] = useState<string>('')
+  // Lazy initial value picks up the deep-linked filter on first mount.
+  // We don't sync setState if the prop changes later — that would let the
+  // filter snap back after the user manually cleared it. Telling the
+  // parent we've "consumed" the prop happens in a fire-and-forget effect
+  // below.
+  const [filterArea, setFilterArea] = useState<string>(initialFeatureAreaFilter ?? '')
+  const initialFilterAppliedRef = useRef(false)
+  useEffect(() => {
+    if (initialFilterAppliedRef.current) return
+    initialFilterAppliedRef.current = true
+    // setState was redundant here — useState already initialized with the
+    // same value — so removing it satisfies react-hooks/set-state-in-effect
+    // without changing behavior.
+    onInitialFilterApplied?.()
+  }, [onInitialFilterApplied])
   const [filterLabel, setFilterLabel] = useState<string>('')
   // Default to "pending" so the user's attention lands on what still needs
   // review. Once nothing is pending, flip to "all" so the full list stays
@@ -166,15 +198,40 @@ export default function ExampleReview({
     1,
   )
 
+  const validAreas = useMemo(() => new Set(featureAreas), [featureAreas])
+  // Are any rows tagged with a feature_area outside the charter alignment
+  // list? Drives both the conditional `(unmapped)` filter option and any
+  // hint text upstream wants to show. (off-target) is a triggered-mode
+  // sentinel and isn't considered unmapped.
+  const hasUnmappedRows = useMemo(
+    () =>
+      examples.some(
+        (ex) =>
+          ex.feature_area &&
+          ex.feature_area !== '(off-target)' &&
+          !validAreas.has(ex.feature_area),
+      ),
+    [examples, validAreas],
+  )
+
   const filtered = useMemo(
     () =>
       examples.filter(ex => {
-        if (filterArea && ex.feature_area !== filterArea) return false
+        if (filterArea === UNMAPPED_FEATURE_AREA) {
+          // "Unmapped" is a synthetic filter — match anything outside the
+          // charter alignment list. Excludes the (off-target) sentinel
+          // because that's a deliberate label, not a synthesis miss.
+          if (!ex.feature_area) return false
+          if (ex.feature_area === '(off-target)') return false
+          if (validAreas.has(ex.feature_area)) return false
+        } else if (filterArea && ex.feature_area !== filterArea) {
+          return false
+        }
         if (filterLabel && ex.label !== filterLabel) return false
         if (filterStatus && ex.review_status !== filterStatus) return false
         return true
       }),
-    [examples, filterArea, filterLabel, filterStatus],
+    [examples, filterArea, filterLabel, filterStatus, validAreas],
   )
 
   // Group by feature_area, preserving original insertion order.
@@ -493,7 +550,15 @@ export default function ExampleReview({
               value={filterArea}
               onChange={setFilterArea}
               placeholder="All areas"
-              options={featureAreas.map(a => ({ value: a, label: a }))}
+              options={[
+                ...featureAreas.map(a => ({ value: a, label: a })),
+                // Surface the synthetic "(unmapped)" option only when there
+                // are rows that match it — listing it on a clean dataset
+                // would just be noise.
+                ...(hasUnmappedRows
+                  ? [{ value: UNMAPPED_FEATURE_AREA, label: 'Unmapped (no alignment)' }]
+                  : []),
+              ]}
             />
             <FilterSelect
               value={filterLabel}
