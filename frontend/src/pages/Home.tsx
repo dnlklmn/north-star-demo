@@ -5,6 +5,7 @@ import type { ProjectSummary } from "../types";
 import {
   createPromptEvalSession,
   createSession,
+  createSessionFromSample,
   deleteSession,
   listSessions,
   setSessionMode,
@@ -63,6 +64,7 @@ export default function Home() {
   const [isNewSkillModalOpen, setIsNewSkillModalOpen] = useState(false);
   const [isNewPromptModalOpen, setIsNewPromptModalOpen] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [loadingSampleId, setLoadingSampleId] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const [showSettings, setShowSettings] = useState(false);
 
@@ -227,6 +229,25 @@ export default function Home() {
     }
   };
 
+  // Sample tile click → spin up a fully populated session and navigate to it.
+  // No skill-seed call, no LLM round-trip — the backend loads everything from
+  // a fixture, so this is a single ~200ms request and the user lands on a
+  // workspace with goals/users/stories/charter/dataset already populated.
+  const handleLoadSample = async (sampleId: string) => {
+    if (loadingSampleId) return;
+    setLoadingSampleId(sampleId);
+    try {
+      const res = await createSessionFromSample(sampleId);
+      setIsNewSkillModalOpen(false);
+      navigate(`/project/${res.session_id}?tab=goals`);
+    } catch (err) {
+      console.error("Failed to load sample:", err);
+      alert(`Error: ${err instanceof Error ? err.message : "Unknown error"}`);
+    } finally {
+      setLoadingSampleId(null);
+    }
+  };
+
   const handleDelete = async (projectId: string) => {
     if (!confirm("Delete this project? This cannot be undone.")) return;
     try {
@@ -388,6 +409,8 @@ export default function Home() {
         isLoading={creating}
         onClose={() => setIsNewSkillModalOpen(false)}
         onAnalyze={handleAnalyze}
+        onLoadSample={handleLoadSample}
+        loadingSampleId={loadingSampleId}
       />
       <NewPromptEvalModal
         isOpen={isNewPromptModalOpen}
