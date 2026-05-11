@@ -350,6 +350,24 @@ export default function ProjectWorkspace() {
       new CustomEvent("polaris:select-example", { detail: { id } }),
     );
   });
+  // Polaris run_eval (confirmed) routes here. Switch to the Evaluate tab,
+  // then fire the start-run event the panel listens for. The tiny delay
+  // gives EvaluatePanel a chance to mount its listener before the event
+  // lands — a queue would be cleaner, but for one-shot intents this is
+  // enough.
+  useRegisterPolarisNav("eval_run_start", () => {
+    setActiveTab("evaluate");
+    window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent("polaris:start-eval"));
+    }, 120);
+  });
+  // Same pattern for scorer-draft.
+  useRegisterPolarisNav("scorers_generate", () => {
+    setActiveTab("scorers");
+    window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent("polaris:generate-scorers"));
+    }, 120);
+  });
   useRegisterPolarisNav("dataset_filter", (props) => {
     setActiveTab("dataset");
     // Same event pattern as `example`: ExampleReview owns the filter state,

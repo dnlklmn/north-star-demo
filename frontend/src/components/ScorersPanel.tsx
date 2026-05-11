@@ -29,10 +29,15 @@ interface Props {
 export default function ScorersPanel({ charter, hasDataset: _hasDataset, sessionId, scorers: externalScorers, onScorersChange, onNavigateToEvaluate, externalGenerating, canEdit = true }: Props) {
   const [localScorers, setLocalScorers] = useState<ScorerDef[]>([])
   const scorers = externalScorers ?? localScorers
-  const setScorers = (s: ScorerDef[]) => {
-    setLocalScorers(s)
-    onScorersChange?.(s)
-  }
+  // Memoized so callbacks that depend on it (e.g. `runGenerate`) stay
+  // stable across renders.
+  const setScorers = useCallback(
+    (s: ScorerDef[]) => {
+      setLocalScorers(s)
+      onScorersChange?.(s)
+    },
+    [onScorersChange],
+  )
   const [generatingLocal, setGenerating] = useState(false)
   // Once scorers populate, generation is observably done — surface that
   // truth even if a generation flag (parent-driven `externalGenerating` or
@@ -116,15 +121,7 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
     || charter.alignment.length > 0
     || charter.rot.criteria.length > 0
 
-  const handleGenerate = async () => {
-    // If scorers exist, regeneration replaces the code — confirm so manual
-    // edits to a scorer body aren't lost to an accidental click.
-    if (scorers.length > 0) {
-      const ok = window.confirm(
-        "Regenerate scorers?\n\nThis replaces the current scorer code — any manual edits will be lost.",
-      )
-      if (!ok) return
-    }
+  const runGenerate = useCallback(async () => {
     setGenerating(true)
     setError(null)
     try {
@@ -135,7 +132,28 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
     } finally {
       setGenerating(false)
     }
+  }, [sessionId, setScorers])
+
+  const handleGenerate = async () => {
+    // If scorers exist, regeneration replaces the code — confirm so manual
+    // edits to a scorer body aren't lost to an accidental click.
+    if (scorers.length > 0) {
+      const ok = window.confirm(
+        "Regenerate scorers?\n\nThis replaces the current scorer code — any manual edits will be lost.",
+      )
+      if (!ok) return
+    }
+    await runGenerate()
   }
+
+  // Polaris-triggered draft: Polaris already showed its own confirm chip
+  // before sending this event, so we skip the second window.confirm and go
+  // straight to the generate call.
+  useEffect(() => {
+    const handler = () => { void runGenerate() }
+    window.addEventListener('polaris:generate-scorers', handler)
+    return () => window.removeEventListener('polaris:generate-scorers', handler)
+  }, [runGenerate])
 
   const handleCopy = (code: string) => {
     navigator.clipboard.writeText(code)

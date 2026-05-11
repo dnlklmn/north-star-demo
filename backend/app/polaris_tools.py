@@ -853,9 +853,18 @@ async def _export_dataset(ctx: ToolCtx, args: dict) -> dict:
 # isn't coming.
 
 
+# `run_eval` and `generate_scorers` both need session context that lives on
+# the frontend (Braintrust key, run config, etc.). The tool can't reach those
+# from the backend without plumbing headers all the way through ToolCtx. So
+# the confirmed step emits a dedicated nav envelope that the frontend
+# interprets as "open the tab AND fire its primary action with current
+# config" — the same path the manual button click takes. The model is told
+# the action is in flight so it doesn't tell the user to click anything.
+
+
 @tool(
     "run_eval",
-    "Open the Evaluate tab so the user can configure and start an eval run. Polaris cannot start runs unattended yet.",
+    "Start an eval run with the current project configuration. Confirms first because eval runs cost real money and time.",
     _confirm_schema(),
     tier="confirm",
 )
@@ -865,18 +874,18 @@ async def _run_eval(ctx: ToolCtx, args: dict) -> dict:
     if not args.get("confirmed"):
         return _proposal(
             "run_eval", args,
-            label="Open the eval runner",
-            reason="Polaris will jump you to the Evaluate tab; you start the run there.",
+            label="Start an eval run",
+            reason="Runs the eval against the current dataset + scorers + skill body. Costs LLM tokens and Braintrust API time.",
         )
     return {
-        **_nav("phase", {"phase": "evaluate"}),
-        "note": "Navigated to evaluate tab. The user starts the run from there — Polaris did not execute it.",
+        **_nav("eval_run_start", {}),
+        "note": "Eval run started with the project's current config. The user can watch progress on the Evaluate tab.",
     }
 
 
 @tool(
     "generate_scorers",
-    "Open the Scorers tab where the user can run the scorer-draft flow. Polaris does not generate scorers itself yet.",
+    "Draft scorers from the current charter. Costs LLM tokens; confirms first.",
     _confirm_schema(),
     tier="confirm",
 )
@@ -886,12 +895,12 @@ async def _generate_scorers(ctx: ToolCtx, args: dict) -> dict:
     if not args.get("confirmed"):
         return _proposal(
             "generate_scorers", args,
-            label="Open the scorers tab",
-            reason="Polaris will jump you to the Scorers tab; you draft scorers from there.",
+            label="Draft scorers from the charter",
+            reason="Costs LLM tokens. Replaces existing scorer code — any manual edits will be lost.",
         )
     return {
-        **_nav("phase", {"phase": "scorers"}),
-        "note": "Navigated to scorers tab. The user runs the draft flow there — Polaris did not execute it.",
+        **_nav("scorers_generate", {}),
+        "note": "Scorer-draft started. The user can review on the Scorers tab.",
     }
 
 

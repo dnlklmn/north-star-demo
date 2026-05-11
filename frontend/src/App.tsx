@@ -6,6 +6,7 @@ import { checkHealth, hasApiKey } from './api'
 import ApiKeyBanner from './components/ApiKeyBanner'
 import LLMBillingBanner from './components/LLMBillingBanner'
 import { PolarisProvider } from './polaris/PolarisProvider'
+import PolarisSidebar from './polaris/PolarisSidebar'
 
 export default function App() {
   const [needsKey, setNeedsKey] = useState(() => !hasApiKey())
@@ -26,12 +27,17 @@ export default function App() {
       <div className="flex flex-col h-screen">
         {needsKey && <ApiKeyBanner onDismiss={() => setNeedsKey(false)} />}
         <LLMBillingBanner />
-        <div className="flex-1 min-h-0">
-          <Routes>
-            <Route path="/" element={<Home />} />
-            <Route path="/project/:sessionId" element={<ProjectWorkspace />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
+        {/* Page + sidebar in a flex row — opening the Polaris sidebar
+            shrinks the routes column rather than overlaying it. */}
+        <div className="flex-1 min-h-0 flex flex-row">
+          <div className="flex-1 min-h-0">
+            <Routes>
+              <Route path="/" element={<Home />} />
+              <Route path="/project/:sessionId" element={<ProjectWorkspace />} />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </div>
+          <PolarisSidebar />
         </div>
       </div>
     </PolarisProvider>

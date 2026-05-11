@@ -604,6 +604,20 @@ export default function EvaluatePanel({
     await runWithConfig()
   }
 
+  // Polaris-triggered start: same handler the manual "Start Run" button
+  // calls, with the panel's current config. If `canRun` is false (no key,
+  // no scorers, etc.) we silently no-op — the user will already see the
+  // setup gates in the UI.
+  useEffect(() => {
+    const handler = async () => {
+      if (!canRun) return
+      const run = await runWithConfig()
+      if (run) setActiveRun(run)
+    }
+    window.addEventListener('polaris:start-eval', handler)
+    return () => window.removeEventListener('polaris:start-eval', handler)
+  }, [canRun, runWithConfig])
+
   // --- Improvement handlers (merged from ImprovePanel) ---
   // Caller can pin a specific run id; otherwise we analyze the currently-open
   // run, or fall back to the latest done/failed run. The in-context "Analyze
