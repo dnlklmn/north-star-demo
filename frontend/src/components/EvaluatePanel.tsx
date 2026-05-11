@@ -1536,6 +1536,44 @@ export default function EvaluatePanel({
               return null
             })()}
 
+            {/* Trust warnings for agent mode. The base note appears whenever the
+                skill is going to run with file-write tools; the bash variant
+                replaces it with a stronger callout because run_bash side-steps
+                the workspace path allowlist. Surfaced inline (not modal) so it
+                stays visible while the user reads the rest of the run config. */}
+            {!isPromptEval && agentMode && !allowBash && (
+              <div
+                className="flex items-start gap-2 text-[11px] text-warning border border-warning/30 bg-warning/5 px-2.5 py-2"
+                data-testid="agent-mode-warning"
+              >
+                <span aria-hidden>⚠</span>
+                <span>
+                  <strong className="font-semibold">Agent mode is on.</strong>{' '}
+                  Each row runs the skill with file tools in a per-row workspace
+                  under <code className="font-mono">tmp/eval-runs/</code>. The
+                  sandbox is best-effort (pure-Python path allowlist) — use only
+                  with skills you've reviewed. For untrusted skills, run inside
+                  a container or open an issue and we'll help isolate it.
+                </span>
+              </div>
+            )}
+            {!isPromptEval && agentMode && allowBash && (
+              <div
+                className="flex items-start gap-2 text-[11px] text-danger border border-danger/40 bg-danger/5 px-2.5 py-2"
+                data-testid="allow-bash-warning"
+              >
+                <span aria-hidden>⛔</span>
+                <span>
+                  <strong className="font-semibold">Bash bypasses the sandbox.</strong>{' '}
+                  The skill can run any command the eval process can. Secrets
+                  are stripped and PATH is restricted to system binaries, but
+                  the workspace boundary is not enforced — a skill could read
+                  files outside it or reach the network. Enable only for skills
+                  you wrote or fully audited.
+                </span>
+              </div>
+            )}
+
             {startError && <p className="text-xs text-danger">{startError}</p>}
           </section>
 

