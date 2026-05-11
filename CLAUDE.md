@@ -40,6 +40,11 @@ source .venv/bin/activate
 uvicorn app.main:app --port 5000 --reload
 ```
 
+> **Working from a git worktree?** `backend/.venv` is gitignored, so a fresh
+> worktree has no venv. Run `bash scripts/link-worktree-venv.sh` once after
+> `git worktree add` — it symlinks `backend/.venv` to the canonical venv in
+> the main repo. Idempotent.
+
 ### Frontend
 ```bash
 cd frontend
