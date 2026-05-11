@@ -280,6 +280,11 @@ export default function EvaluatePanel({
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [limit, setLimit] = useState<string>('') // empty = no limit
   const [includeTriggering, setIncludeTriggering] = useState(false)
+  // Agent mode: run the skill in a real tool-use loop with a sandboxed
+  // filesystem instead of bare messages.create(). Required for honest
+  // evaluation of tool-using skills (docx, pdf, xlsx, web fetch, image gen).
+  const [agentMode, setAgentMode] = useState(false)
+  const [allowBash, setAllowBash] = useState(false)
   // Empty string in state means "use server default" (no judge_model override).
   const [judgeModel, setJudgeModel] = useState<string>(() => getDefaultJudgeModel())
   const updateJudgeModel = (value: string) => {
@@ -450,7 +455,7 @@ export default function EvaluatePanel({
     (!activeRun || TERMINAL_STATUSES.has(activeRun.status))
 
   const runWithConfig = useCallback(
-    async (overrides?: { project?: string; experiment_name?: string; limit?: number; include_triggering?: boolean }) => {
+    async (overrides?: { project?: string; experiment_name?: string; limit?: number; include_triggering?: boolean; agent_mode?: boolean; allow_bash?: boolean }) => {
       setStartError(null)
       setStarting(true)
       try {
@@ -469,6 +474,8 @@ export default function EvaluatePanel({
                   ? undefined
                   : judgeModel)
               : undefined,
+          agent_mode: overrides?.agent_mode ?? agentMode,
+          allow_bash: (overrides?.agent_mode ?? agentMode) ? (overrides?.allow_bash ?? allowBash) : false,
         })
         setActiveRun(run)
         // Refresh immediately so the pending row shows up in history, and
@@ -482,7 +489,7 @@ export default function EvaluatePanel({
         setStarting(false)
       }
     },
-    [sessionId, project, experiment, limit, includeTriggering, judgeModel, refreshRuns, hasOpenRouterKey],
+    [sessionId, project, experiment, limit, includeTriggering, judgeModel, refreshRuns, hasOpenRouterKey, agentMode, allowBash],
   )
 
   const handleRun = async () => {
@@ -1441,6 +1448,41 @@ export default function EvaluatePanel({
                 </div>
               )}
 
+              {!isPromptEval && (
+                <div className="flex flex-col gap-1.5" data-testid="agent-mode-toggle">
+                  <label
+                    className="text-[10px] font-semibold text-fg-dim uppercase tracking-wide"
+                    title="Run the skill in a real tool-use loop with a sandboxed filesystem. Required to honestly evaluate skills that produce file artifacts (docx, pdf, xlsx, etc)."
+                  >
+                    Agent mode
+                  </label>
+                  <div className="inline-flex border border-border-hint p-0.5">
+                    <button
+                      type="button"
+                      onClick={() => setAgentMode(false)}
+                      className={`px-3 py-2 text-sm font-medium ${
+                        !agentMode
+                          ? 'bg-fill-neutral text-fg-contrast'
+                          : 'text-fg-dim hover:text-fg-contrast'
+                      }`}
+                    >
+                      Off
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAgentMode(true)}
+                      className={`px-3 py-2 text-sm font-medium ${
+                        agentMode
+                          ? 'bg-fill-neutral text-fg-contrast'
+                          : 'text-fg-dim hover:text-fg-contrast'
+                      }`}
+                    >
+                      On
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <button
                 onClick={handleRun}
                 disabled={!canRun}
@@ -1479,6 +1521,63 @@ export default function EvaluatePanel({
               }
               return null
             })()}
+
+            {/* Trust warnings + Allow-bash checkbox grouped together. The
+                base note appears whenever the skill is going to run with
+                file-write tools; the bash variant replaces it when bash is
+                checked because run_bash side-steps the workspace path
+                allowlist. The Allow-bash checkbox sits directly below the
+                warning so the user reads the risk *before* deciding to opt
+                in. Surfaced inline (not modal) so it stays visible while the
+                user reads the rest of the run config. */}
+            {!isPromptEval && agentMode && (
+              <div className="flex flex-col gap-1.5">
+                {!allowBash ? (
+                  <div
+                    className="flex items-start gap-2 text-[11px] text-warning border border-warning/30 bg-warning/5 px-2.5 py-2"
+                    data-testid="agent-mode-warning"
+                  >
+                    <span aria-hidden>⚠</span>
+                    <span>
+                      <strong className="font-semibold">Agent mode is on.</strong>{' '}
+                      Each row runs the skill with file tools in a per-row workspace
+                      under <code className="font-mono">tmp/eval-runs/</code>. The
+                      sandbox is best-effort (pure-Python path allowlist) — use only
+                      with skills you've reviewed. For untrusted skills, run inside
+                      a container or open an issue and we'll help isolate it.
+                    </span>
+                  </div>
+                ) : (
+                  <div
+                    className="flex items-start gap-2 text-[11px] text-danger border border-danger/40 bg-danger/5 px-2.5 py-2"
+                    data-testid="allow-bash-warning"
+                  >
+                    <span aria-hidden>⛔</span>
+                    <span>
+                      <strong className="font-semibold">Bash bypasses the sandbox.</strong>{' '}
+                      The skill can run any command the eval process can. Secrets
+                      are stripped and PATH is restricted to system binaries, but
+                      the workspace boundary is not enforced — a skill could read
+                      files outside it or reach the network. Enable only for skills
+                      you wrote or fully audited.
+                    </span>
+                  </div>
+                )}
+                <label
+                  className="flex items-center gap-1.5 text-[11px] text-fg-dim cursor-pointer select-none px-1"
+                  title="Also expose a run_bash tool. Off by default — bash can side-step the sandbox."
+                  data-testid="allow-bash-checkbox"
+                >
+                  <input
+                    type="checkbox"
+                    checked={allowBash}
+                    onChange={(e) => setAllowBash(e.target.checked)}
+                    className="cursor-pointer"
+                  />
+                  Allow bash
+                </label>
+              </div>
+            )}
 
             {startError && <p className="text-xs text-danger">{startError}</p>}
           </section>
@@ -1799,6 +1898,72 @@ export default function EvaluatePanel({
                                   feature_area: {metadata.feature_area as string}
                                 </div>
                               )}
+                              {(() => {
+                                // Agent-mode trace: tool calls + materialized
+                                // artifacts. Only present when the run was
+                                // started with agent_mode=true.
+                                const agent = metadata.agent as
+                                  | {
+                                      tool_calls?: Array<{ name: string; input: Record<string, unknown>; result: string; is_error: boolean; duration_ms: number }>
+                                      artifacts?: Array<{ path: string; size: number; sha256: string; preview: string | null; binary: boolean }>
+                                      iterations?: number
+                                      stop_reason?: string | null
+                                      halted?: string | null
+                                      workspace?: string | null
+                                    }
+                                  | undefined
+                                if (!agent || (!agent.tool_calls?.length && !agent.artifacts?.length && agent.iterations == null)) {
+                                  return null
+                                }
+                                const calls = agent.tool_calls || []
+                                const artifacts = agent.artifacts || []
+                                const errored = calls.filter((c) => c.is_error).length
+                                return (
+                                  <details className="border border-border-hint p-2 bg-background">
+                                    <summary className="cursor-pointer text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
+                                      Agent trace · {calls.length} tool call{calls.length === 1 ? '' : 's'}
+                                      {errored > 0 && <span className="text-danger"> · {errored} errored</span>}
+                                      {artifacts.length > 0 && <span> · {artifacts.length} artifact{artifacts.length === 1 ? '' : 's'}</span>}
+                                      {agent.halted && <span className="text-warning"> · {agent.halted}</span>}
+                                    </summary>
+                                    <div className="mt-2 space-y-2">
+                                      {calls.length > 0 && (
+                                        <ol className="space-y-1.5">
+                                          {calls.map((c, ci) => (
+                                            <li key={ci} className="border-l-2 pl-2 border-border-hint">
+                                              <div className="flex items-center gap-2 text-[10px]">
+                                                <span className={`font-mono font-semibold ${c.is_error ? 'text-danger' : 'text-foreground'}`}>{c.name}</span>
+                                                <span className="text-muted-foreground">{c.duration_ms}ms</span>
+                                              </div>
+                                              <pre className="whitespace-pre-wrap break-words text-[10px] text-muted-foreground mt-0.5">{JSON.stringify(c.input, null, 2)}</pre>
+                                              <pre className={`whitespace-pre-wrap break-words text-[10px] mt-0.5 ${c.is_error ? 'text-danger' : 'text-foreground'}`}>{c.result}</pre>
+                                            </li>
+                                          ))}
+                                        </ol>
+                                      )}
+                                      {artifacts.length > 0 && (
+                                        <div>
+                                          <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">Artifacts</div>
+                                          <ul className="mt-1 space-y-1">
+                                            {artifacts.map((a) => (
+                                              <li key={a.sha256 + a.path} className="text-[10px]">
+                                                <div className="flex gap-2 items-center">
+                                                  <span className="font-mono text-foreground">{a.path}</span>
+                                                  <span className="text-muted-foreground">{a.size}B</span>
+                                                  {a.binary && <span className="text-muted-foreground">(binary)</span>}
+                                                </div>
+                                                {a.preview && (
+                                                  <pre className="whitespace-pre-wrap break-words text-muted-foreground mt-0.5 max-h-32 overflow-auto">{a.preview}</pre>
+                                                )}
+                                              </li>
+                                            ))}
+                                          </ul>
+                                        </div>
+                                      )}
+                                    </div>
+                                  </details>
+                                )
+                              })()}
                             </li>
                           )
                         })}

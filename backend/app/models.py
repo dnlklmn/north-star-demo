@@ -476,6 +476,20 @@ class RunEvalRequest(BaseModel):
     include_triggering: bool = False
     model: Optional[str] = None  # override EVAL_MODEL for this run
     judge_model: Optional[str] = None  # override JUDGE_MODEL
+    # Agent mode: run the skill inside a real tool-use loop with a sandboxed
+    # filesystem instead of bare messages.create(). This is the only honest
+    # way to evaluate tool-using skills (docx, pdf, xlsx, web fetch) — without
+    # it the model returns prose like "I've written the file" with no file,
+    # and judges happily score the prose. Default off to keep existing runs
+    # cheap + identical.
+    agent_mode: bool = False
+    # When agent_mode is on, also expose the run_bash tool. Off by default —
+    # it can side-step the sandbox path allowlist. Enable only for trusted
+    # skills you've reviewed.
+    allow_bash: bool = False
+    # Hard cap on how many tool-use turns the agent gets per row. Prevents
+    # runaway loops + bounds cost. Ignored when agent_mode is false.
+    max_iterations: Optional[int] = None
 
 
 class EvalRunSummary(BaseModel):

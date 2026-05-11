@@ -50,3 +50,7 @@ htmlcov/
 # Build
 build/
 *.manifest
+
+# Eval agent-mode sandboxes (per-row scratch dirs created by eval_runner)
+backend/tmp/
+tmp/eval-runs/
