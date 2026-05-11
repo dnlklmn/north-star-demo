@@ -225,6 +225,24 @@ async def _create_tables() -> None:
         await conn.execute("""
             ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS judge_model_used TEXT;
         """)
+        # Migration: track when any per-row note was last edited. Compared
+        # against clusters_generated_at (added later) to drive the
+        # "notes changed since last analysis" hint. Denormalized so we don't
+        # have to scan per_row JSONB on every page load to compute it.
+        await conn.execute("""
+            ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS notes_updated_at TIMESTAMPTZ;
+        """)
+        # Migration: cluster cache + freshness stamp. clusters is a list of
+        # {label, count, row_ids} produced by clustering the per-row notes;
+        # clusters_generated_at is set the same moment so the UI can detect
+        # whether the notes have been edited since (notes_updated_at >
+        # clusters_generated_at → stale).
+        await conn.execute("""
+            ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS clusters JSONB;
+        """)
+        await conn.execute("""
+            ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS clusters_generated_at TIMESTAMPTZ;
+        """)
 
         # Share tokens — every project ("session") can hand out viewer/editor
         # links. The plaintext token is generated once at create time and
@@ -1358,6 +1376,7 @@ _EVAL_RUN_JSON_FIELDS = (
     "per_row",
     "charter_snapshot",
     "improvement_suggestions",
+    "clusters",
 )
 
 
@@ -1409,6 +1428,7 @@ async def update_eval_run(run_id: str, fields: dict) -> dict | None:
         "scorer_names", "scorer_averages", "per_row", "error",
         "started_at", "finished_at",
         "improvement_suggestions", "improvement_summary",
+        "clusters", "clusters_generated_at",
     }
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
@@ -1458,3 +1478,97 @@ async def list_eval_runs(session_id: str, limit: int = 50) -> list[dict]:
             session_id, limit,
         )
         return [_parse_eval_run_row(r) for r in rows]
+
+
+async def get_previous_clustered_run(
+    session_id: str,
+    project: str,
+    excluding_run_id: str,
+) -> dict | None:
+    """Most recent prior run in the same (session, project) that has a
+    cached clusters payload. Used by the analyze endpoint to seed
+    cluster_notes with the previous run's labels — so the same failure
+    mode keeps the same name across runs and the user can watch a bucket
+    shrink ("23 → 8") instead of mentally remapping renamed labels.
+
+    Scoped to project (not just session) because a session can host runs
+    across multiple Braintrust projects, and a label that fits one
+    project's failure mode rarely fits another's.
+
+    Returns the run row or None when no prior clustered run exists yet
+    (first analyze on this project's history)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT * FROM eval_runs
+            WHERE session_id = $1
+              AND project = $2
+              AND id != $3
+              AND clusters IS NOT NULL
+              AND clusters_generated_at IS NOT NULL
+            ORDER BY clusters_generated_at DESC
+            LIMIT 1
+            """,
+            session_id, project, excluding_run_id,
+        )
+        return _parse_eval_run_row(row) if row else None
+
+
+async def set_eval_run_row_note(
+    run_id: str,
+    example_id: str,
+    note: str,
+) -> dict | None:
+    """Set the note on a single per_row entry, addressing rows by their
+    metadata.id (== examples.id, stable across resorts). Bumps
+    notes_updated_at so the UI can tell when notes drift past the last
+    cluster analysis.
+
+    Returns the updated run row, or None if the run or example_id was not
+    found.
+
+    Concurrency: an empty note string clears the field but still bumps
+    notes_updated_at — same intent as a non-empty edit. We rewrite the full
+    per_row JSONB inside a single UPDATE; if two writes race, last-write-wins
+    on the per_row column. Acceptable for v1 (single-tab editing is the norm).
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT per_row FROM eval_runs WHERE id = $1 FOR UPDATE",
+                run_id,
+            )
+            if row is None:
+                return None
+            per_row_raw = row["per_row"]
+            per_row = json.loads(per_row_raw) if isinstance(per_row_raw, str) else per_row_raw
+            if not isinstance(per_row, list):
+                return None
+            matched = False
+            for entry in per_row:
+                if not isinstance(entry, dict):
+                    continue
+                meta = entry.get("metadata") or {}
+                if isinstance(meta, dict) and meta.get("id") == example_id:
+                    if note:
+                        entry["note"] = note
+                    else:
+                        entry.pop("note", None)
+                    matched = True
+                    break
+            if not matched:
+                return None
+            updated = await conn.fetchrow(
+                """
+                UPDATE eval_runs
+                SET per_row = $1::jsonb,
+                    notes_updated_at = now()
+                WHERE id = $2
+                RETURNING *
+                """,
+                json.dumps(per_row, default=str),
+                run_id,
+            )
+            return _parse_eval_run_row(updated) if updated else None

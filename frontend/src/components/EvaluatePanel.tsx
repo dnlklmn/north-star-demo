@@ -16,6 +16,7 @@ import {
   promoteSkillVersion,
   restoreSkillVersion,
   runEval,
+  setEvalRunRowNote,
   suggestImprovements,
 } from '../api'
 import {
@@ -48,6 +49,14 @@ interface Props {
   onGoToSkill?: () => void
   onGoToDataset?: () => void
   onGoToScorers?: () => void
+  /** Take the user to the Charter tab — used by the "Open in Charter"
+   *  button on the unmapped-rows banner so they can add the missing
+   *  alignment dimension or rename one to fit the synthesized rows. */
+  onGoToCharter?: () => void
+  /** Take the user to the Dataset tab with the feature_area filter
+   *  pre-set to the synthetic "(unmapped)" value, so they land directly
+   *  on the rows that need re-tagging. */
+  onGoToUnmappedRows?: () => void
   /** Inline regeneration — same as navigating to Scorers + pressing Generate,
    *  but done in place so the user doesn't lose context. */
   onGenerateScorersInline?: () => Promise<void>
@@ -243,6 +252,8 @@ export default function EvaluatePanel({
   onGoToSkill,
   onGoToDataset,
   onGoToScorers,
+  onGoToCharter,
+  onGoToUnmappedRows,
   onGenerateScorersInline,
   onOpenSettings,
   onRunTerminal,
@@ -340,6 +351,102 @@ export default function EvaluatePanel({
   const [dismissed, setDismissed] = useState<Set<string>>(new Set())
   const [suggesting, setSuggesting] = useState(false)
   const [suggestError, setSuggestError] = useState<string | null>(null)
+
+  // Per-row filter — clicking a scorer in per-scorer averages narrows the
+  // per-row table to rows that aren't green (>=0.8) for that scorer. Reset
+  // via the explicit button next to the per-row header.
+  const [scorerFilter, setScorerFilter] = useState<string | null>(null)
+  // Filter the per-row table to a single failure-mode cluster's row_ids —
+  // mutually exclusive with scorerFilter so the user always sees one
+  // narrowing at a time. Setting either clears the other.
+  const [clusterFilter, setClusterFilter] = useState<string | null>(null)
+  const [perRowOpen, setPerRowOpen] = useState(false)
+  // Per-row reveal of judge reasoning. Keyed by `${exampleId}:${scorerName}`
+  // so multiple rows can have different scorers expanded at once. Click a
+  // score chip to toggle.
+  const [expandedScorers, setExpandedScorers] = useState<Set<string>>(new Set())
+  // Reset filters whenever the active run changes — a filter that survived
+  // a run switch would silently hide rows on the new run.
+  useEffect(() => {
+    setScorerFilter(null)
+    setClusterFilter(null)
+  }, [activeRun?.run_id])
+
+  // Per-row notes — textarea is always editable, Save/Cancel buttons only
+  // appear when the draft differs from the persisted note. `noteDrafts`
+  // holds keystroke-level state per example_id; absence of an entry means
+  // the row is in sync with what's persisted.
+  const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({})
+  const [noteSaving, setNoteSaving] = useState<Record<string, boolean>>({})
+  const [noteError, setNoteError] = useState<Record<string, string>>({})
+  // Reset drafts when switching runs — a draft on run A shouldn't survive
+  // into run B's view.
+  useEffect(() => {
+    setNoteDrafts({})
+    setNoteError({})
+  }, [activeRun?.run_id])
+
+  const updateNoteDraft = useCallback((exampleId: string, value: string) => {
+    setNoteDrafts((d) => ({ ...d, [exampleId]: value }))
+  }, [])
+
+  const cancelNoteEdit = useCallback((exampleId: string) => {
+    setNoteDrafts((d) => {
+      if (!(exampleId in d)) return d
+      const next = { ...d }
+      delete next[exampleId]
+      return next
+    })
+    setNoteError((e) => {
+      if (!(exampleId in e)) return e
+      const next = { ...e }
+      delete next[exampleId]
+      return next
+    })
+  }, [])
+
+  const saveNote = useCallback(
+    async (exampleId: string) => {
+      if (!activeRun) return
+      const draft = noteDrafts[exampleId]
+      if (draft === undefined) return
+      const runId = activeRun.run_id
+      setNoteSaving((s) => ({ ...s, [exampleId]: true }))
+      setNoteError((e) => {
+        if (!(exampleId in e)) return e
+        const next = { ...e }
+        delete next[exampleId]
+        return next
+      })
+      try {
+        const updated = await setEvalRunRowNote(sessionId, runId, exampleId, draft)
+        // Only apply the response if the user is still on the same run —
+        // a slow PATCH that lands after a run switch would otherwise
+        // overwrite the now-active run's state with the previous run's data.
+        setActiveRun((cur) => (cur && cur.run_id === runId ? updated : cur))
+        setRuns((rs) => rs.map((r) => (r.run_id === runId ? updated : r)))
+        // Clear the draft — the textarea will now read from persistedNote
+        // directly, matching the saved value.
+        setNoteDrafts((d) => {
+          const next = { ...d }
+          delete next[exampleId]
+          return next
+        })
+      } catch (err) {
+        setNoteError((e) => ({
+          ...e,
+          [exampleId]: err instanceof Error ? err.message : 'Failed to save note',
+        }))
+      } finally {
+        setNoteSaving((s) => {
+          const next = { ...s }
+          delete next[exampleId]
+          return next
+        })
+      }
+    },
+    [activeRun, sessionId, noteDrafts],
+  )
 
   // --- Save ---
   const [savingNotes, setSavingNotes] = useState('')
@@ -773,8 +880,39 @@ export default function EvaluatePanel({
             Proposed edits ({suggestions.length})
           </p>
 
-          <ul className="space-y-2">
-            {suggestions.map((s) => {
+          {(() => {
+            // Group suggestions by their cluster target_label so the user
+            // can scan "fixes for over_triggers_on_greeting" as a unit
+            // instead of decoding rationale text line by line. When no
+            // suggestion has a target_label (analysis ran without notes,
+            // or the model couldn't pin any) the result collapses to a
+            // single ungrouped section, which renders identically to the
+            // pre-cluster behavior.
+            const groups: { label: string | null; items: ImprovementSuggestion[] }[] = []
+            const indexByLabel = new Map<string, number>()
+            for (const s of suggestions) {
+              const raw = (s.target_label ?? '').trim()
+              const label = raw || null
+              const key = label ?? ''
+              const idx = indexByLabel.get(key)
+              if (idx === undefined) {
+                indexByLabel.set(key, groups.length)
+                groups.push({ label, items: [s] })
+              } else {
+                groups[idx].items.push(s)
+              }
+            }
+            // Pin the unlabeled group last so labeled fixes lead — they're
+            // the ones the user already framed as a named bucket and is
+            // most likely scanning for.
+            groups.sort((a, b) => {
+              if (a.label === null && b.label !== null) return 1
+              if (a.label !== null && b.label === null) return -1
+              return 0
+            })
+            const showHeaders = groups.some((g) => g.label !== null)
+
+            const renderItem = (s: ImprovementSuggestion) => {
               const isAccepted = accepted.has(s.id)
               const isDismissed = dismissed.has(s.id)
               const { body: applied } = applySuggestion(skillBody, s)
@@ -857,6 +995,70 @@ export default function EvaluatePanel({
 
                   <p className="text-xs text-fg-dim leading-relaxed">{s.rationale}</p>
 
+                  {/* Citation strip: tells the user which scorers and which
+                      rows the LLM was looking at when it wrote this
+                      suggestion. Source row ids match per_row[i].metadata.id,
+                      so clicking one scrolls the per-row table to the
+                      cited row and highlights it briefly. Without this
+                      strip the user has to take the rationale's word for
+                      what's failing — these chips let them verify. */}
+                  {(s.source_scorer_names?.length || s.source_row_ids?.length) ? (
+                    <div className="flex flex-col gap-1 text-[11px]">
+                      {s.source_scorer_names && s.source_scorer_names.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-1">
+                          <span className="text-[10px] uppercase tracking-wide text-fg-dim">
+                            Failing scorers
+                          </span>
+                          {s.source_scorer_names.map((name) => (
+                            <span
+                              key={name}
+                              className="font-mono text-[10px] px-1.5 py-0.5 bg-warning/15 text-warning"
+                            >
+                              {name}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {s.source_row_ids && s.source_row_ids.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-1">
+                          <span className="text-[10px] uppercase tracking-wide text-fg-dim">
+                            From rows
+                          </span>
+                          {s.source_row_ids.map((rowId, idx) => (
+                            <button
+                              key={rowId}
+                              type="button"
+                              onClick={() => {
+                                setPerRowOpen(true)
+                                // Defer to next frame so the per-row list
+                                // is mounted before we try to scroll into it.
+                                requestAnimationFrame(() => {
+                                  const el = document.querySelector(
+                                    `[data-row-id="${CSS.escape(rowId)}"]`,
+                                  )
+                                  if (el && 'scrollIntoView' in el) {
+                                    ;(el as HTMLElement).scrollIntoView({
+                                      behavior: 'smooth',
+                                      block: 'center',
+                                    })
+                                    el.classList.add('ring-2', 'ring-accent')
+                                    window.setTimeout(() => {
+                                      el.classList.remove('ring-2', 'ring-accent')
+                                    }, 1600)
+                                  }
+                                })
+                              }}
+                              className="font-mono text-[10px] px-1.5 py-0.5 bg-fill-neutral/40 hover:bg-fill-neutral/70 text-foreground"
+                              title={`Click to jump to row ${rowId}`}
+                            >
+                              row {idx + 1}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
+
                   {s.find && (
                     <div className="space-y-1">
                       <p className="text-[10px] font-semibold uppercase tracking-wide text-fg-dim">
@@ -877,8 +1079,30 @@ export default function EvaluatePanel({
                   </div>
                 </li>
               )
-            })}
-          </ul>
+            }
+
+            return (
+              <div className="space-y-3">
+                {groups.map((g, gi) => (
+                  <div key={g.label ?? `__none_${gi}`} className="space-y-2">
+                    {showHeaders && (
+                      <p className="text-[10px] font-mono font-semibold uppercase tracking-wide text-muted-foreground">
+                        {g.label ? (
+                          <>
+                            Fixes for <span className="text-foreground">{g.label}</span>
+                            <span className="text-muted-foreground/70"> · {g.items.length}</span>
+                          </>
+                        ) : (
+                          <>Other ({g.items.length})</>
+                        )}
+                      </p>
+                    )}
+                    <ul className="space-y-2">{g.items.map(renderItem)}</ul>
+                  </div>
+                ))}
+              </div>
+            )
+          })()}
 
           {acceptedSuggestions.length > 0 && (
             <div className="border border-fill-primary/40 bg-fill-primary/5 p-3 space-y-2">
@@ -1585,8 +1809,13 @@ export default function EvaluatePanel({
           {/* --- Active run status --- */}
           {activeRun && (
             <section className="border border-border p-4 bg-surface-raised">
-              <div className="flex items-center justify-between mb-3">
-                <div>
+              {/* Sticky run header — extends to the section edges (negative
+                  margins cancel the section's p-4) so the row covers the full
+                  width when stuck at the scroll viewport top. Bottom border
+                  appears only when the user has scrolled past the section's
+                  natural top, keeping the resting state visually identical. */}
+              <div className="-mx-4 -mt-4 mb-3 px-4 pt-4 pb-3 sticky top-0 z-10 bg-surface-raised border-b border-border-hint flex items-start justify-between gap-3 flex-wrap">
+                <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 flex-wrap">
                     <p className="text-sm font-semibold text-foreground">
                       {activeRun.project}
@@ -1608,8 +1837,21 @@ export default function EvaluatePanel({
                         JUDGE: {judgeLabel(activeRun.judge_model_used)}
                       </span>
                     )}
+                    <span
+                      className={`text-xs font-mono uppercase px-2 py-0.5 ${
+                        activeRun.status === 'done'
+                          ? 'bg-success/15 text-success'
+                          : activeRun.status === 'error' || activeRun.status === 'failed'
+                            ? 'bg-danger/15 text-danger'
+                            : activeRun.status === 'cancelled'
+                              ? 'bg-muted text-muted-foreground'
+                              : 'bg-accent/15 text-accent'
+                      }`}
+                    >
+                      {activeRun.status}
+                    </span>
                   </div>
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-xs text-muted-foreground mt-1">
                     {activeRun.status === 'pending' && 'Queued...'}
                     {activeRun.status === 'running' && 'Running — this may take a few minutes.'}
                     {activeRun.status === 'done' &&
@@ -1619,36 +1861,44 @@ export default function EvaluatePanel({
                     {activeRun.status === 'cancelled' && 'Cancelled.'}
                   </p>
                 </div>
-                {(activeRun.status === 'pending' || activeRun.status === 'running') && (
-                  <button
-                    onClick={async () => {
-                      try {
-                        const fresh = await cancelEvalRun(sessionId, activeRun.run_id)
-                        setActiveRun(fresh)
-                        await refreshRuns()
-                      } catch (err) {
-                        setStartError(err instanceof Error ? err.message : 'Failed to cancel')
-                      }
-                    }}
-                    className="px-2 py-1 text-xs font-medium border border-border bg-surface hover:bg-danger/10 hover:text-danger hover:border-danger/40"
-                    title="Stop this eval run. The Braintrust task can't be killed mid-flight, so it'll finish in the background — but we'll drop the results."
-                  >
-                    Stop
-                  </button>
-                )}
-                <span
-                  className={`text-xs font-mono uppercase px-2 py-0.5 ${
-                    activeRun.status === 'done'
-                      ? 'bg-success/15 text-success'
-                      : activeRun.status === 'error' || activeRun.status === 'failed'
-                        ? 'bg-danger/15 text-danger'
-                        : activeRun.status === 'cancelled'
-                          ? 'bg-muted text-muted-foreground'
-                          : 'bg-accent/15 text-accent'
-                  }`}
-                >
-                  {activeRun.status}
-                </span>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  {(activeRun.status === 'pending' || activeRun.status === 'running') && (
+                    <button
+                      onClick={async () => {
+                        try {
+                          const fresh = await cancelEvalRun(sessionId, activeRun.run_id)
+                          setActiveRun(fresh)
+                          await refreshRuns()
+                        } catch (err) {
+                          setStartError(err instanceof Error ? err.message : 'Failed to cancel')
+                        }
+                      }}
+                      className="px-2 py-1 text-xs font-medium border border-border bg-surface hover:bg-danger/10 hover:text-danger hover:border-danger/40"
+                      title="Stop this eval run. The Braintrust task can't be killed mid-flight, so it'll finish in the background — but we'll drop the results."
+                    >
+                      Stop
+                    </button>
+                  )}
+                  {(activeRun.status === 'done' || activeRun.status === 'failed') && (
+                    <button
+                      onClick={() => handleSuggest(activeRun.run_id)}
+                      disabled={suggesting}
+                      className={`inline-flex items-center gap-2 px-3 py-1.5 text-sm font-semibold ${
+                        suggesting
+                          ? 'bg-fill-neutral text-fg-dim cursor-not-allowed'
+                          : 'bg-fill-primary text-bg-default hover:opacity-90'
+                      }`}
+                      title="Analyze the failures from this run to get proposed SKILL.md edits."
+                    >
+                      {suggesting ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Sparkles className="w-4 h-4" />
+                      )}
+                      Analyze this run
+                    </button>
+                  )}
+                </div>
               </div>
 
               {(activeRun.status === 'error' || activeRun.status === 'failed') && activeRun.error && (
@@ -1763,6 +2013,38 @@ export default function EvaluatePanel({
                             </span>
                           )}
                         </p>
+                        {(() => {
+                          // Per-label split: "good" rows are designed for
+                          // success cases, "bad" rows are deliberate failure
+                          // probes. Aggregating both into one mean hides
+                          // whether the model is succeeding on its happy
+                          // path while only stumbling on hard cases (or vice
+                          // versa). We surface the split alongside the
+                          // overall mean so neither dimension hides behind
+                          // the other.
+                          const buckets: Record<string, Record<string, number[]>> = {}
+                          for (const r of activeRun.per_row) {
+                            const label = (r.metadata as Record<string, unknown> | undefined)?.label
+                            const lk = typeof label === 'string' && label ? label : 'unlabeled'
+                            for (const [name, score] of Object.entries(r.scores || {})) {
+                              if (typeof score !== 'number') continue
+                              const slot = (buckets[name] ||= {})
+                              ;(slot[lk] ||= []).push(score)
+                            }
+                          }
+                          const labelAvg = (
+                            scorer: string,
+                            label: string,
+                          ): number | null => {
+                            const vals = buckets[scorer]?.[label]
+                            if (!vals || vals.length === 0) return null
+                            return vals.reduce((a, b) => a + b, 0) / vals.length
+                          }
+                          // Stash on a closure so the row renderer below
+                          // doesn't need to re-derive — keeps the JSX tight.
+                          ;(activeRun as unknown as { __labelAvg?: typeof labelAvg }).__labelAvg = labelAvg
+                          return null
+                        })()}
                         <ul className="space-y-1">
                           {Object.entries(activeRun.scorer_averages).map(([name, avg]) => {
                             const prev = previousRun?.scorer_averages?.[name]
@@ -1775,35 +2057,78 @@ export default function EvaluatePanel({
                                 : d > 0
                                   ? 'text-success'
                                   : 'text-danger'
+                            const labelAvg = (activeRun as unknown as {
+                              __labelAvg?: (s: string, l: string) => number | null
+                            }).__labelAvg
+                            const goodAvg = labelAvg ? labelAvg(name, 'good') : null
+                            const badAvg = labelAvg ? labelAvg(name, 'bad') : null
+                            const isFiltered = scorerFilter === name
                             return (
-                              <li
-                                key={name}
-                                className="flex items-center justify-between text-xs bg-muted/30 px-2 py-1 gap-3"
-                              >
-                                <span className="font-mono text-foreground truncate flex-1">{name}</span>
-                                <div className="flex items-center gap-2 flex-shrink-0">
-                                  {prevDelta !== null && (
-                                    <span
-                                      className={`font-mono ${deltaClass(prevDelta)}`}
-                                      title={`vs prev: ${(prev! * 100).toFixed(0)}%`}
-                                    >
-                                      {prevDelta > 0 ? '+' : ''}
-                                      {(prevDelta * 100).toFixed(0)}pp
+                              <li key={name}>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (isFiltered) {
+                                      setScorerFilter(null)
+                                    } else {
+                                      setScorerFilter(name)
+                                      setPerRowOpen(true)
+                                    }
+                                  }}
+                                  className={`w-full flex items-center justify-between text-xs px-2 py-1 gap-3 text-left transition-colors ${
+                                    isFiltered
+                                      ? 'bg-accent/15 hover:bg-accent/25'
+                                      : 'bg-muted/30 hover:bg-muted/60'
+                                  }`}
+                                  title={
+                                    isFiltered
+                                      ? `Click to clear filter`
+                                      : `Click to filter per-row results to rows that aren't green for "${name}"`
+                                  }
+                                >
+                                  <span className="font-mono text-foreground truncate flex-1">{name}</span>
+                                  <div className="flex items-center gap-2 flex-shrink-0">
+                                    {prevDelta !== null && (
+                                      <span
+                                        className={`font-mono ${deltaClass(prevDelta)}`}
+                                        title={`vs prev: ${(prev! * 100).toFixed(0)}%`}
+                                      >
+                                        {prevDelta > 0 ? '+' : ''}
+                                        {(prevDelta * 100).toFixed(0)}pp
+                                      </span>
+                                    )}
+                                    {origDelta !== null && (
+                                      <span
+                                        className={`font-mono ${deltaClass(origDelta)}`}
+                                        title={`vs original: ${(orig! * 100).toFixed(0)}%`}
+                                      >
+                                        ({origDelta > 0 ? '+' : ''}
+                                        {(origDelta * 100).toFixed(0)}pp)
+                                      </span>
+                                    )}
+                                    {(goodAvg !== null || badAvg !== null) && (
+                                      <span
+                                        className="font-mono text-[10px] text-muted-foreground"
+                                        title="Per-label split. 'good' rows test happy-path behavior; 'bad' rows probe deliberate failure modes — that's why bad-row scores often look low."
+                                      >
+                                        {goodAvg !== null && (
+                                          <span>
+                                            good {(goodAvg * 100).toFixed(0)}%
+                                          </span>
+                                        )}
+                                        {goodAvg !== null && badAvg !== null && (
+                                          <span className="text-muted-foreground/60"> · </span>
+                                        )}
+                                        {badAvg !== null && (
+                                          <span>bad {(badAvg * 100).toFixed(0)}%</span>
+                                        )}
+                                      </span>
+                                    )}
+                                    <span className={`font-mono font-medium ${scoreColor(avg)}`}>
+                                      {(avg * 100).toFixed(0)}%
                                     </span>
-                                  )}
-                                  {origDelta !== null && (
-                                    <span
-                                      className={`font-mono ${deltaClass(origDelta)}`}
-                                      title={`vs original: ${(orig! * 100).toFixed(0)}%`}
-                                    >
-                                      ({origDelta > 0 ? '+' : ''}
-                                      {(origDelta * 100).toFixed(0)}pp)
-                                    </span>
-                                  )}
-                                  <span className={`font-mono font-medium ${scoreColor(avg)}`}>
-                                    {(avg * 100).toFixed(0)}%
-                                  </span>
-                                </div>
+                                  </div>
+                                </button>
                               </li>
                             )
                           })}
@@ -1817,159 +2142,535 @@ export default function EvaluatePanel({
                   {/* Suggestions list, save block, post-save CTA all moved
                       to the right rail (improveRight). */}
 
-                  {/* In-context Analyze CTA — sits at the end of the open
-                      run section so the user can trigger improvement
-                      analysis right from the results they're looking at,
-                      without scrolling up to the right rail. The right rail
-                      still renders the resulting summary + suggestions; this
-                      is just the trigger. Only enabled for terminal runs
-                      with rows to analyze. */}
-                  {(activeRun.status === 'done' || activeRun.status === 'failed') && (
-                    <div className="mt-4 pt-4 border-t border-border-hint flex items-center justify-between gap-3">
-                      <p className="text-xs text-fg-dim">
-                        Analyze the failures from this run to get proposed SKILL.md edits.
-                      </p>
-                      <button
-                        onClick={() => handleSuggest(activeRun.run_id)}
-                        disabled={suggesting}
-                        className={`inline-flex items-center gap-2 px-3 py-1.5 text-sm font-semibold ${
-                          suggesting
-                            ? 'bg-fill-neutral text-fg-dim cursor-not-allowed'
-                            : 'bg-fill-primary text-bg-default hover:opacity-90'
-                        }`}
-                      >
-                        {suggesting ? (
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                        ) : (
-                          <Sparkles className="w-4 h-4" />
-                        )}
-                        Analyze this run
-                      </button>
-                    </div>
-                  )}
+                  {/* Analyze CTA moved into the sticky run header above —
+                      same trigger, just always visible while reviewing the
+                      run's results. */}
 
-                  {activeRun.per_row.length > 0 && (
-                    <details className="mt-2">
-                      <summary className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide cursor-pointer mb-2">
-                        Per-row results ({activeRun.per_row.length})
-                      </summary>
-                      <ul className="space-y-3 mt-2">
-                        {activeRun.per_row.map((row, i) => {
-                          const metadata = (row.metadata || {}) as Record<string, unknown>
-                          const inputStr =
-                            typeof row.input === 'object' && row.input !== null
-                              ? ((row.input as Record<string, unknown>).input as string) || JSON.stringify(row.input)
-                              : String(row.input ?? '')
-                          const outputStr = typeof row.output === 'string' ? row.output : JSON.stringify(row.output, null, 2)
-                          const expectedStr = typeof row.expected === 'string' ? row.expected : JSON.stringify(row.expected, null, 2)
-                          return (
-                            <li key={i} className="border border-border p-3 bg-muted/10 text-xs space-y-2">
-                              <div className="flex flex-wrap gap-1">
-                                {Object.entries(row.scores).map(([name, score]) => (
-                                  <span
-                                    key={name}
-                                    className={`font-mono px-1.5 py-0.5 bg-background ${scoreColor(score)}`}
-                                  >
-                                    {name}: {(score * 100).toFixed(0)}%
-                                  </span>
-                                ))}
-                              </div>
-                              {row.error && (
-                                <div className="text-danger">Error: {row.error}</div>
-                              )}
-                              <div>
-                                <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">Input</span>
-                                <pre className="whitespace-pre-wrap break-words text-foreground mt-0.5">{inputStr}</pre>
-                              </div>
-                              <div>
-                                <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">Output</span>
-                                <pre className="whitespace-pre-wrap break-words text-foreground mt-0.5">{outputStr}</pre>
-                              </div>
-                              {expectedStr && (
-                                <details>
-                                  <summary className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide cursor-pointer">
-                                    Expected
-                                  </summary>
-                                  <pre className="whitespace-pre-wrap break-words text-foreground mt-0.5">{expectedStr}</pre>
-                                </details>
-                              )}
-                              {(metadata.feature_area as string) && (
-                                <div className="text-[10px] text-muted-foreground">
-                                  feature_area: {metadata.feature_area as string}
-                                </div>
-                              )}
-                              {(() => {
-                                // Agent-mode trace: tool calls + materialized
-                                // artifacts. Only present when the run was
-                                // started with agent_mode=true.
-                                const agent = metadata.agent as
-                                  | {
-                                      tool_calls?: Array<{ name: string; input: Record<string, unknown>; result: string; is_error: boolean; duration_ms: number }>
-                                      artifacts?: Array<{ path: string; size: number; sha256: string; preview: string | null; binary: boolean }>
-                                      iterations?: number
-                                      stop_reason?: string | null
-                                      halted?: string | null
-                                      workspace?: string | null
+                  {/* Failure-mode clusters — populated by the analyze step
+                      when the user has notes on rows. Each cluster is a
+                      filter chip that narrows the per-row table to that
+                      bucket. The stale pill below appears when notes
+                      changed after the last analysis. */}
+                  {activeRun.clusters && activeRun.clusters.length > 0 && (() => {
+                    const stale =
+                      !!activeRun.notes_updated_at &&
+                      !!activeRun.clusters_generated_at &&
+                      new Date(activeRun.notes_updated_at).getTime() >
+                        new Date(activeRun.clusters_generated_at).getTime()
+                    return (
+                      <div className="mb-4 border border-border-hint p-3 bg-surface">
+                        <div className="flex items-center justify-between mb-2">
+                          <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
+                            Failure-mode clusters
+                          </p>
+                          {stale && (
+                            <button
+                              type="button"
+                              onClick={() => handleSuggest(activeRun.run_id)}
+                              disabled={suggesting}
+                              className="inline-flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-warning hover:text-foreground disabled:opacity-50"
+                              title="Notes have changed since these clusters were generated. Click to re-cluster + re-analyze."
+                            >
+                              <RotateCcw className="w-3 h-3" />
+                              Notes changed — re-analyze
+                            </button>
+                          )}
+                        </div>
+                        <ul className="flex flex-wrap gap-1.5">
+                          {activeRun.clusters.map((c) => {
+                            const isActive = clusterFilter === c.label
+                            return (
+                              <li key={c.label}>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (isActive) {
+                                      setClusterFilter(null)
+                                    } else {
+                                      setClusterFilter(c.label)
+                                      setScorerFilter(null)
+                                      setPerRowOpen(true)
                                     }
-                                  | undefined
-                                if (!agent || (!agent.tool_calls?.length && !agent.artifacts?.length && agent.iterations == null)) {
-                                  return null
-                                }
-                                const calls = agent.tool_calls || []
-                                const artifacts = agent.artifacts || []
-                                const errored = calls.filter((c) => c.is_error).length
+                                  }}
+                                  className={`text-xs font-mono px-2 py-1 transition-colors ${
+                                    isActive
+                                      ? 'bg-accent/20 text-accent ring-1 ring-accent'
+                                      : 'bg-muted/40 text-foreground hover:bg-muted/60'
+                                  }`}
+                                  title={
+                                    isActive
+                                      ? `Click to clear filter`
+                                      : `Click to filter per-row results to the ${c.count} row${c.count === 1 ? '' : 's'} in "${c.label}"`
+                                  }
+                                >
+                                  {c.label} <span className="text-muted-foreground">· {c.count}</span>
+                                </button>
+                              </li>
+                            )
+                          })}
+                        </ul>
+                      </div>
+                    )
+                  })()}
+
+                  {/* Unmapped-feature_area banner. Surfaces rows whose
+                      `feature_area` isn't an entry in the charter's
+                      alignment list — those rows score only on coverage +
+                      safety, with every alignment scorer silently gating
+                      out. Common cause: synthesis put a coverage criterion
+                      name in the alignment slot. The post-synthesis snap
+                      sets these to "(unmapped)" so they're easy to count
+                      and grep for. */}
+                  {activeRun.per_row.length > 0 && (() => {
+                    const charterForRun =
+                      (activeRun.charter_snapshot as Charter | null | undefined) ?? null
+                    const validAreas = new Set(
+                      (charterForRun?.alignment ?? []).map((a) => a.feature_area),
+                    )
+                    if (validAreas.size === 0) return null
+                    const unmapped = activeRun.per_row.filter((r) => {
+                      const fa = (r.metadata as Record<string, unknown>)?.feature_area
+                      if (typeof fa !== 'string') return false
+                      if (fa === '(off-target)') return false
+                      return !validAreas.has(fa)
+                    })
+                    if (unmapped.length === 0) return null
+                    const sample = Array.from(
+                      new Set(
+                        unmapped
+                          .map(
+                            (r) =>
+                              (r.metadata as Record<string, unknown>)?.feature_area,
+                          )
+                          .filter((v): v is string => typeof v === 'string'),
+                      ),
+                    ).slice(0, 4)
+                    return (
+                      <div className="mb-3 px-3 py-2 bg-warning/10 border border-warning/30 text-xs text-foreground">
+                        <p className="font-medium">
+                          {unmapped.length} row{unmapped.length === 1 ? '' : 's'} won't get
+                          alignment scores
+                        </p>
+                        <p className="text-muted-foreground mt-0.5">
+                          Their <span className="font-mono">feature_area</span> isn't in this
+                          run's charter alignment list — alignment scorers silently gate them
+                          out, so they score only on coverage + safety. Unmapped values:{' '}
+                          {sample.map((s, i) => (
+                            <span key={s}>
+                              <span className="font-mono">{s}</span>
+                              {i < sample.length - 1 ? ', ' : null}
+                            </span>
+                          ))}
+                          .
+                        </p>
+                        <div className="flex items-center gap-2 mt-2">
+                          {onGoToUnmappedRows && (
+                            <button
+                              type="button"
+                              onClick={onGoToUnmappedRows}
+                              className="px-2 py-1 text-[11px] font-medium border border-warning/40 bg-warning/10 hover:bg-warning/20 text-foreground"
+                              title="Open the Dataset tab pre-filtered to these rows so you can re-tag them"
+                            >
+                              Fix in Dataset
+                            </button>
+                          )}
+                          {onGoToCharter && (
+                            <button
+                              type="button"
+                              onClick={onGoToCharter}
+                              className="px-2 py-1 text-[11px] font-medium border border-border-hint bg-surface hover:bg-fill-neutral/30 text-foreground"
+                              title="Open the Charter so you can add these as alignment dimensions"
+                            >
+                              Edit charter
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })()}
+
+                  {activeRun.per_row.length > 0 && (() => {
+                    // Run-wide visibility hint: when the run has rows scored
+                    // but NO scorer_metadata captured anywhere (legacy run
+                    // from before the trace-capture change), tell the user
+                    // why score chips aren't clickable instead of leaving
+                    // them to discover via tooltip.
+                    const hasAnyScores = activeRun.per_row.some(
+                      (r) => Object.keys(r.scores || {}).length > 0,
+                    )
+                    const hasAnyTraces = activeRun.per_row.some(
+                      (r) => r.scorer_metadata && Object.keys(r.scorer_metadata).length > 0,
+                    )
+                    const showLegacyHint = hasAnyScores && !hasAnyTraces
+                    const clusterRowIds: Set<string> | null = clusterFilter
+                      ? new Set(
+                          (activeRun.clusters || [])
+                            .find((c) => c.label === clusterFilter)
+                            ?.row_ids ?? [],
+                        )
+                      : null
+                    const filteredRows = scorerFilter
+                      ? activeRun.per_row.filter((r) => {
+                          const s = r.scores[scorerFilter]
+                          return typeof s === 'number' && s < 0.8
+                        })
+                      : clusterRowIds
+                        ? activeRun.per_row.filter((r) => {
+                            const meta = (r.metadata || {}) as Record<string, unknown>
+                            const id = typeof meta.id === 'string' ? meta.id : null
+                            return id ? clusterRowIds.has(id) : false
+                          })
+                        : activeRun.per_row
+                    return (
+                      <div className="mt-2">
+                        <div className="flex items-center justify-between mb-2 gap-3">
+                          <button
+                            type="button"
+                            onClick={() => setPerRowOpen((v) => !v)}
+                            className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground uppercase tracking-wide hover:text-foreground"
+                            aria-expanded={perRowOpen}
+                          >
+                            {perRowOpen ? (
+                              <ChevronUp className="w-3 h-3" />
+                            ) : (
+                              <ChevronDown className="w-3 h-3" />
+                            )}
+                            Per-row results (
+                            {scorerFilter || clusterFilter
+                              ? `${filteredRows.length} of ${activeRun.per_row.length}`
+                              : activeRun.per_row.length}
+                            )
+                          </button>
+                          {(scorerFilter || clusterFilter) && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setScorerFilter(null)
+                                setClusterFilter(null)
+                              }}
+                              className="inline-flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-accent hover:text-foreground"
+                              title={`Stop filtering by "${scorerFilter || clusterFilter}"`}
+                            >
+                              <X className="w-3 h-3" />
+                              Reset filter
+                            </button>
+                          )}
+                        </div>
+                        {perRowOpen && showLegacyHint && (
+                          <p className="text-[11px] text-muted-foreground italic mb-2">
+                            This run was completed before per-scorer judge reasoning was
+                            captured. Run a fresh eval to make score chips clickable —
+                            they'll then expand to show the judge's reasoning.
+                          </p>
+                        )}
+                        {perRowOpen && (
+                          <ul className="space-y-3 mt-2">
+                            {filteredRows.length === 0 ? (
+                              <li className="text-xs text-muted-foreground italic px-2 py-3">
+                                No rows match the current filter.
+                              </li>
+                            ) : (
+                              filteredRows.map((row, i) => {
+                                const metadata = (row.metadata || {}) as Record<string, unknown>
+                                const inputStr =
+                                  typeof row.input === 'object' && row.input !== null
+                                    ? ((row.input as Record<string, unknown>).input as string) || JSON.stringify(row.input)
+                                    : String(row.input ?? '')
+                                const outputStr = typeof row.output === 'string' ? row.output : JSON.stringify(row.output, null, 2)
+                                const expectedStr = typeof row.expected === 'string' ? row.expected : JSON.stringify(row.expected, null, 2)
+                                const exampleId =
+                                  typeof metadata.id === 'string' ? metadata.id : null
+                                // Note: textarea is always rendered. When the
+                                // user has typed something different from the
+                                // persisted note, the draft entry exists and
+                                // Save/Cancel buttons appear.
+                                const persistedNote = row.note ?? ''
+                                const noteDraft =
+                                  exampleId && exampleId in noteDrafts
+                                    ? noteDrafts[exampleId]
+                                    : undefined
+                                const noteValue = noteDraft ?? persistedNote
+                                const isDirty =
+                                  noteDraft !== undefined && noteDraft !== persistedNote
+                                const isSaving = exampleId ? !!noteSaving[exampleId] : false
+                                const errMsg = exampleId ? noteError[exampleId] : undefined
+                                // Row label — synthesized examples carry "good"
+                                // (happy-path target) or "bad" (deliberate
+                                // failure probe). Surface it as a chip alongside
+                                // the score chips so the user can read each
+                                // row's context without scrolling to inspect
+                                // the dataset.
+                                const rawLabel = metadata.label
+                                const rowLabel =
+                                  typeof rawLabel === 'string' && rawLabel ? rawLabel : null
+                                const labelStyles =
+                                  rowLabel === 'good'
+                                    ? 'bg-success/15 text-success'
+                                    : rowLabel === 'bad'
+                                      ? 'bg-danger/15 text-danger'
+                                      : 'bg-muted/40 text-muted-foreground'
+                                const expandKeyPrefix = exampleId ?? `idx-${i}`
                                 return (
-                                  <details className="border border-border-hint p-2 bg-background">
-                                    <summary className="cursor-pointer text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
-                                      Agent trace · {calls.length} tool call{calls.length === 1 ? '' : 's'}
-                                      {errored > 0 && <span className="text-danger"> · {errored} errored</span>}
-                                      {artifacts.length > 0 && <span> · {artifacts.length} artifact{artifacts.length === 1 ? '' : 's'}</span>}
-                                      {agent.halted && <span className="text-warning"> · {agent.halted}</span>}
-                                    </summary>
-                                    <div className="mt-2 space-y-2">
-                                      {calls.length > 0 && (
-                                        <ol className="space-y-1.5">
-                                          {calls.map((c, ci) => (
-                                            <li key={ci} className="border-l-2 pl-2 border-border-hint">
-                                              <div className="flex items-center gap-2 text-[10px]">
-                                                <span className={`font-mono font-semibold ${c.is_error ? 'text-danger' : 'text-foreground'}`}>{c.name}</span>
-                                                <span className="text-muted-foreground">{c.duration_ms}ms</span>
+                                  <li
+                                    key={i}
+                                    data-row-id={exampleId ?? undefined}
+                                    className="border border-border p-3 bg-muted/10 text-xs space-y-2 transition-shadow"
+                                  >
+                                    <div className="flex flex-wrap gap-1 items-center">
+                                      {rowLabel && (
+                                        <span
+                                          className={`font-mono text-[10px] uppercase px-1.5 py-0.5 ${labelStyles}`}
+                                          title={
+                                            rowLabel === 'good'
+                                              ? 'Happy-path row — expected output is the good case'
+                                              : rowLabel === 'bad'
+                                                ? 'Failure-probe row — expected output is the bad case'
+                                                : 'Row label'
+                                          }
+                                        >
+                                          {rowLabel}
+                                        </span>
+                                      )}
+                                      {Object.entries(row.scores).map(([name, score]) => {
+                                        const trace = row.scorer_metadata?.[name]
+                                        const expandKey = `${expandKeyPrefix}:${name}`
+                                        const isExpanded = expandedScorers.has(expandKey)
+                                        const hasDetail = !!(trace?.judge_response || trace?.error || trace?.parse_warning)
+                                        return (
+                                          <button
+                                            type="button"
+                                            key={name}
+                                            onClick={() => {
+                                              if (!hasDetail) return
+                                              setExpandedScorers((prev) => {
+                                                const next = new Set(prev)
+                                                if (next.has(expandKey)) next.delete(expandKey)
+                                                else next.add(expandKey)
+                                                return next
+                                              })
+                                            }}
+                                            className={`font-mono px-1.5 py-0.5 bg-background ${scoreColor(score)} ${
+                                              scorerFilter === name ? 'ring-1 ring-accent' : ''
+                                            } ${
+                                              hasDetail
+                                                ? isExpanded
+                                                  ? 'ring-1 ring-foreground/30 cursor-pointer'
+                                                  : 'cursor-pointer hover:opacity-80'
+                                                : 'cursor-default opacity-80'
+                                            }`}
+                                            title={
+                                              hasDetail
+                                                ? isExpanded
+                                                  ? 'Click to collapse judge reasoning'
+                                                  : 'Click to see judge reasoning'
+                                                : 'No judge reasoning captured for this scorer'
+                                            }
+                                            disabled={!hasDetail}
+                                          >
+                                            {name}: {(score * 100).toFixed(0)}%
+                                          </button>
+                                        )
+                                      })}
+                                    </div>
+                                    {row.scorer_metadata && (() => {
+                                      const expanded = Object.entries(row.scorer_metadata).filter(
+                                        ([n]) => expandedScorers.has(`${expandKeyPrefix}:${n}`),
+                                      )
+                                      if (expanded.length === 0) return null
+                                      return (
+                                        <ul className="space-y-1.5 pt-1">
+                                          {expanded.map(([n, trace]) => (
+                                            <li
+                                              key={n}
+                                              className="border-l-2 border-border-hint pl-2 py-1 bg-background/50 text-[11px]"
+                                            >
+                                              <div className="font-mono text-muted-foreground">
+                                                {n}
+                                                {typeof trace.score === 'number' && (
+                                                  <span className={`ml-2 ${scoreColor(trace.score)}`}>
+                                                    {(trace.score * 100).toFixed(0)}%
+                                                  </span>
+                                                )}
                                               </div>
-                                              <pre className="whitespace-pre-wrap break-words text-[10px] text-muted-foreground mt-0.5">{JSON.stringify(c.input, null, 2)}</pre>
-                                              <pre className={`whitespace-pre-wrap break-words text-[10px] mt-0.5 ${c.is_error ? 'text-danger' : 'text-foreground'}`}>{c.result}</pre>
+                                              {trace.error && (
+                                                <div className="text-danger mt-0.5">
+                                                  Scorer error: {trace.error}
+                                                </div>
+                                              )}
+                                              {trace.parse_warning && (
+                                                <div className="text-warning mt-0.5">
+                                                  {trace.parse_warning}
+                                                </div>
+                                              )}
+                                              {trace.judge_response && (
+                                                <pre className="whitespace-pre-wrap break-words text-foreground mt-0.5 font-sans">
+                                                  {trace.judge_response}
+                                                </pre>
+                                              )}
                                             </li>
                                           ))}
-                                        </ol>
-                                      )}
-                                      {artifacts.length > 0 && (
-                                        <div>
-                                          <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">Artifacts</div>
-                                          <ul className="mt-1 space-y-1">
-                                            {artifacts.map((a) => (
-                                              <li key={a.sha256 + a.path} className="text-[10px]">
-                                                <div className="flex gap-2 items-center">
-                                                  <span className="font-mono text-foreground">{a.path}</span>
-                                                  <span className="text-muted-foreground">{a.size}B</span>
-                                                  {a.binary && <span className="text-muted-foreground">(binary)</span>}
-                                                </div>
-                                                {a.preview && (
-                                                  <pre className="whitespace-pre-wrap break-words text-muted-foreground mt-0.5 max-h-32 overflow-auto">{a.preview}</pre>
-                                                )}
-                                              </li>
-                                            ))}
-                                          </ul>
-                                        </div>
-                                      )}
+                                        </ul>
+                                      )
+                                    })()}
+                                    {row.error && (
+                                      <div className="text-danger">Error: {row.error}</div>
+                                    )}
+                                    <div>
+                                      <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">Input</span>
+                                      <pre className="whitespace-pre-wrap break-words text-foreground mt-0.5">{inputStr}</pre>
                                     </div>
-                                  </details>
+                                    <div>
+                                      <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">Output</span>
+                                      <pre className="whitespace-pre-wrap break-words text-foreground mt-0.5">{outputStr}</pre>
+                                    </div>
+                                    {expectedStr && (
+                                      <details>
+                                        <summary className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide cursor-pointer">
+                                          Expected
+                                        </summary>
+                                        <pre className="whitespace-pre-wrap break-words text-foreground mt-0.5">{expectedStr}</pre>
+                                      </details>
+                                    )}
+                                    {(metadata.feature_area as string) && (
+                                      <div className="text-[10px] text-muted-foreground">
+                                        feature_area: {metadata.feature_area as string}
+                                      </div>
+                                    )}
+                                    {(() => {
+                                      // Agent-mode trace: tool calls + materialized
+                                      // artifacts. Only present when the run was
+                                      // started with agent_mode=true.
+                                      const agent = metadata.agent as
+                                        | {
+                                            tool_calls?: Array<{ name: string; input: Record<string, unknown>; result: string; is_error: boolean; duration_ms: number }>
+                                            artifacts?: Array<{ path: string; size: number; sha256: string; preview: string | null; binary: boolean }>
+                                            iterations?: number
+                                            stop_reason?: string | null
+                                            halted?: string | null
+                                            workspace?: string | null
+                                          }
+                                        | undefined
+                                      if (!agent || (!agent.tool_calls?.length && !agent.artifacts?.length && agent.iterations == null)) {
+                                        return null
+                                      }
+                                      const calls = agent.tool_calls || []
+                                      const artifacts = agent.artifacts || []
+                                      const errored = calls.filter((c) => c.is_error).length
+                                      return (
+                                        <details className="border border-border-hint p-2 bg-background">
+                                          <summary className="cursor-pointer text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
+                                            Agent trace · {calls.length} tool call{calls.length === 1 ? '' : 's'}
+                                            {errored > 0 && <span className="text-danger"> · {errored} errored</span>}
+                                            {artifacts.length > 0 && <span> · {artifacts.length} artifact{artifacts.length === 1 ? '' : 's'}</span>}
+                                            {agent.halted && <span className="text-warning"> · {agent.halted}</span>}
+                                          </summary>
+                                          <div className="mt-2 space-y-2">
+                                            {calls.length > 0 && (
+                                              <ol className="space-y-1.5">
+                                                {calls.map((c, ci) => (
+                                                  <li key={ci} className="border-l-2 pl-2 border-border-hint">
+                                                    <div className="flex items-center gap-2 text-[10px]">
+                                                      <span className={`font-mono font-semibold ${c.is_error ? 'text-danger' : 'text-foreground'}`}>{c.name}</span>
+                                                      <span className="text-muted-foreground">{c.duration_ms}ms</span>
+                                                    </div>
+                                                    <pre className="whitespace-pre-wrap break-words text-[10px] text-muted-foreground mt-0.5">{JSON.stringify(c.input, null, 2)}</pre>
+                                                    <pre className={`whitespace-pre-wrap break-words text-[10px] mt-0.5 ${c.is_error ? 'text-danger' : 'text-foreground'}`}>{c.result}</pre>
+                                                  </li>
+                                                ))}
+                                              </ol>
+                                            )}
+                                            {artifacts.length > 0 && (
+                                              <div>
+                                                <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">Artifacts</div>
+                                                <ul className="mt-1 space-y-1">
+                                                  {artifacts.map((a) => (
+                                                    <li key={a.sha256 + a.path} className="text-[10px]">
+                                                      <div className="flex gap-2 items-center">
+                                                        <span className="font-mono text-foreground">{a.path}</span>
+                                                        <span className="text-muted-foreground">{a.size}B</span>
+                                                        {a.binary && <span className="text-muted-foreground">(binary)</span>}
+                                                      </div>
+                                                      {a.preview && (
+                                                        <pre className="whitespace-pre-wrap break-words text-muted-foreground mt-0.5 max-h-32 overflow-auto">{a.preview}</pre>
+                                                      )}
+                                                    </li>
+                                                  ))}
+                                                </ul>
+                                              </div>
+                                            )}
+                                          </div>
+                                        </details>
+                                      )
+                                    })()}
+                                    {exampleId ? (
+                                      <div>
+                                        <div className="flex items-center justify-between mb-0.5">
+                                          <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
+                                            Note
+                                          </span>
+                                          <span className="text-[10px] italic">
+                                            {errMsg ? (
+                                              <span className="text-danger not-italic">
+                                                {errMsg}
+                                              </span>
+                                            ) : isSaving ? (
+                                              <span className="text-muted-foreground">Saving…</span>
+                                            ) : isDirty ? (
+                                              <span className="text-muted-foreground">
+                                                Unsaved changes
+                                              </span>
+                                            ) : persistedNote ? (
+                                              <span className="text-muted-foreground">Saved</span>
+                                            ) : null}
+                                          </span>
+                                        </div>
+                                        <div className="space-y-1.5">
+                                          <textarea
+                                            value={noteValue}
+                                            onChange={(e) =>
+                                              updateNoteDraft(exampleId, e.target.value)
+                                            }
+                                            placeholder="What went wrong? (e.g. over-triggers on greeting)"
+                                            rows={2}
+                                            className="w-full bg-background border border-border px-2 py-1 text-xs font-sans text-foreground focus:outline-none focus:border-accent resize-y"
+                                          />
+                                          {/* Buttons only appear when there
+                                              are unsaved changes — keeps the
+                                              row visually quiet at rest while
+                                              still letting the user commit
+                                              the edit when they're ready. */}
+                                          {isDirty && (
+                                            <div className="flex items-center justify-end gap-1.5">
+                                              <button
+                                                type="button"
+                                                onClick={() => cancelNoteEdit(exampleId)}
+                                                disabled={isSaving}
+                                                className="px-2 py-0.5 text-[11px] font-medium border border-border-hint bg-surface hover:bg-fill-neutral/30 text-foreground disabled:opacity-50"
+                                              >
+                                                Cancel
+                                              </button>
+                                              <button
+                                                type="button"
+                                                onClick={() => saveNote(exampleId)}
+                                                disabled={isSaving}
+                                                className="px-2 py-0.5 text-[11px] font-medium bg-fill-primary text-bg-default hover:opacity-90 disabled:bg-fill-neutral disabled:text-fg-dim disabled:cursor-not-allowed"
+                                              >
+                                                Save
+                                              </button>
+                                            </div>
+                                          )}
+                                        </div>
+                                      </div>
+                                    ) : null}
+                                  </li>
                                 )
-                              })()}
-                            </li>
-                          )
-                        })}
-                      </ul>
-                    </details>
-                  )}
+                              })
+                            )}
+                          </ul>
+                        )}
+                      </div>
+                    )
+                  })()}
                 </>
               )}
                      </section>

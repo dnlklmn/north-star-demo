@@ -1271,15 +1271,41 @@ async def call_suggest_improvements(
     skill_body: str,
     eval_run: dict,
     charter: dict,
+    clusters: list[dict] | None = None,
 ) -> tuple[dict, list[dict]]:
     """Analyze eval failures + current SKILL.md, propose targeted edits.
+
+    When `clusters` is provided (the output of call_cluster_notes), the
+    prompt structures failing rows by failure-mode bucket and each
+    suggestion gets a `target_label` pointing back at the cluster it
+    addresses. When omitted, behaves exactly as before.
 
     Returns dict with keys: summary, suggestions (list).
     """
     from .prompt import build_suggest_improvements_prompt
     await _refresh_settings()
-    prompt = build_suggest_improvements_prompt(skill_body, eval_run, charter)
+    prompt = build_suggest_improvements_prompt(skill_body, eval_run, charter, clusters)
     text, meta = _call_llm(prompt, max_tokens=4096)
+    data = _extract_json(text)
+    return data, [meta]
+
+
+@traced("cluster_notes")
+async def call_cluster_notes(
+    notes: list[dict],
+    prior_labels: list[str] | None = None,
+) -> tuple[dict, list[dict]]:
+    """Cluster free-text per-row notes into named failure-mode buckets.
+
+    Caller is expected to log the resulting turn (input notes + output
+    clusters) so a later run can reproduce or audit how a label was chosen.
+
+    Returns dict with key `clusters`: list of {label, count, row_ids}.
+    """
+    from .prompt import build_cluster_notes_prompt
+    await _refresh_settings()
+    prompt = build_cluster_notes_prompt(notes, prior_labels)
+    text, meta = _call_llm(prompt, max_tokens=2048)
     data = _extract_json(text)
     return data, [meta]
 

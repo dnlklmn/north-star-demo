@@ -526,6 +526,16 @@ class EvalRunSummary(BaseModel):
     # analyzed; empty list = analyzed + no patterns found.
     improvement_suggestions: Optional[list[dict]] = None
     improvement_summary: Optional[str] = None
+    # Last time any per-row note was edited on this run. Compared against
+    # clusters_generated_at to decide whether to show the "notes changed
+    # since last analysis — re-analyze" pill. NULL until the first note
+    # is saved.
+    notes_updated_at: Optional[datetime] = None
+    # Cached output of the cluster-notes step, populated by the analyze
+    # endpoint. Each entry: {label, count, row_ids}. NULL until the first
+    # analyze run that had any notes to cluster.
+    clusters: Optional[list[dict]] = None
+    clusters_generated_at: Optional[datetime] = None
 
 
 # --- Skill versioning (Path A: iterate on SKILL.md from eval failures) ---
@@ -553,6 +563,23 @@ class ImprovementSuggestion(BaseModel):
     source_row_ids: list[str] = Field(default_factory=list)  # which dataset rows surfaced this
     source_scorer_names: list[str] = Field(default_factory=list)
     confidence: str = "medium"  # "low" | "medium" | "high"
+    # Which failure-mode cluster (label) this suggestion targets, when the
+    # analyze step had user-written notes to cluster on. Empty / None when
+    # the analysis ran without clusters (no notes) or the model couldn't
+    # tie this suggestion to a single bucket. Lets the UI group fixes by
+    # cluster: "Fixes for over_triggers_on_greeting (3)".
+    target_label: Optional[str] = None
+
+
+class SetEvalRunRowNoteRequest(BaseModel):
+    """Body for PATCH .../eval-runs/{run_id}/rows/{example_id}/note.
+
+    An empty string clears the note. We don't enforce a max length here —
+    notes are short by nature (failure-mode tags, single-sentence
+    observations), and capping would just frustrate the rare user with a
+    longer thought. If we ever see abuse, add a sane limit at this layer.
+    """
+    note: str
 
 
 class SuggestImprovementsRequest(BaseModel):
@@ -564,6 +591,13 @@ class SuggestImprovementsResponse(BaseModel):
     summary: str  # one-paragraph overview of patterns found
     run_id: str
     skill_version_id: Optional[str] = None  # which version these were generated against
+    # Failure-mode clusters used as input to this analysis, if the run had
+    # any notes. Empty/None when the analysis ran on raw failed rows. Mirrors
+    # what's now persisted on the eval_run so the client can show "23
+    # failures: over_triggers_on_greeting" right next to the suggestions
+    # without a second fetch.
+    clusters: Optional[list[dict]] = None
+    clusters_generated_at: Optional[datetime] = None
 
 
 class CreateSkillVersionRequest(BaseModel):

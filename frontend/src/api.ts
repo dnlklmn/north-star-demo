@@ -638,6 +638,28 @@ export async function cancelEvalRun(
   return res.json()
 }
 
+/** Save (or clear) a per-row note on an eval run. exampleId is the dataset
+ *  row identifier from per_row[i].metadata.id — stable across runs and
+ *  resorts so the route stays valid even if per_row is later reordered.
+ *  Pass an empty string to clear the note. */
+export async function setEvalRunRowNote(
+  sessionId: string,
+  runId: string,
+  exampleId: string,
+  note: string,
+): Promise<EvalRunSummary> {
+  const res = await apiFetch(
+    `${BASE}/sessions/${sessionId}/eval-runs/${runId}/rows/${encodeURIComponent(exampleId)}/note`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note }),
+    },
+  )
+  if (!res.ok) throw new Error(`Failed to save note: ${res.status}`)
+  return res.json()
+}
+
 export async function promoteSkillVersion(
   sessionId: string,
   versionId: string,

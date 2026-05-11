@@ -37,8 +37,21 @@ backend/app/           FastAPI app
 ```bash
 cd backend
 source .venv/bin/activate
-uvicorn app.main:app --port 5000 --reload
+uvicorn app.main:app --port 5000 --reload \
+  --reload-exclude 'app/scorers/generated/*' \
+  --reload-exclude 'app/scorers/generated/*/*' \
+  --reload-exclude 'app/scorers/generated/*/*/*'
 ```
+
+The `--reload-exclude` globs are required. Scorer generation writes
+Python files into `app/scorers/generated/skill__<id>/`, which causes
+uvicorn to restart mid-request whenever new scorers land — long-running
+flows (dataset synthesis, eval runs) then fail because the POST lands
+on a backend that's shutting down. Three patterns are listed because
+uvicorn's exclude uses `pathlib.PurePath.match` where `*` doesn't cross
+`/` boundaries, so a single `app/scorers/generated/*` only catches
+direct children, not the nested `skill__<id>/<file>.py` writes that
+actually trigger the reload.
 
 ### Frontend
 ```bash
