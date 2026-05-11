@@ -27,7 +27,7 @@ import uuid
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from pathlib import Path
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import Body, Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -63,9 +63,13 @@ from .models import (
     FetchSkillFromUrlRequest,
     FetchSkillFromUrlResponse,
     GithubSource,
+    ListSkillReferencesResponse,
     PatchCharterRequest,
     ProceedResponse,
     ProjectSummary,
+    PromoteSkillVersionRequest,
+    REFERENCE_FILENAMES,
+    REFERENCE_KINDS,
     PromptTargetInfo,
     CreatePromptEvalRequest,
     CreatePromptEvalResponse,
@@ -80,6 +84,7 @@ from .models import (
     SetModeRequest,
     ShareTokenSummary,
     Settings,
+    SkillReferenceSummary,
     SkillSeedRequest,
     SkillSeedResponse,
     SkillVersion,
@@ -104,6 +109,7 @@ from .models import (
     ValidateResponse,
 )
 from .prompt_eval import get_prompt_target, list_prompt_targets
+from .references import generate_reference, make_reference_record
 from .tools import (
     LLMAuthError,
     LLMBillingError,
@@ -3405,10 +3411,167 @@ async def create_skill_version(
     return SkillVersion(**record)
 
 
+async def _gather_reference_inputs(state: SessionState) -> tuple[list[dict], list[dict], dict]:
+    """Pull the source slices for reference generation.
+
+    Examples come from the session's latest dataset (label='good'); stories
+    and charter live on state. Returns empty/zero values when the dataset
+    hasn't been created yet — generators handle the empty case gracefully.
+    """
+    examples: list[dict] = []
+    try:
+        dataset = await db.get_dataset_by_session(state.session_id)
+        if dataset:
+            examples = await db.get_examples(dataset["id"], label="good")
+    except Exception:  # pragma: no cover — DB layer surface
+        # Don't let a dataset-fetch hiccup block a promote. Worst case: an
+        # empty examples.md gets stamped, regeneratable from the panel.
+        logger.exception("reference-inputs: failed to fetch dataset examples")
+        examples = []
+    return examples, list(state.extracted_stories or []), state.charter.model_dump()
+
+
+def _build_one_reference(
+    kind: str,
+    examples: list[dict],
+    stories: list[dict],
+    charter_dump: dict,
+) -> tuple[str, str]:
+    if kind == "examples":
+        return generate_reference("examples", examples=examples)
+    if kind == "off_target":
+        return generate_reference("off_target", stories=stories)
+    return generate_reference("criteria", charter=charter_dump)
+
+
+def _upsert_reference(
+    state: SessionState,
+    kind: str,
+    body: str,
+    signature: str,
+    skill_version_id: str | None,
+    *,
+    force: bool = False,
+) -> bool:
+    """Insert or replace the reference for `kind`. Returns True if state was
+    touched (the caller should persist), False when skipped-as-unchanged.
+
+    Skip-if-unchanged: when `force=False` and an existing record has the same
+    `source_signature`, we leave it alone — including its
+    `generated_at_skill_version_id`. That keeps the lineage stamp pinned to
+    when the *content* last changed, not every promote click."""
+    existing_idx = next(
+        (i for i, r in enumerate(state.skill_references) if r.get("kind") == kind),
+        None,
+    )
+    if (
+        not force
+        and existing_idx is not None
+        and state.skill_references[existing_idx].get("source_signature") == signature
+    ):
+        return False
+    record = make_reference_record(kind, body, signature, skill_version_id)
+    if existing_idx is None:
+        state.skill_references.append(record)
+    else:
+        state.skill_references[existing_idx] = record
+    return True
+
+
+async def _refresh_all_references(
+    state: SessionState,
+    *,
+    skill_version_id: str | None,
+    force: bool = False,
+) -> list[str]:
+    """Regenerate every reference kind. Returns the list of kinds that
+    actually changed. Generation errors per-kind are swallowed and logged
+    so one bad kind can't block the others (or the calling promote)."""
+    examples, stories, charter_dump = await _gather_reference_inputs(state)
+    touched: list[str] = []
+    for kind in REFERENCE_KINDS:
+        try:
+            body, signature = _build_one_reference(kind, examples, stories, charter_dump)
+        except Exception:  # pragma: no cover — defensive
+            logger.exception("reference-gen: failed for kind=%s", kind)
+            continue
+        if _upsert_reference(state, kind, body, signature, skill_version_id, force=force):
+            touched.append(kind)
+    return touched
+
+
+def _skill_version_number(state: SessionState, version_id: str | None) -> int | None:
+    if not version_id:
+        return None
+    for v in state.skill_versions:
+        if v.get("id") == version_id:
+            return v.get("version")
+    return None
+
+
+async def _summarize_references(state: SessionState) -> list[SkillReferenceSummary]:
+    """List references with derived staleness. Recomputes the current input
+    signature per-kind so the UI can show 'inputs moved' independently from
+    'skill version moved'."""
+    from datetime import datetime, timezone
+    examples, stories, charter_dump = await _gather_reference_inputs(state)
+    out: list[SkillReferenceSummary] = []
+    for kind in REFERENCE_KINDS:
+        existing = next(
+            (r for r in state.skill_references if r.get("kind") == kind),
+            None,
+        )
+        try:
+            _, current_sig = _build_one_reference(kind, examples, stories, charter_dump)
+        except Exception:  # pragma: no cover
+            logger.exception("reference-sig: failed for kind=%s", kind)
+            current_sig = None
+        if existing is None:
+            # Not yet generated — surface a placeholder so the UI can show a
+            # "Generate" affordance instead of pretending nothing exists.
+            out.append(SkillReferenceSummary(
+                kind=kind,
+                filename=REFERENCE_FILENAMES[kind],
+                body="",
+                generated_at_skill_version_id=None,
+                generated_at_skill_version_number=None,
+                source_signature="",
+                updated_at=datetime.now(timezone.utc),
+                is_stale=True,
+                stale_reason="missing",
+            ))
+            continue
+        source_id = existing.get("generated_at_skill_version_id")
+        is_stale = False
+        reason: str | None = None
+        # Staleness is purely input-signature drift. The lineage stamp
+        # (generated_at_skill_version_id) gets pinned to the version when
+        # the *content* last changed, not every promote — so comparing it
+        # against the active version would false-flag every skip-if-
+        # unchanged record. Per future.md "skip silently rather than
+        # churning identical files".
+        if current_sig is not None and existing.get("source_signature") != current_sig:
+            is_stale = True
+            reason = "inputs"
+        out.append(SkillReferenceSummary(
+            kind=kind,
+            filename=existing.get("filename") or REFERENCE_FILENAMES[kind],
+            body=existing.get("body") or "",
+            generated_at_skill_version_id=source_id,
+            generated_at_skill_version_number=_skill_version_number(state, source_id),
+            source_signature=existing.get("source_signature") or "",
+            updated_at=existing.get("updated_at") or datetime.now(timezone.utc),
+            is_stale=is_stale,
+            stale_reason=reason,
+        ))
+    return out
+
+
 @app.post("/sessions/{session_id}/skill-versions/{version_id}/promote", response_model=SkillVersion)
 async def promote_skill_version(
     session_id: str,
     version_id: str,
+    req: PromoteSkillVersionRequest | None = Body(default=None),
     access: Access = Depends(resolve_access),
 ):
     """Promote a candidate version to active.
@@ -3418,7 +3581,12 @@ async def promote_skill_version(
     an arbitrary historical version to active, silently orphaning the real
     candidate (its pointer would clear on promote even though the user never
     confirmed it). To restore an older non-candidate version, use
-    /skill-versions/restore — that's the dedicated affordance."""
+    /skill-versions/restore — that's the dedicated affordance.
+
+    Optional body: ``{"refresh_references": bool}``. When omitted or true,
+    bundled reference files (examples.md, off-target.md, criteria.md) are
+    regenerated against the newly active skill version. Per-file skip-if-
+    unchanged keeps identical content from churning the lineage stamp."""
     require_writer(access)
     state, conversation = await _load_state(session_id)
     if state.candidate_skill_version_id != version_id:
@@ -3434,8 +3602,67 @@ async def promote_skill_version(
     state.active_skill_version_id = version_id
     state.candidate_skill_version_id = None
     state.charter.task.skill_body = target["body"]
+
+    refresh = True if req is None else req.refresh_references
+    if refresh:
+        try:
+            await _refresh_all_references(state, skill_version_id=version_id)
+        except Exception:  # pragma: no cover — defensive
+            # Reference generation must never block a promote. A failed
+            # refresh shows up as stale in the panel, which the user can
+            # retry from the per-file regenerate button.
+            logger.exception("promote: reference refresh failed")
+
     await _save_state(session_id, state, conversation)
     return SkillVersion(**target)
+
+
+@app.get("/sessions/{session_id}/skill-references", response_model=ListSkillReferencesResponse)
+async def list_skill_references(
+    session_id: str,
+    access: Access = Depends(resolve_access),
+):
+    """List bundled reference files for this session with per-file staleness.
+
+    Read-only — viewers can fetch these alongside the skill body."""
+    state, _ = await _load_state(session_id)
+    refs = await _summarize_references(state)
+    return ListSkillReferencesResponse(references=refs)
+
+
+@app.post("/sessions/{session_id}/skill-references/{kind}/regenerate", response_model=SkillReferenceSummary)
+async def regenerate_skill_reference(
+    session_id: str,
+    kind: str,
+    access: Access = Depends(resolve_access),
+):
+    """Force-regenerate one reference file from current state. Use the
+    per-kind regenerate button in the Skill panel when inputs have moved
+    since the last activation and the user wants the file refreshed without
+    cutting a new skill version."""
+    require_writer(access)
+    if kind not in REFERENCE_KINDS:
+        raise HTTPException(status_code=404, detail=f"Unknown reference kind: {kind}")
+    state, conversation = await _load_state(session_id)
+    examples, stories, charter_dump = await _gather_reference_inputs(state)
+    try:
+        body, signature = _build_one_reference(kind, examples, stories, charter_dump)
+    except Exception as exc:  # pragma: no cover — generator surface
+        raise HTTPException(status_code=500, detail=f"Failed to generate {kind}: {exc}")
+    _upsert_reference(
+        state,
+        kind,
+        body,
+        signature,
+        state.active_skill_version_id,
+        force=True,
+    )
+    await _save_state(session_id, state, conversation)
+    refs = await _summarize_references(state)
+    out = next((r for r in refs if r.kind == kind), None)
+    if out is None:  # pragma: no cover — defensive
+        raise HTTPException(status_code=500, detail="Reference disappeared after write")
+    return out
 
 
 @app.post("/sessions/{session_id}/skill-versions/{version_id}/discard", response_model=SkillVersion)

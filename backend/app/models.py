@@ -188,6 +188,10 @@ class SessionState(BaseModel):
     # "dataset" | "scorers". UI shows a "Regenerate" affordance on tabs where
     # the lineage id is older than active_skill_version_id.
     generated_at_skill_version: dict[str, str] = Field(default_factory=dict)
+    # Bundled reference files that ship alongside SKILL.md (progressive
+    # disclosure). Each entry is a SkillReference dict; staleness is computed
+    # per-file by comparing source_signature against the current input hash.
+    skill_references: list[dict] = Field(default_factory=list)
 
 
 # --- API request/response models ---
@@ -575,6 +579,68 @@ class CreateSkillVersionRequest(BaseModel):
 
 class RestoreSkillVersionRequest(BaseModel):
     version_id: str  # the SkillVersion.id to restore as active
+
+
+class PromoteSkillVersionRequest(BaseModel):
+    """Optional body for promote. Empty body is allowed for backward compat
+    (the endpoint also accepts no body at all).
+
+    refresh_references: when true (default), regenerate the bundled reference
+    files (examples.md, off-target.md, criteria.md) against the newly active
+    skill version. Skipped silently per-file when the source inputs haven't
+    moved since last generation.
+    """
+    refresh_references: bool = True
+
+
+# --- Bundled reference files (progressive-disclosure skill bundle) -------
+
+# Stable kinds. These map 1:1 to filenames on disk in the exported bundle.
+REFERENCE_KINDS = ("examples", "off_target", "criteria")
+REFERENCE_FILENAMES: dict[str, str] = {
+    "examples": "examples.md",
+    "off_target": "off-target.md",
+    "criteria": "criteria.md",
+}
+
+
+class SkillReference(BaseModel):
+    """One bundled reference file. Body is markdown the skill author can
+    inspect or ship alongside SKILL.md.
+
+    source_signature is a sha256 over the normalized inputs used to build
+    this file. The UI compares it against the current signature to decide
+    whether the reference is stale and offer a regenerate button — without
+    crying wolf on every relabel of an unrelated dataset row.
+    """
+    kind: str  # one of REFERENCE_KINDS
+    filename: str
+    body: str
+    generated_at_skill_version_id: Optional[str] = None
+    source_signature: str
+    updated_at: datetime
+
+
+class SkillReferenceSummary(BaseModel):
+    """List-view shape for the Skill panel. Identical to SkillReference plus
+    derived `is_stale` and the version *number* (not id) for a tidier UI
+    string ("built from v3, current is v5")."""
+    kind: str
+    filename: str
+    body: str
+    generated_at_skill_version_id: Optional[str] = None
+    generated_at_skill_version_number: Optional[int] = None
+    source_signature: str
+    updated_at: datetime
+    is_stale: bool
+    # Why this file would be regenerated right now. "version" = active skill
+    # version moved past this ref's; "inputs" = source data (dataset/stories/
+    # charter) changed; null = in sync.
+    stale_reason: Optional[str] = None
+
+
+class ListSkillReferencesResponse(BaseModel):
+    references: list[SkillReferenceSummary] = Field(default_factory=list)
 
 
 class Settings(BaseModel):

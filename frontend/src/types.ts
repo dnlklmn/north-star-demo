@@ -131,6 +131,8 @@ export interface SessionState {
   generated_at_skill_version?: Record<string, string>
   /** Full version history. Mirrors backend skill_versions. */
   skill_versions?: SkillVersion[]
+  /** Bundled reference files generated alongside SKILL.md. */
+  skill_references?: SkillReference[]
   /** Top-level discriminator: skill (default) or prompt (eval one of NS's own prompts). */
   kind?: SessionKind
   /** When kind=prompt: which prompt builder this project evaluates (e.g. "generate"). */
@@ -386,6 +388,41 @@ export interface SkillVersion {
   created_from: SkillVersionSource
   applied_suggestion_ids: string[]
   created_at: string | null
+}
+
+/** Stable kinds for the three bundled reference files that ship alongside
+ *  SKILL.md. Maps 1:1 to filenames on disk (examples.md / off-target.md /
+ *  criteria.md). Keep in sync with backend `REFERENCE_KINDS`. */
+export type SkillReferenceKind = 'examples' | 'off_target' | 'criteria'
+
+/** Why a reference would regenerate right now. `inputs` = the underlying
+ *  dataset / stories / charter has changed since this file was generated;
+ *  `missing` = the file hasn't been generated yet. We deliberately don't
+ *  flag staleness on skill-version drift alone — references are derived
+ *  from data, not from SKILL.md, so a new skill version with identical
+ *  source data shouldn't churn the banners. */
+export type SkillReferenceStaleReason = 'inputs' | 'missing'
+
+/** One bundled reference file as stored on the session. Body is the
+ *  rendered markdown; source_signature drives skip-if-unchanged + the
+ *  per-file staleness banner. */
+export interface SkillReference {
+  kind: SkillReferenceKind
+  filename: string
+  body: string
+  generated_at_skill_version_id: string | null
+  source_signature: string
+  updated_at: string
+}
+
+/** List-view shape from GET /skill-references — adds derived fields the
+ *  Skill panel renders (is_stale, the version number for a tidy label,
+ *  and stale_reason so the UI can distinguish 'inputs moved' from
+ *  'skill version moved' without crying wolf). */
+export interface SkillReferenceSummary extends SkillReference {
+  generated_at_skill_version_number: number | null
+  is_stale: boolean
+  stale_reason: SkillReferenceStaleReason | null
 }
 
 export type ImprovementKind = 'add_rule' | 'clarify_rule' | 'add_example' | 'reword' | 'other'
