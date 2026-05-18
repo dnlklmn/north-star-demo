@@ -3193,6 +3193,19 @@ export default function ProjectWorkspace() {
                     agreement={judgeAgreement}
                     charterSnapshot={dataset.charter_snapshot}
                     onRequestFillGaps={handleRequestFillGaps}
+                    onAddAlignmentCriteria={() => {
+                      // Switch to the charter tab and fire a focus signal
+                      // so the alignment section is the user's landing
+                      // spot. CharterPanel can listen for this to scroll +
+                      // surface suggestions; for now the event is best-
+                      // effort — navigation alone is the guaranteed win.
+                      setActiveTab("charter");
+                      window.setTimeout(() => {
+                        window.dispatchEvent(
+                          new CustomEvent("northstar:focus-alignment"),
+                        );
+                      }, 120);
+                    }}
                     onNavigateToScorers={() => setActiveTab("scorers")}
                     onHeaderClick={() => {}}
                     isFocused={true}

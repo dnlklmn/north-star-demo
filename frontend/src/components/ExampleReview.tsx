@@ -6,20 +6,20 @@ import GenerateModal from './examples/GenerateModal'
 import CharterSidebar from './CharterSidebar'
 import JudgeAgreementBadge from './JudgeAgreementBadge'
 
-type CellId = 'scenario' | 'input' | 'output' | 'labels' | 'status'
+type CellId = 'input' | 'output' | 'labels' | 'status'
 type ActionId = 'approve' | 'reject' | 'relabel' | 'edit' | 'delete'
 
-const CELL_ORDER: CellId[] = ['scenario', 'input', 'output', 'labels', 'status']
+const CELL_ORDER: CellId[] = ['input', 'output', 'labels', 'status']
 
 // What action set is contextually relevant when each cell is focused.
-// Status owns approve/reject, labels owns relabel, input/output own edit,
-// scenario owns delete (the row-level destructive action).
+// Status owns approve/reject + delete (the row-level destructive action,
+// homeless now that the scenario cell was retired — coverage_tags live in
+// the sidebar). Labels owns relabel, input/output own edit.
 const ACTIONS_BY_CELL: Record<CellId, ActionId[]> = {
-  scenario: ['delete'],
   input: ['edit'],
   output: ['edit'],
   labels: ['relabel'],
-  status: ['approve', 'reject'],
+  status: ['approve', 'reject', 'delete'],
 }
 
 interface ExampleReviewProps {
@@ -63,6 +63,10 @@ interface ExampleReviewProps {
   /** Bulk "fix every empty cell" — surfaced from the sidebar's compact
    *  coverage summary. The matrix's per-cell "+" buttons live in the modal. */
   onRequestFillGaps?: () => void
+  /** Navigate to the Charter tab's alignment section. Surfaced by the
+   *  sidebar's "Add alignment criteria" CTA when the focused row's
+   *  feature_area has no matching alignment entry. */
+  onAddAlignmentCriteria?: () => void
   onNavigateToScorers?: () => void
   onHeaderClick?: () => void
   isFocused?: boolean
@@ -118,6 +122,7 @@ export default function ExampleReview({
   gaps,
   agreement,
   onRequestFillGaps,
+  onAddAlignmentCriteria,
   onNavigateToScorers: _onNavigateToScorers,
   onHeaderClick: _onHeaderClick,
   isFocused,
@@ -166,6 +171,14 @@ export default function ExampleReview({
   // sidebar's charter criteria track what the eye is on, without
   // hijacking the click-selected row. Falls back to selectedId.
   const [scrollFocusedId, setScrollFocusedId] = useState<string | null>(null)
+  // Which input last changed the focused row. Click wins over scroll: once
+  // the user has explicitly clicked a row, scrolling away doesn't move the
+  // sidebar off it. A subsequent click flips this back to 'click'; an
+  // IntersectionObserver tick flips it to 'scroll' only when the user
+  // hasn't clicked since.
+  const [lastFocusSource, setLastFocusSource] = useState<'click' | 'scroll'>(
+    'scroll',
+  )
   const listScrollRef = useRef<HTMLDivElement | null>(null)
   const [focusedCell, setFocusedCell] = useState<CellId>('status')
 
@@ -324,14 +337,14 @@ export default function ExampleReview({
 
   const selectedIndex = orderedExamples.findIndex(e => e.id === selectedId)
   const selectedExample = orderedExamples.find(e => e.id === selectedId)
-  // Sidebar's focused row: the topmost row currently visible. Falls back to
-  // the click-selected row so the sidebar is never empty when scroll hasn't
-  // happened yet (e.g. fresh mount, short lists).
-  const focusedExample = useMemo(
-    () =>
-      orderedExamples.find(e => e.id === scrollFocusedId) ?? selectedExample,
-    [orderedExamples, scrollFocusedId, selectedExample],
-  )
+  // Sidebar's focused row: click wins. After an explicit click, the sidebar
+  // pins to the selected row and stays there even as the user scrolls
+  // through nearby rows. A subsequent click on a different row moves the
+  // pin; scroll alone never overrides a pin.
+  const focusedExample = useMemo(() => {
+    if (lastFocusSource === 'click') return selectedExample
+    return orderedExamples.find(e => e.id === scrollFocusedId) ?? selectedExample
+  }, [lastFocusSource, orderedExamples, scrollFocusedId, selectedExample])
 
   // Watch which rows are intersecting the list viewport; the topmost
   // intersecting one becomes the sidebar's focused row. Re-bound whenever
@@ -806,10 +819,14 @@ export default function ExampleReview({
                         isSelected={selectedId === ex.id}
                         editingCell={editing?.id === ex.id ? editing.cell : null}
                         focusedCell={focusedCell}
-                        onSelect={() => setSelectedId(ex.id)}
+                        onSelect={() => {
+                          setSelectedId(ex.id)
+                          setLastFocusSource('click')
+                        }}
                         onCellSelect={cell => {
                           setSelectedId(ex.id)
                           setFocusedCell(cell)
+                          setLastFocusSource('click')
                         }}
                         onUpdate={fields => onUpdateExample(ex.id, fields)}
                         onCancelEdit={() => setEditing(null)}
@@ -834,6 +851,7 @@ export default function ExampleReview({
         gaps={gaps}
         onOpenCoverageMatrix={onShowCoverageMap}
         onRequestFillGaps={onRequestFillGaps}
+        onAddAlignmentCriteria={onAddAlignmentCriteria}
       />
       </div>
 
@@ -935,7 +953,6 @@ function ActionButton({
 function ColumnHeaderRow() {
   return (
     <div className="flex items-end gap-4 px-4 py-2 text-sm text-fg-contrast">
-      <div className="flex-1 basis-0">Scenario</div>
       <div className="flex-1 basis-0">Input</div>
       <div className="flex-1 basis-0">Output</div>
       <div className="w-[200px] flex-shrink-0">Labels</div>
@@ -1034,15 +1051,6 @@ function ExampleRow({
   const hasIssues = example.judge_verdict?.issues && example.judge_verdict.issues.length > 0
   const hasRevision = !!example.revision_suggestion
 
-  // Scenario column: chip per coverage_tag so reviewers see every criterion
-  // the row covers. Fall back to feature_area when no tags are present —
-  // that's mostly orphaned rows; the group header already shows the area.
-  const scenarioTags = example.coverage_tags.length > 0
-    ? example.coverage_tags
-    : example.feature_area
-      ? [example.feature_area]
-      : []
-
   return (
     <>
       <div
@@ -1056,29 +1064,6 @@ function ExampleRow({
             : 'bg-gray-150 hover:bg-fill-neutral-hover',
         ].join(' ')}
       >
-        {/* Scenario — coverage_tags rendered as chips so all tagged
-            criteria are visible, not just the first. Fallback to
-            feature_area only when tags are empty (orphaned rows). */}
-        <div
-          onClick={e => { e.stopPropagation(); onCellSelect('scenario') }}
-          className={`flex-1 basis-0 self-stretch p-px overflow-hidden ${cellCls('scenario')}`}
-        >
-          <div className="h-full p-2 flex flex-wrap gap-1 content-start overflow-y-auto">
-            {scenarioTags.length === 0 ? (
-              <span className="text-xs text-fg-dim italic">untagged</span>
-            ) : (
-              scenarioTags.map(tag => (
-                <span
-                  key={tag}
-                  className="inline-flex items-center px-1.5 py-0.5 text-[11px] leading-tight bg-fill-neutral text-fg-contrast border border-border-hint"
-                >
-                  {tag}
-                </span>
-              ))
-            )}
-          </div>
-        </div>
-
         {/* Input */}
         <div
           onClick={e => { e.stopPropagation(); onCellSelect('input') }}

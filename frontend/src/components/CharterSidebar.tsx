@@ -19,6 +19,10 @@ interface CharterSidebarProps {
   gaps?: GapAnalysis | null
   onOpenCoverageMatrix?: () => void
   onRequestFillGaps?: () => void
+  /** Navigate to the Charter tab's alignment section so the user can add or
+   *  edit alignment entries. Called from the "Add alignment criteria" CTA
+   *  in the no-match branch of the charter criteria block. */
+  onAddAlignmentCriteria?: () => void
 }
 
 export default function CharterSidebar({
@@ -29,6 +33,7 @@ export default function CharterSidebar({
   gaps,
   onOpenCoverageMatrix,
   onRequestFillGaps,
+  onAddAlignmentCriteria,
 }: CharterSidebarProps) {
   // Prefer the snapshot for matching — that's the alignment the rows were
   // tagged against. Fall back to the live charter if the dataset has no
@@ -83,25 +88,17 @@ export default function CharterSidebar({
             <CriterionBlock tone="bad" label="Bad" text={matched.bad} />
           </>
         ) : allAlignment.length === 0 ? (
-          <p className="text-fg-dim leading-relaxed">
-            The charter doesn't define any alignment entries yet. Add some on
-            the Charter tab to see good/bad criteria here.
-          </p>
+          <NoAlignmentCTA
+            label="No alignment defined yet"
+            description="Define alignment entries on the Charter tab to see good/bad criteria here."
+            onClick={onAddAlignmentCriteria}
+          />
         ) : (
-          <div className="flex flex-col gap-2 text-fg-dim leading-relaxed">
-            <p>
-              This row's feature_area isn't one of the {allAlignment.length}{' '}
-              alignment {allAlignment.length === 1 ? 'entry' : 'entries'} the
-              charter defines:
-            </p>
-            <ul className="space-y-0.5 text-fg-contrast">
-              {allAlignment.map(a => (
-                <li key={a.feature_area} className="leading-snug">
-                  • {a.feature_area}
-                </li>
-              ))}
-            </ul>
-          </div>
+          <NoAlignmentCTA
+            label="No alignment match for this row"
+            description={`This row's feature_area isn't one of the ${allAlignment.length} alignment ${allAlignment.length === 1 ? 'entry' : 'entries'} the charter defines.`}
+            onClick={onAddAlignmentCriteria}
+          />
         )}
 
         {focusedCoverageTags.length > 0 && (
@@ -131,6 +128,33 @@ function sameFeatureAreas(a: Charter['alignment'], b: Charter['alignment']): boo
     if (!setA.has(e.feature_area)) return false
   }
   return true
+}
+
+function NoAlignmentCTA({
+  label,
+  description,
+  onClick,
+}: {
+  label: string
+  description: string
+  onClick?: () => void
+}) {
+  return (
+    <div className="flex flex-col gap-2 text-fg-dim leading-relaxed">
+      <p>
+        <span className="text-fg-contrast font-medium">{label}.</span>{' '}
+        {description}
+      </p>
+      {onClick && (
+        <button
+          onClick={onClick}
+          className="self-start px-2 py-1 text-xs bg-fill-primary text-bg-default hover:bg-fill-primary-hover transition-opacity"
+        >
+          Add alignment criteria
+        </button>
+      )}
+    </div>
+  )
 }
 
 function CriterionBlock({ tone, label, text }: { tone: 'good' | 'bad'; label: string; text: string }) {
