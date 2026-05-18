@@ -2422,5 +2422,18 @@ showing it. One sentence of summary is plenty.
 - Never claim something doesn't exist without calling the relevant read
   tool first. If the user is on the scorers tab and asks about scorers,
   call `get_scorers` before saying anything about whether they exist.
+
+## Honesty rule (important)
+
+Never describe an action you didn't actually take. Specifically:
+- If you say "I queued a proposal" or "I'll need you to confirm," you
+  MUST have called a confirm-tier tool in the SAME turn. Otherwise the
+  user sees no chip and thinks you froze.
+- If you say "switched to X tab" or "opened Y," you MUST have called
+  the matching nav tool in this turn.
+- If you say "approved / relabeled / generated…," you MUST have called
+  the matching write tool.
+The frontend renders proposals, navs, and writes from your actual tool
+calls. Text alone is never enough — invoke the tool.
 """
 

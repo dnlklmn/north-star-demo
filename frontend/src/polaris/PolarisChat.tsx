@@ -43,6 +43,17 @@ export default function PolarisChat() {
       setLoading(true)
       try {
         const res = await polarisChat(trimmed, context)
+        // Catch the model's most common honesty failure: it claims to have
+        // queued a proposal in plain text but never actually called a
+        // confirm-tier tool, so no chip appears and the user sees nothing
+        // to click. Surface the gap inline so the user knows to retry
+        // ("queued a proposal" / "click the chip" without a real proposal).
+        const claimedChip =
+          /\b(?:queued? (?:a )?proposal|click the (?:chip|confirm))/i.test(
+            res.message || '',
+          )
+        const hasProposal = (res.proposals?.length || 0) > 0
+        const phantomChip = claimedChip && !hasProposal
         setMessages(prev => [
           ...prev,
           {
@@ -50,6 +61,9 @@ export default function PolarisChat() {
             content: res.message || '',
             toolSummary: res.tool_summary,
             proposals: res.proposals,
+            activity: phantomChip
+              ? "I claimed I queued a proposal but didn't actually call the tool — ask me again and I'll try once more."
+              : undefined,
           },
         ])
         for (const nav of res.navs || []) {
