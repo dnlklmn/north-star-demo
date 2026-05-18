@@ -27,15 +27,17 @@ export default function CharterSidebar({
   const allAlignment = charter.alignment ?? []
   const matched = allAlignment.find(a => a.feature_area === focusedFeatureArea)
 
+  // Full-height rail with a left border, matching Scorers / Evaluate. Inner
+  // sections separate via border-b (not floating cards).
   return (
-    <aside className="w-80 shrink-0 flex flex-col gap-4 overflow-y-auto">
+    <aside className="w-80 shrink-0 border-l border-border-hint flex flex-col overflow-y-auto">
       <CoverageSummary
         gaps={gaps}
         onOpenMatrix={onOpenCoverageMatrix}
         onRequestFillGaps={onRequestFillGaps}
       />
 
-      <section className="bg-bg-default border border-border-hint p-4 flex flex-col gap-3 text-xs">
+      <section className="p-6 flex flex-col gap-3 text-xs">
         <header className="flex flex-col gap-0.5">
           <div className="text-[10px] uppercase tracking-wide text-fg-dim">
             Charter criteria
@@ -117,7 +119,7 @@ function CoverageSummary({
 }) {
   if (!gaps) {
     return (
-      <section className="bg-bg-default border border-border-hint p-4 text-xs text-fg-dim">
+      <section className="p-6 border-b border-border-hint text-xs text-fg-dim">
         Coverage will appear once examples land.
       </section>
     )
@@ -135,7 +137,7 @@ function CoverageSummary({
   )
 
   return (
-    <section className="bg-bg-default border border-border-hint p-4 flex flex-col gap-3 text-xs">
+    <section className="p-6 border-b border-border-hint flex flex-col gap-3 text-xs">
       <header className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5">
           {score != null && <CoverageDot score={score} />}

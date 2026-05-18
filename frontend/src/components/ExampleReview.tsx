@@ -554,9 +554,13 @@ export default function ExampleReview({
         </div>
       )}
 
-      {/* Page body — title + filters + grouped table */}
+      {/* Page body + right rail. The rail is a sibling of the body (not
+          nested inside its padding) so its left border runs the full
+          dataset workspace height — matching the rail layout on Scorers /
+          Evaluate. */}
+      <div className="flex-1 min-h-0 flex overflow-hidden">
       <div
-        className={`flex-1 min-h-0 flex flex-col gap-6 p-6 overflow-hidden ${
+        className={`flex-1 min-w-0 flex flex-col gap-6 p-6 overflow-hidden ${
           generating ? "pointer-events-none select-none" : ""
         }`}
       >
@@ -738,11 +742,9 @@ export default function ExampleReview({
           )}
         </div>
 
-        {/* Grouped list + right rail (charter context + compact coverage).
-            The list is the primary surface; the sidebar carries criteria
-            for the focused row and the at-a-glance coverage signal. */}
-        <div className="flex-1 min-h-0 flex gap-4">
-          <div ref={listScrollRef} className="flex-1 min-w-0 overflow-y-auto flex flex-col gap-0">
+        {/* Grouped list. The right rail is rendered as a sibling of this
+            page body so it spans the full dataset workspace height. */}
+        <div ref={listScrollRef} className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-0">
           {filtered.length === 0 && filterStatus === 'pending' && stats.total > 0 ? (
             <div className="flex-1 flex flex-col items-center justify-center">
               <div className="text-center max-w-sm">
@@ -816,16 +818,16 @@ export default function ExampleReview({
               </div>
             </>
           )}
-          </div>
-          <CharterSidebar
-            charter={charter}
-            focusedFeatureArea={focusedExample?.feature_area}
-            focusedCoverageTags={focusedExample?.coverage_tags ?? []}
-            gaps={gaps}
-            onOpenCoverageMatrix={onShowCoverageMap}
-            onRequestFillGaps={onRequestFillGaps}
-          />
         </div>
+      </div>
+      <CharterSidebar
+        charter={charter}
+        focusedFeatureArea={focusedExample?.feature_area}
+        focusedCoverageTags={focusedExample?.coverage_tags ?? []}
+        gaps={gaps}
+        onOpenCoverageMatrix={onShowCoverageMap}
+        onRequestFillGaps={onRequestFillGaps}
+      />
       </div>
 
       {deleteConfirmId && (
