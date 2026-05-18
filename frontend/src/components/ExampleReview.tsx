@@ -156,6 +156,11 @@ export default function ExampleReview({
     setFilterStatus('')
   }
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  // Row in view (topmost visible). Updates as the user scrolls so the
+  // sidebar's charter criteria track what the eye is on, without
+  // hijacking the click-selected row. Falls back to selectedId.
+  const [scrollFocusedId, setScrollFocusedId] = useState<string | null>(null)
+  const listScrollRef = useRef<HTMLDivElement | null>(null)
   const [focusedCell, setFocusedCell] = useState<CellId>('status')
 
   // Polaris nav: when the agent runs `nav_example`, ProjectWorkspace switches
@@ -313,6 +318,46 @@ export default function ExampleReview({
 
   const selectedIndex = orderedExamples.findIndex(e => e.id === selectedId)
   const selectedExample = orderedExamples.find(e => e.id === selectedId)
+  // Sidebar's focused row: the topmost row currently visible. Falls back to
+  // the click-selected row so the sidebar is never empty when scroll hasn't
+  // happened yet (e.g. fresh mount, short lists).
+  const focusedExample = useMemo(
+    () =>
+      orderedExamples.find(e => e.id === scrollFocusedId) ?? selectedExample,
+    [orderedExamples, scrollFocusedId, selectedExample],
+  )
+
+  // Watch which rows are intersecting the list viewport; the topmost
+  // intersecting one becomes the sidebar's focused row. Re-bound whenever
+  // the rendered set changes (filter / synth landing new rows).
+  useEffect(() => {
+    const root = listScrollRef.current
+    if (!root) return
+    const rowEls = Array.from(
+      root.querySelectorAll<HTMLElement>("[data-row-id]"),
+    )
+    if (rowEls.length === 0) return
+
+    const visibleIds = new Set<string>()
+    const observer = new IntersectionObserver(
+      entries => {
+        for (const entry of entries) {
+          const id = entry.target.getAttribute("data-row-id")
+          if (!id) continue
+          if (entry.isIntersecting) visibleIds.add(id)
+          else visibleIds.delete(id)
+        }
+        // Pick the topmost visible row by walking orderedExamples and
+        // grabbing the first match. Walking in render order is cheaper
+        // than reading bounding rects per entry.
+        const topmost = orderedExamples.find(e => visibleIds.has(e.id))
+        if (topmost) setScrollFocusedId(topmost.id)
+      },
+      { root, threshold: 0 },
+    )
+    rowEls.forEach(el => observer.observe(el))
+    return () => observer.disconnect()
+  }, [orderedExamples])
 
   const examplesWithIssues = examples.filter(
     ex => ex.judge_verdict?.issues && ex.judge_verdict.issues.length > 0 && !ex.revision_suggestion,
@@ -697,7 +742,7 @@ export default function ExampleReview({
             The list is the primary surface; the sidebar carries criteria
             for the focused row and the at-a-glance coverage signal. */}
         <div className="flex-1 min-h-0 flex gap-4">
-          <div className="flex-1 min-w-0 overflow-y-auto flex flex-col gap-0">
+          <div ref={listScrollRef} className="flex-1 min-w-0 overflow-y-auto flex flex-col gap-0">
           {filtered.length === 0 && filterStatus === 'pending' && stats.total > 0 ? (
             <div className="flex-1 flex flex-col items-center justify-center">
               <div className="text-center max-w-sm">
@@ -774,8 +819,8 @@ export default function ExampleReview({
           </div>
           <CharterSidebar
             charter={charter}
-            focusedFeatureArea={selectedExample?.feature_area}
-            focusedCoverageTags={selectedExample?.coverage_tags ?? []}
+            focusedFeatureArea={focusedExample?.feature_area}
+            focusedCoverageTags={focusedExample?.coverage_tags ?? []}
             gaps={gaps}
             onOpenCoverageMatrix={onShowCoverageMap}
             onRequestFillGaps={onRequestFillGaps}
@@ -993,6 +1038,7 @@ function ExampleRow({
     <>
       <div
         ref={rowRef}
+        data-row-id={example.id}
         onClick={onSelect}
         className={[
           'flex items-stretch gap-4 px-4 py-4 cursor-pointer transition-colors max-h-[480px]',

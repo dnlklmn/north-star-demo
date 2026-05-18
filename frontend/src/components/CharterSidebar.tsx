@@ -4,12 +4,10 @@ import { computeCoverageScore, coverageStatus } from './coverage'
 
 interface CharterSidebarProps {
   charter: Charter
-  /** feature_area of the currently focused row. The sidebar resolves the
-   *  matching alignment entry by name (not by index — alignment entries
-   *  are not index-aligned to anything else). */
+  /** feature_area of the currently focused row (set by click or scroll).
+   *  Resolved against alignment by name match. */
   focusedFeatureArea: string | null | undefined
-  /** Coverage tags carried by the focused row. Shown above the charter's
-   *  coverage list so reviewers see which scenarios this row claims to cover. */
+  /** Coverage tags carried by the focused row. */
   focusedCoverageTags: string[]
   /** Gap analysis powers the compact coverage summary (radar + score).
    *  The full matrix opens in a modal via `onOpenCoverageMatrix`. */
@@ -26,9 +24,8 @@ export default function CharterSidebar({
   onOpenCoverageMatrix,
   onRequestFillGaps,
 }: CharterSidebarProps) {
-  const alignment = charter.alignment?.find(
-    a => a.feature_area === focusedFeatureArea,
-  )
+  const allAlignment = charter.alignment ?? []
+  const matched = allAlignment.find(a => a.feature_area === focusedFeatureArea)
 
   return (
     <aside className="w-80 shrink-0 flex flex-col gap-4 overflow-y-auto">
@@ -41,48 +38,79 @@ export default function CharterSidebar({
       <section className="bg-bg-default border border-border-hint p-4 flex flex-col gap-3 text-xs">
         <header className="flex flex-col gap-0.5">
           <div className="text-[10px] uppercase tracking-wide text-fg-dim">
-            Charter criteria for
+            Charter criteria
           </div>
           <div className="text-sm font-semibold text-fg-contrast leading-tight">
-            {focusedFeatureArea || 'No row selected'}
+            {focusedFeatureArea || 'No row in view'}
           </div>
         </header>
 
         {!focusedFeatureArea ? (
           <p className="text-fg-dim">
-            Select a row to see the charter alignment it should satisfy.
+            Scroll or click a row to see the charter alignment for it.
           </p>
-        ) : alignment ? (
+        ) : matched ? (
           <>
-            <div>
-              <div className="text-[10px] uppercase tracking-wide text-success mb-1">Good</div>
-              <div className="text-fg-contrast leading-relaxed">{alignment.good || '—'}</div>
-            </div>
-            <div>
-              <div className="text-[10px] uppercase tracking-wide text-danger mb-1">Bad</div>
-              <div className="text-fg-contrast leading-relaxed">{alignment.bad || '—'}</div>
-            </div>
-            {focusedCoverageTags.length > 0 && (
-              <div>
-                <div className="text-[10px] uppercase tracking-wide text-fg-dim mb-1">
-                  Row covers
-                </div>
-                <ul className="space-y-0.5 text-fg-contrast">
-                  {focusedCoverageTags.map(tag => (
-                    <li key={tag} className="leading-snug">• {tag}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
+            <CriterionBlock tone="good" label="Good" text={matched.good} />
+            <CriterionBlock tone="bad" label="Bad" text={matched.bad} />
           </>
         ) : (
-          <p className="text-fg-dim italic">
-            This feature_area isn't in the charter alignment list. The row may
-            be off-target — consider re-tagging or rejecting.
+          <p className="text-fg-dim leading-relaxed">
+            No matching alignment entry in the charter for this row's
+            feature_area. The reference list below shows every alignment entry
+            the charter defines.
           </p>
+        )}
+
+        {focusedCoverageTags.length > 0 && (
+          <div>
+            <div className="text-[10px] uppercase tracking-wide text-fg-dim mb-1">
+              Row covers
+            </div>
+            <ul className="space-y-0.5 text-fg-contrast">
+              {focusedCoverageTags.map(tag => (
+                <li key={tag} className="leading-snug">• {tag}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {!matched && allAlignment.length > 0 && (
+          <details className="text-fg-dim">
+            <summary className="cursor-pointer text-[10px] uppercase tracking-wide hover:text-fg-contrast">
+              All alignment entries ({allAlignment.length})
+            </summary>
+            <ul className="mt-2 space-y-2">
+              {allAlignment.map(a => (
+                <li key={a.feature_area} className="leading-snug">
+                  <div className="font-semibold text-fg-contrast">{a.feature_area}</div>
+                  {a.good && (
+                    <div className="text-fg-dim">
+                      <span className="text-success">Good:</span> {a.good}
+                    </div>
+                  )}
+                  {a.bad && (
+                    <div className="text-fg-dim">
+                      <span className="text-danger">Bad:</span> {a.bad}
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </details>
         )}
       </section>
     </aside>
+  )
+}
+
+function CriterionBlock({ tone, label, text }: { tone: 'good' | 'bad'; label: string; text: string }) {
+  const colorCls = tone === 'good' ? 'text-success' : 'text-danger'
+  return (
+    <div>
+      <div className={`text-[10px] uppercase tracking-wide mb-1 ${colorCls}`}>{label}</div>
+      <div className="text-fg-contrast leading-relaxed">{text || '—'}</div>
+    </div>
   )
 }
 
