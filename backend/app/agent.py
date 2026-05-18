@@ -472,6 +472,123 @@ async def run_dataset_chat(
     return result
 
 
+async def run_polaris_chat(
+    state: SessionState | None,
+    user_message: str,
+    context: dict,
+) -> dict:
+    """Run a Polaris turn — global tool-using assistant.
+
+    `state` is None when chatting from the home page (no project selected).
+    `context` is the frontend-supplied blob: route, session_id, dataset_id,
+    selected_example_id, phase. The model reads this from the system prompt
+    rather than calling tools to discover it.
+
+    Returns:
+        {
+          "message": str,
+          "tool_calls": [...],          # full log for telemetry
+          "tool_summary": [...],        # subset shown in the chat (auto/confirm/nav)
+          "proposals": [...],           # confirm-tier envelopes the UI renders as chips
+          "navs": [...],                # nav envelopes the UI dispatches
+        }
+    """
+    from . import polaris_tools
+    from .tools import call_llm_with_tools, set_trace_meta
+    from .prompt import build_polaris_system_prompt
+
+    ctx = polaris_tools.ToolCtx(
+        session_id=context.get("session_id"),
+        dataset_id=context.get("dataset_id"),
+        selected_example_id=context.get("selected_example_id"),
+        route=context.get("route"),
+        phase=context.get("phase"),
+    )
+
+    charter_summary = state.charter.model_dump() if state else None
+    system = build_polaris_system_prompt(context, charter_summary)
+
+    # Conversation history — only user/assistant text, no tool blocks. We
+    # persist text-only turns to keep the JSONB column bounded; the full
+    # tool transcript lives in the `turns` table.
+    history: list[dict] = []
+    if state is not None:
+        for entry in state.input.conversation_history or []:
+            role = entry.get("role")
+            content = entry.get("content")
+            if role in ("user", "assistant") and isinstance(content, str) and content.strip():
+                history.append({"role": role, "content": content})
+
+    messages = [*history, {"role": "user", "content": user_message}]
+
+    async def _handler(name: str, args: dict) -> dict:
+        return await polaris_tools.dispatch(name, ctx, args)
+
+    with set_trace_meta(session_id=ctx.session_id, phase="polaris"):
+        text, tool_log, llm_meta = await call_llm_with_tools(
+            system=system,
+            messages=messages,
+            tool_schemas=polaris_tools.tool_schemas_for_model(),
+            handler=_handler,
+            max_iters=12,
+            max_tokens=4096,
+        )
+
+    proposals: list[dict] = []
+    navs: list[dict] = []
+    summary: list[dict] = []
+    for entry in tool_log:
+        result = entry.get("result") or {}
+        tier = polaris_tools.get_tier(entry["name"]) or "auto"
+        item = {"name": entry["name"], "args": entry["args"], "tier": tier}
+        if isinstance(result, dict) and result.get("_proposal"):
+            proposals.append({
+                "tool": result.get("tool"),
+                "args": result.get("args") or {},
+                "label": result.get("label") or entry["name"],
+                "reason": result.get("reason") or "",
+            })
+            item["proposal"] = True
+        elif isinstance(result, dict) and result.get("_nav"):
+            navs.append({
+                "target": result.get("target"),
+                "props": result.get("props") or {},
+            })
+            item["nav"] = result.get("target")
+        else:
+            item["ok"] = bool(isinstance(result, dict) and (result.get("ok") or "examples" in result or "id" in result or "stats" in result or "projects" in result or "runs" in result or "turns" in result or "coverage_matrix" in result))
+            if isinstance(result, dict) and "error" in result:
+                item["error"] = result["error"]
+        summary.append(item)
+
+    # Persist conversation text to history.
+    if state is not None:
+        state.input.conversation_history.append({"role": "user", "content": user_message})
+        if text:
+            state.input.conversation_history.append({"role": "assistant", "content": text})
+
+        # Persist only the compact summary (one line per call) into the JSONB
+        # column. The full tool_log can include hundreds of rows from
+        # list_examples or thousands from generated payloads — fine in memory
+        # for the response, but we don't want it ballooning every turn row.
+        await create_turn(
+            session_id=state.session_id,
+            turn_type="polaris_chat",
+            input_snapshot={"user_message": user_message, "context": context},
+            llm_calls=llm_meta,
+            parsed_output={"summary": summary, "proposals": proposals, "navs": navs},
+            agent_message=text,
+        )
+
+    return {
+        "message": text,
+        "tool_calls": tool_log,
+        "tool_summary": summary,
+        "proposals": proposals,
+        "navs": navs,
+    }
+
+
 def _all_passing(state: SessionState) -> bool:
     """Check if all validation criteria pass."""
     v = state.validation

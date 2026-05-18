@@ -141,6 +141,39 @@ export default function ExampleReview({
   }
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [focusedCell, setFocusedCell] = useState<CellId>('status')
+
+  // Polaris nav: when the agent runs `nav_example`, ProjectWorkspace switches
+  // to the dataset tab and broadcasts the example id. We pick it up here so
+  // the row gets selected without lifting selection state out of this
+  // component.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ id: string }>).detail
+      if (detail?.id) setSelectedId(detail.id)
+    }
+    window.addEventListener('polaris:select-example', handler)
+    return () => window.removeEventListener('polaris:select-example', handler)
+  }, [])
+
+  // Polaris nav: `set_dataset_filter` drives the table filters from chat.
+  // Each field is independent — undefined means "leave alone", "" means
+  // "clear". This matches the agent's schema so the model can update one
+  // dimension without touching the others.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{
+        feature_area?: string
+        label?: string
+        review_status?: string
+      }>).detail
+      if (!detail) return
+      if (detail.feature_area !== undefined) setFilterArea(detail.feature_area)
+      if (detail.label !== undefined) setFilterLabel(detail.label)
+      if (detail.review_status !== undefined) setFilterStatus(detail.review_status)
+    }
+    window.addEventListener('polaris:set-filter', handler)
+    return () => window.removeEventListener('polaris:set-filter', handler)
+  }, [])
   // Edit state carries both row id and which cell is being edited so only
   // that one cell becomes a textarea. The other cells stay read-only.
   const [editing, setEditing] = useState<{ id: string; cell: 'input' | 'output' } | null>(null)

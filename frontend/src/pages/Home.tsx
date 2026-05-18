@@ -21,6 +21,7 @@ import IconButton from "../components/ui/IconButton";
 import NewSkillEvalModal from "../components/NewSkillEvalModal";
 import NewPromptEvalModal from "../components/NewPromptEvalModal";
 import SettingsPanel from "../components/SettingsPanel";
+import PolarisAgentButton from "../polaris/PolarisAgentButton";
 import { GearIcon, StarIcon } from "../components/ui/Icons";
 import {
   evictSession,
@@ -252,6 +253,7 @@ export default function Home() {
           <StarIcon />
         </IconButton>
         <div className="flex items-center gap-3">
+          <PolarisAgentButton />
           <Button
             size="small"
             variant="neutral"

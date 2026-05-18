@@ -53,6 +53,11 @@ uvicorn's exclude uses `pathlib.PurePath.match` where `*` doesn't cross
 direct children, not the nested `skill__<id>/<file>.py` writes that
 actually trigger the reload.
 
+> **Working from a git worktree?** `backend/.venv` is gitignored, so a fresh
+> worktree has no venv. Run `bash scripts/link-worktree-venv.sh` once after
+> `git worktree add` — it symlinks `backend/.venv` to the canonical venv in
+> the main repo. Idempotent.
+
 ### Frontend
 ```bash
 cd frontend

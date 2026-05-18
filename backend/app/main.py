@@ -30,10 +30,11 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import db
-from .agent import run_agent_turn, run_dataset_chat
+from .agent import run_agent_turn, run_dataset_chat, run_polaris_chat
 from .eval_runner import EvalResult, run_eval_sync
 from .sharing import Access, broadcaster, capacity, require_writer, resolve_access
 from .models import (
@@ -3219,6 +3220,111 @@ async def dataset_chat(
         "actions": result.actions,
         "action_suggestions": result.action_suggestions,
     }
+
+
+class PolarisConfirmPayload(BaseModel):
+    """Structured confirmation of a previously-proposed tool call.
+
+    When a confirm-tier tool returns a proposal envelope, the frontend renders
+    a chip; clicking the chip POSTs `confirm: { tool, args }` and the backend
+    re-dispatches the tool with `confirmed=True` directly — no second model
+    round-trip, no English re-issue that could be misparsed or spoofed.
+    """
+    tool: str
+    args: dict = {}
+
+
+class PolarisChatRequest(BaseModel):
+    """Polaris chat request — global, tool-using assistant.
+
+    `context` is what the frontend knows about the user's current view; the
+    agent reads it from the system prompt rather than calling tools to find
+    out. `session_id` and `dataset_id` inside `context` are the only routing
+    info — there is no path parameter, because Polaris isn't bound to a
+    project (you can talk to it from the home page).
+
+    `confirm` is the structured shortcut for a previously-proposed action.
+    When present, the model is skipped entirely; the named tool runs once
+    with `confirmed=True` and the result is returned directly.
+    """
+    message: str = ""
+    context: dict = {}
+    confirm: PolarisConfirmPayload | None = None
+
+
+@app.post("/polaris/chat")
+async def polaris_chat(req: PolarisChatRequest):
+    """Run one Polaris turn — or one direct confirm if `confirm` is set.
+
+    Returns:
+        {message, tool_calls, tool_summary, proposals, navs, state?}
+
+    `state` is included only when a session_id is in context — the frontend
+    needs it to refresh the workspace after writes that touched session state.
+    """
+    ctx = req.context or {}
+    session_id = ctx.get("session_id")
+
+    # Direct-confirm path: bypass the model loop entirely. Same registry, same
+    # tier semantics, but no English instruction the model could misread.
+    if req.confirm is not None:
+        from . import polaris_tools
+        tool_ctx = polaris_tools.ToolCtx(
+            session_id=session_id,
+            dataset_id=ctx.get("dataset_id"),
+            selected_example_id=ctx.get("selected_example_id"),
+            route=ctx.get("route"),
+            phase=ctx.get("phase"),
+        )
+        args = {**req.confirm.args, "confirmed": True}
+        result = await polaris_tools.dispatch(req.confirm.tool, tool_ctx, args)
+        tier = polaris_tools.get_tier(req.confirm.tool) or "auto"
+        is_nav = isinstance(result, dict) and result.get("_nav")
+        is_proposal = isinstance(result, dict) and result.get("_proposal")
+        summary = [{
+            "name": req.confirm.tool,
+            "args": req.confirm.args,
+            "tier": tier,
+            "ok": isinstance(result, dict) and bool(result.get("ok")),
+            **({"error": result["error"]} if isinstance(result, dict) and "error" in result else {}),
+            **({"nav": result.get("target")} if is_nav else {}),
+            **({"proposal": True} if is_proposal else {}),
+        }]
+        navs = []
+        if is_nav:
+            navs.append({"target": result.get("target"), "props": result.get("props") or {}})
+        out: dict = {
+            "message": "",
+            "tool_calls": [{"name": req.confirm.tool, "args": args, "result": result}],
+            "tool_summary": summary,
+            "proposals": [],
+            "navs": navs,
+        }
+        # Re-load + return state so the workspace refreshes.
+        if session_id:
+            try:
+                state, _conv = await _load_state(session_id)
+                out["state"] = state.model_dump()
+            except HTTPException:
+                pass
+        return out
+
+    state = None
+    if session_id:
+        try:
+            state, _conv = await _load_state(session_id)
+        except HTTPException:
+            # Session pointed to in context disappeared — chat continues
+            # statelessly rather than 404'ing the whole conversation.
+            state = None
+
+    result = await run_polaris_chat(state, req.message, ctx)
+
+    if state is not None and session_id:
+        await _save_state(session_id, state, state.input.conversation_history)
+        result["state"] = state.model_dump()
+
+    return result
 
 
 @app.get("/datasets/{dataset_id}/export")

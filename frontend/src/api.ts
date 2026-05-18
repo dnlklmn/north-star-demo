@@ -1099,6 +1099,81 @@ export async function datasetChat(
   return res.json()
 }
 
+// --- Polaris (tool-using assistant) ---
+
+export interface PolarisContext {
+  session_id?: string
+  dataset_id?: string
+  selected_example_id?: string
+  route?: string
+  phase?: string
+}
+
+export type PolarisToolTier = 'auto' | 'confirm' | 'nav'
+
+export interface PolarisToolSummary {
+  name: string
+  args: Record<string, unknown>
+  tier: PolarisToolTier
+  ok?: boolean
+  error?: string
+  proposal?: boolean
+  nav?: string
+}
+
+export interface PolarisProposal {
+  tool: string
+  args: Record<string, unknown>
+  label: string
+  reason: string
+}
+
+export interface PolarisNav {
+  target: string
+  props: Record<string, unknown>
+}
+
+export interface PolarisChatResponse {
+  message: string
+  tool_calls: Array<{ name: string; args: Record<string, unknown>; result: unknown }>
+  tool_summary: PolarisToolSummary[]
+  proposals: PolarisProposal[]
+  navs: PolarisNav[]
+  state?: SessionState
+}
+
+export async function polarisChat(
+  message: string,
+  context: PolarisContext,
+): Promise<PolarisChatResponse> {
+  const res = await apiFetch(`${BASE}/polaris/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, context }),
+  })
+  if (!res.ok) throw new Error(`Polaris chat failed: ${res.status}`)
+  return res.json()
+}
+
+/**
+ * Confirm a previously-proposed tool call. Skips the model entirely — the
+ * named tool runs once with `confirmed=true` and the result returns inline.
+ * Cheaper, deterministic, and not spoofable via injected user text.
+ */
+export async function polarisConfirm(
+  tool: string,
+  args: Record<string, unknown>,
+  context: PolarisContext,
+): Promise<PolarisChatResponse> {
+  const res = await apiFetch(`${BASE}/polaris/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ context, confirm: { tool, args } }),
+  })
+  if (!res.ok) throw new Error(`Polaris confirm failed: ${res.status}`)
+  return res.json()
+}
+
 // --- Schema Detection API ---
 
 export async function detectSchema(

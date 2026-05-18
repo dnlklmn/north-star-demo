@@ -13,8 +13,6 @@ import {
 } from "lucide-react";
 import {
   GearIcon,
-  ChatBubbleIcon,
-  CloseIcon,
   AIIcon,
   StarIcon,
   GoalsIcon,
@@ -26,7 +24,6 @@ import {
 import type {
   Message,
   SessionState,
-  AgentStatus,
   StoryGroup,
   Suggestion,
   SuggestedStory,
@@ -64,7 +61,6 @@ import {
   saveScorers,
   generateScorers,
   suggestRevisions,
-  getActivity,
   listSessions,
   type SkillSuggestion,
 } from "../api";
@@ -87,7 +83,6 @@ import CharterPanel from "../components/CharterPanel";
 import ScorersPanel from "../components/ScorersPanel";
 import EvaluatePanel from "../components/EvaluatePanel";
 import SkillPanel from "../components/SkillPanel";
-import ConversationPanel from "../components/ConversationPanel";
 import ExampleReview from "../components/ExampleReview";
 import CoverageMap from "../components/CoverageMap";
 import { computeCoverageScore } from "../components/coverage";
@@ -96,6 +91,13 @@ import SettingsPanel from "../components/SettingsPanel";
 import ShareModal from "../components/ShareModal";
 import { useProjectEvents, type SynthProgressEvent } from "../hooks/useProjectEvents";
 import { useShareToken } from "../hooks/useShareToken";
+import {
+  useRegisterPolarisContext,
+  useRegisterPolarisNav,
+  usePolaris,
+} from "../polaris/usePolaris";
+import PolarisAgentButton from "../polaris/PolarisAgentButton";
+import { notePolarisActivity } from "../polaris/activity";
 
 type ActiveTab =
   | "skill"
@@ -132,27 +134,8 @@ const EMPTY_STATE: SessionState = {
   agent_status: "drafting",
 };
 
-const ACTIVITY_LABELS: Record<string, string> = {
-  discovery: "Thinking about your input",
-  generate: "Generating charter draft",
-  validate: "Validating criteria",
-  suggest: "Generating suggestions",
-  synthesize: "Synthesizing examples",
-  review: "Auto-reviewing examples",
-  gap_analysis: "Analyzing coverage gaps",
-  enrich: "Enriching examples",
-  detect_schema: "Detecting schema",
-  import_from_url: "Importing from URL",
-  infer_schema: "Inferring schema",
-  generate_scorers: "Generating scorers",
-  suggest_revisions: "Suggesting revisions",
-};
-
-function activityLabel(turnType: string): string | null {
-  // chat/dataset_chat are already surfaced as assistant messages — skip as hints
-  if (turnType === "chat" || turnType === "dataset_chat") return null;
-  return ACTIVITY_LABELS[turnType] || null;
-}
+// (ACTIVITY_LABELS / activityLabel removed with the rail's ConversationPanel.
+//  Polaris emits its own inline activity markers in the chat transcript.)
 
 function formatStoryGroups(groups: StoryGroup[]): string {
   return groups
@@ -175,13 +158,19 @@ export default function ProjectWorkspace() {
 
   // --- Navigation ---
   const [activeTab, setActiveTab] = useState<ActiveTab>("goals");
-  const [showAssistant, setShowAssistant] = useState(false);
   // Latched dataset filter: when the Evaluations panel sends the user to
   // the Dataset tab via the unmapped-rows banner, we stash the filter
   // here. ExampleReview reads it on mount and calls a clear callback so
   // the same filter doesn't keep snapping back the next time the user
   // navigates to Dataset normally.
   const [pendingDatasetFilter, setPendingDatasetFilter] = useState<string | null>(null);
+
+  // --- Polaris transcript hydration ---
+  // Read from the global Polaris provider so the rail chat stays in sync
+  // with whatever conversation lives in `session.conversation`. The rail is
+  // mounted by this page, but the transcript itself outlives any single
+  // tab — that's the whole point of "one agent, one conversation."
+  const { hydrateMessages: hydratePolarisMessages } = usePolaris();
 
   // --- Project metadata ---
   const [projectName, setProjectName] = useState("Untitled project");
@@ -193,7 +182,13 @@ export default function ProjectWorkspace() {
     urlSessionId || null,
   );
   const [state, setState] = useState<SessionState>(EMPTY_STATE);
-  const [messages, setMessages] = useState<Message[]>([]);
+  // Legacy discovery-flow message log. Polaris (rail chat) owns its own
+  // transcript via the PolarisProvider — these writes feed the dead
+  // ConversationPanel that used to live in the rail. The underscore
+  // tells eslint we know it's unused; full removal happens when the
+  // discovery state machine is collapsed into Polaris tools.
+  const [_messages, setMessages] = useState<Message[]>([]);
+  void _messages;
   const [loading, setLoading] = useState(false);
   const [hydrating, setHydrating] = useState(!!urlSessionId);
 
@@ -276,9 +271,13 @@ export default function ProjectWorkspace() {
 
   // --- Dataset phase state ---
   const [dataset, setDataset] = useState<Dataset | null>(null);
-  const [actionSuggestions, setActionSuggestions] = useState<
+  // Legacy dataset-chat action suggestions. Polaris surfaces proposals
+  // inline in the rail chat now; this state is still written by the old
+  // datasetChat path until that's collapsed into Polaris tools.
+  const [_actionSuggestions, setActionSuggestions] = useState<
     Array<{ action: string; label: string; reason: string }>
   >([]);
+  void _actionSuggestions;
 
   // --- Scorers state (lifted up for persistence across tab switches) ---
   const [scorers, setScorers] = useState<ScorerDef[]>([]);
@@ -318,6 +317,145 @@ export default function ProjectWorkspace() {
     window.addEventListener("northstar:open-settings", handler);
     return () => window.removeEventListener("northstar:open-settings", handler);
   }, []);
+
+  // --- Polaris bus wiring ---
+  // Tell the global Polaris provider about our current view so chat messages
+  // are sent with up-to-date routing info (session_id, dataset_id, phase).
+  // Pages own this — the provider doesn't try to derive it from the URL
+  // because the same URL maps to multiple tabs.
+  useRegisterPolarisContext({
+    session_id: sessionId || undefined,
+    dataset_id: dataset?.id || undefined,
+    phase: activeTab as string | undefined,
+  });
+  // Register handlers for nav targets that this page owns. The provider
+  // dispatches `home` / `project` itself (it owns react-router); everything
+  // else delegates to whichever page is mounted.
+  // Suppress the next activity-emission on tab change when Polaris itself
+  // is the one switching tabs — the agent's tool_summary already shows the
+  // nav, so doubling up would be noisy.
+  const suppressNextTabActivityRef = useRef(false);
+  useRegisterPolarisNav("phase", (props) => {
+    const phase = props.phase as string | undefined;
+    if (!phase) return;
+    // The agent's nav_phase enum is kept in sync with ActiveTab in
+    // polaris_tools.py; cast is safe so long as that stays true.
+    suppressNextTabActivityRef.current = true;
+    setActiveTab(phase as ActiveTab);
+  });
+  // Same suppression rule for example focus.
+  const suppressNextExampleActivityRef = useRef(false);
+
+  // Emit "opened X tab" into the Polaris transcript when the user (or any
+  // non-Polaris code path) changes tabs. First render is silent — the
+  // initial activeTab isn't a user action.
+  const tabActivityFirstRenderRef = useRef(true);
+  useEffect(() => {
+    if (tabActivityFirstRenderRef.current) {
+      tabActivityFirstRenderRef.current = false;
+      return;
+    }
+    if (suppressNextTabActivityRef.current) {
+      suppressNextTabActivityRef.current = false;
+      return;
+    }
+    notePolarisActivity(`opened ${activeTab} tab`);
+  }, [activeTab]);
+  useRegisterPolarisNav("coverage_map", () => setShowCoverageMap(true));
+  useRegisterPolarisNav("settings", () => setShowSettings(true));
+  useRegisterPolarisNav("share", () => setShowShareModal(true));
+  useRegisterPolarisNav("example", (props) => {
+    const id = props.example_id as string | undefined;
+    if (!id) return;
+    suppressNextTabActivityRef.current = true;
+    suppressNextExampleActivityRef.current = true;
+    setActiveTab("dataset");
+    // ExampleReview owns the row-selection state. Broadcast so it can
+    // focus the row without lifting that state up to the page.
+    window.dispatchEvent(
+      new CustomEvent("polaris:select-example", { detail: { id } }),
+    );
+  });
+  // Polaris run_eval (confirmed) routes here. Switch to the Evaluate tab,
+  // then fire the start-run event the panel listens for. The tiny delay
+  // gives EvaluatePanel a chance to mount its listener before the event
+  // lands — a queue would be cleaner, but for one-shot intents this is
+  // enough.
+  useRegisterPolarisNav("eval_run_start", () => {
+    setActiveTab("evaluate");
+    window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent("polaris:start-eval"));
+    }, 120);
+  });
+  // Same pattern for scorer-draft.
+  useRegisterPolarisNav("scorers_generate", () => {
+    setActiveTab("scorers");
+    window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent("polaris:generate-scorers"));
+    }, 120);
+  });
+  // Analyze the active (or named) eval run from chat — same as clicking the
+  // "Analyze" button on the Evaluate tab.
+  useRegisterPolarisNav("eval_run_analyze", (props) => {
+    suppressNextTabActivityRef.current = true;
+    setActiveTab("evaluate");
+    window.setTimeout(() => {
+      window.dispatchEvent(
+        new CustomEvent("polaris:analyze-run", {
+          detail: { run_id: props.run_id as string | undefined },
+        }),
+      );
+    }, 120);
+  });
+  // Cancel an in-flight eval run from chat.
+  useRegisterPolarisNav("eval_run_cancel", (props) => {
+    suppressNextTabActivityRef.current = true;
+    setActiveTab("evaluate");
+    window.setTimeout(() => {
+      window.dispatchEvent(
+        new CustomEvent("polaris:cancel-run", {
+          detail: { run_id: props.run_id as string | undefined },
+        }),
+      );
+    }, 120);
+  });
+  // Promote / discard the candidate skill version from chat.
+  useRegisterPolarisNav("skill_version_promote", (props) => {
+    suppressNextTabActivityRef.current = true;
+    setActiveTab("evaluate");
+    window.setTimeout(() => {
+      window.dispatchEvent(
+        new CustomEvent("polaris:promote-skill-version", {
+          detail: { version_id: props.version_id as string | undefined },
+        }),
+      );
+    }, 120);
+  });
+  useRegisterPolarisNav("skill_version_discard", (props) => {
+    suppressNextTabActivityRef.current = true;
+    setActiveTab("evaluate");
+    window.setTimeout(() => {
+      window.dispatchEvent(
+        new CustomEvent("polaris:discard-skill-version", {
+          detail: { version_id: props.version_id as string | undefined },
+        }),
+      );
+    }, 120);
+  });
+  useRegisterPolarisNav("dataset_filter", (props) => {
+    setActiveTab("dataset");
+    // Same event pattern as `example`: ExampleReview owns the filter state,
+    // we forward what the agent picked so the table re-renders.
+    window.dispatchEvent(
+      new CustomEvent("polaris:set-filter", {
+        detail: {
+          feature_area: props.feature_area as string | undefined,
+          label: props.label as string | undefined,
+          review_status: props.review_status as string | undefined,
+        },
+      }),
+    );
+  });
 
   // Coverage map status comes from the gap analysis. Compute once per
   // gapAnalysis change so the dataset toolbar dot stays in sync.
@@ -370,12 +508,16 @@ export default function ProjectWorkspace() {
       const s = session.state as SessionState;
       setSessionId(urlSessionId);
       setState(s);
-      setMessages(
+      const hydrated =
         session.conversation?.map((m: { role: string; content: string }) => ({
           role: m.role as "user" | "assistant",
           content: m.content,
-        })) || [],
-      );
+        })) || [];
+      setMessages(hydrated);
+      // Polaris owns its own transcript (rail chat). Hydrate it from the
+      // same conversation so the user sees one continuous thread no matter
+      // which surface they used to chat.
+      hydratePolarisMessages(hydrated);
 
       if (s.input.goals && s.input.goals.length > 0) {
         setGoals([...s.input.goals, ""]);
@@ -546,7 +688,7 @@ export default function ProjectWorkspace() {
     return () => {
       cancelled = true;
     };
-  }, [urlSessionId, navigate]);
+  }, [urlSessionId, navigate, hydratePolarisMessages]);
 
   // --- Live updates: re-fetch session + dataset on SSE state_changed ---
   // The hook subscribes to /sessions/:id/events and calls this on every push.
@@ -601,16 +743,31 @@ export default function ProjectWorkspace() {
     setCachedDataset(sessionId, dataset);
   }, [sessionId, dataset]);
 
-  const status: AgentStatus = state.agent_status;
+  // Polaris write tools mutate session/dataset state directly via the DB
+  // helpers, which broadcast over SSE — so the SSE listener above usually
+  // catches it. The custom event is a backup for screens that don't have an
+  // SSE subscription open (e.g. brief flicker between drawer open and SSE
+  // reconnect).
+  useEffect(() => {
+    const handler = () => {
+      handleLiveStateChange();
+    };
+    window.addEventListener("polaris:state-changed", handler);
+    return () => window.removeEventListener("polaris:state-changed", handler);
+  }, [handleLiveStateChange]);
+
+  // `status` was passed to the legacy ConversationPanel — Polaris owns its
+  // own loading/error state. Kept commented as a breadcrumb if a future
+  // status surface needs it.
+  // const status: AgentStatus = state.agent_status;
   const hasCharter = !!(
     state.charter.coverage.criteria.length || state.charter.alignment.length
   );
   const nonEmptyGoals = goals.filter((g) => g.trim());
-  const totalStoryCount = storyGroups.reduce(
-    (sum, g) =>
-      sum + (g.role.trim() ? g.stories.filter((s) => s.what.trim()).length : 0),
-    0,
-  );
+  // totalStoryCount was used by the Goals tab badge ("3/10"); the badge
+  // was removed because the meaning of the ratio wasn't obvious. The
+  // value is no longer surfaced anywhere — leaving it derived in case a
+  // future tooltip wants it would just be dead state.
 
   // Tab availability. Goals is the entry point and always open; everything
   // downstream gates on its own data. Triggered- and prompt-eval projects
@@ -650,7 +807,15 @@ export default function ProjectWorkspace() {
   // "both" button reflects its own parallel run, not a false positive from
   // clicking the single-action ones while that's in flight.
   const [generatingDataset, setGeneratingDataset] = useState(false);
-  const [generatingScorersShortcut, setGeneratingScorersShortcut] = useState(false);
+  // Unified scorer-generation state — lifted out of ScorersPanel so the
+  // spinner + error survive tab switches and Polaris-triggered draftings
+  // don't race the panel's mount.
+  const [scorersGenerating, setScorersGenerating] = useState(false);
+  const [scorersError, setScorersError] = useState<string | null>(null);
+  // Legacy name kept because charter-shortcut handlers below reference it;
+  // it now mirrors the unified flag exactly.
+  const generatingScorersShortcut = scorersGenerating;
+  const setGeneratingScorersShortcut = setScorersGenerating;
   const [generatingBoth, setGeneratingBoth] = useState(false);
 
   // Watchdog: while a generation is in flight, poll the session + dataset
@@ -693,6 +858,7 @@ export default function ProjectWorkspace() {
       updateSessionName(sessionId, trimmed).catch((err) => {
         console.error("Failed to save project name:", err);
       });
+      notePolarisActivity(`renamed project to "${trimmed}"`);
     }
   };
 
@@ -733,56 +899,10 @@ export default function ProjectWorkspace() {
     seenActivityIdsRef.current = new Set();
   }, [sessionId]);
 
-  // --- Polaris activity polling ---
-  useEffect(() => {
-    if (!showAssistant || !sessionId) return;
-
-    // Seed cursor to "now" so we only surface activity that occurs while the
-    // drawer is open — prior turns already live in replayable history.
-    if (activityCursorRef.current === null) {
-      activityCursorRef.current = new Date().toISOString();
-    }
-
-    let cancelled = false;
-
-    const poll = async () => {
-      try {
-        const res = await getActivity(
-          sessionId,
-          activityCursorRef.current ?? undefined,
-        );
-        if (cancelled || res.activity.length === 0) return;
-
-        const newHints: Message[] = [];
-        for (const event of res.activity) {
-          if (seenActivityIdsRef.current.has(event.id)) continue;
-          seenActivityIdsRef.current.add(event.id);
-          activityCursorRef.current = event.created_at;
-          const label = activityLabel(event.turn_type);
-          if (!label) continue;
-          newHints.push({
-            role: "assistant",
-            kind: "hint",
-            content: label,
-            detail: event.detail ?? null,
-            id: event.id,
-          });
-        }
-        if (newHints.length > 0) {
-          setMessages((prev) => [...prev, ...newHints]);
-        }
-      } catch (err) {
-        console.error("Activity poll failed:", err);
-      }
-    };
-
-    poll();
-    const interval = window.setInterval(poll, 2000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, [showAssistant, sessionId]);
+  // (Activity polling for the rail's old ConversationPanel was removed when
+  // Polaris moved into the header. Inline activity markers from Polaris
+  // itself cover the same "what just happened" surface in the chat
+  // transcript.)
 
   // --- Goals handlers ---
 
@@ -1420,6 +1540,8 @@ export default function ProjectWorkspace() {
     const storiesText = formatStoryGroups(storyGroups);
     if (!goalsText && !storiesText) return;
 
+    notePolarisActivity("generating charter");
+    suppressNextTabActivityRef.current = true;
     setActiveTab("charter");
     setLoading(true);
 
@@ -1560,7 +1682,11 @@ export default function ProjectWorkspace() {
     [dataset],
   );
 
-  const handleSend = useCallback(
+  // Legacy chat handler — the rail no longer uses it (Polaris handles its
+  // own send). Kept because the discovery state machine still emits
+  // sendMessage / datasetChat calls from other code paths; will be
+  // removed when those are collapsed into Polaris tools.
+  const _handleSend = useCallback(
     async (message: string) => {
       if (!sessionId) return;
       setMessages((prev) => [...prev, { role: "user", content: message }]);
@@ -1607,6 +1733,7 @@ export default function ProjectWorkspace() {
     },
     [sessionId, dataset, executeAgentAction],
   );
+  void _handleSend;
 
   const handleEditCriterion = useCallback(
     async (dimension: string, index: number, value: string) => {
@@ -1973,6 +2100,90 @@ export default function ProjectWorkspace() {
     }
   }, [sessionId, ensureCharter]);
 
+  // Unified entry-point for kicking off scorer generation from any surface
+  // (panel button, charter-shortcut, Polaris). Owns the busy/error state so
+  // the user sees consistent feedback regardless of where they triggered
+  // it. `skipConfirm` is set by Polaris (it already showed its own confirm
+  // chip) and by the charter shortcut (it has its own confirm dialog
+  // upstream).
+  const handleGenerateScorers = useCallback(
+    async (opts?: { skipConfirm?: boolean }) => {
+      if (!sessionId) {
+        const msg = "no session loaded yet — open a project first";
+        console.warn("[scorers] generate skipped:", msg);
+        setScorersError(msg);
+        notePolarisActivity(`scorer draft failed: ${msg}`);
+        return;
+      }
+      // Guard against multiple concurrent runs (double-click, double-event).
+      if (scorersGenerating) {
+        console.warn("[scorers] generate already in flight");
+        return;
+      }
+      if (
+        scorers.length > 0 &&
+        !opts?.skipConfirm &&
+        !window.confirm(
+          "Regenerate scorers?\n\nThis replaces the current scorer code — any manual edits will be lost.",
+        )
+      ) {
+        return;
+      }
+      // Don't pre-empt on the frontend — the panel's "Generate scorers"
+      // button is already gated on the charter having at least one
+      // criterion (any of coverage/balance/alignment/rot). The parent's
+      // hasCharter check was stricter than the button's hasCriteria, so
+      // a project with only balance/rot criteria would see the button
+      // enabled but the click would bail silently. Let the backend
+      // return a 400 if it can't draft, and we'll show that error.
+      console.log("[scorers] handleGenerateScorers start", {
+        sessionId,
+        scorerCount: scorers.length,
+        skipConfirm: !!opts?.skipConfirm,
+        hasCharter,
+      });
+      notePolarisActivity(
+        scorers.length ? "regenerating scorers" : "drafting scorers",
+      );
+      setScorersError(null);
+      setScorersGenerating(true);
+      try {
+        await runGenerateScorers();
+        setScorersStale(false);
+        console.log("[scorers] handleGenerateScorers complete");
+        notePolarisActivity("scorer draft complete");
+      } catch (err) {
+        const msg =
+          err instanceof Error ? err.message : "Failed to generate scorers";
+        console.error("[scorers] handleGenerateScorers failed:", err);
+        setScorersError(msg);
+        notePolarisActivity(`scorer draft failed: ${msg}`);
+      } finally {
+        setScorersGenerating(false);
+      }
+    },
+    [sessionId, scorers.length, scorersGenerating, hasCharter, runGenerateScorers],
+  );
+
+  // Parent listens for Polaris-triggered draft requests via a stable
+  // listener (bound once at mount). The ref pattern keeps the latest
+  // handler in scope without re-binding the event listener on every
+  // scorers.length / hasCharter change — that re-bind churn was creating
+  // a small window where the polaris:generate-scorers event could land
+  // between teardown and re-setup and be silently dropped.
+  const handleGenerateScorersRef = useRef(handleGenerateScorers);
+  useEffect(() => {
+    handleGenerateScorersRef.current = handleGenerateScorers;
+  });
+  useEffect(() => {
+    const handler = () => {
+      void handleGenerateScorersRef.current({ skipConfirm: true });
+    };
+    window.addEventListener("polaris:generate-scorers", handler);
+    return () =>
+      window.removeEventListener("polaris:generate-scorers", handler);
+  }, []);
+
   const handleShortcutDataset = useCallback(async () => {
     // "Go to" short-circuit: artifact exists and isn't marked stale, so just
     // navigate — no point regenerating over a fresh dataset.
@@ -1990,6 +2201,8 @@ export default function ProjectWorkspace() {
     }
     // Switch tabs first so the user immediately sees the spinner instead of
     // staring at the charter page wondering whether anything happened.
+    notePolarisActivity(dataset ? "regenerating dataset" : "generating dataset");
+    suppressNextTabActivityRef.current = true;
     setActiveTab("dataset");
     setGeneratingDataset(true);
     try {
@@ -2011,15 +2224,13 @@ export default function ProjectWorkspace() {
       );
       if (!ok) return;
     }
+    suppressNextTabActivityRef.current = true;
     setActiveTab("scorers");
-    setGeneratingScorersShortcut(true);
-    try {
-      await runGenerateScorers();
-      setScorersStale(false);
-    } finally {
-      setGeneratingScorersShortcut(false);
-    }
-  }, [scorers.length, scorersStale, runGenerateScorers]);
+    // Routes through the unified handler so the generating + error state
+    // lives in one place and survives tab switches. `skipConfirm` because
+    // the charter shortcut already handled its own confirm dialog.
+    await handleGenerateScorers({ skipConfirm: true });
+  }, [scorers.length, scorersStale, handleGenerateScorers]);
 
   const handleShortcutBoth = useCallback(async () => {
     const datasetFresh = !!dataset && !datasetStale;
@@ -2086,7 +2297,7 @@ export default function ProjectWorkspace() {
       setGeneratingDataset(false);
       setGeneratingScorersShortcut(false);
     }
-  }, [ensureCharter, runGenerateDataset, runGenerateScorers, dataset, datasetStale, scorers.length, scorersStale]);
+  }, [ensureCharter, runGenerateDataset, runGenerateScorers, dataset, datasetStale, scorers.length, scorersStale, setGeneratingScorersShortcut]);
 
   const handleGenerateDataset = useCallback(async () => {
     if (!sessionId) return;
@@ -2118,6 +2329,9 @@ export default function ProjectWorkspace() {
   const handleSynthesize = useCallback(
     async (count?: number) => {
       if (!dataset) return;
+      notePolarisActivity(
+        `started synthesizing examples${count ? ` (${count}/scenario)` : ""}`,
+      );
       setLoading(true);
       setGeneratingDataset(true);
       try {
@@ -2128,6 +2342,7 @@ export default function ProjectWorkspace() {
         const fullDs = await getDataset(dataset.session_id);
         setDataset(fullDs);
         setDatasetStale(false);
+        notePolarisActivity("synthesis complete");
       } catch (err) {
         console.error("Failed to synthesize:", err);
       } finally {
@@ -2167,6 +2382,22 @@ export default function ProjectWorkspace() {
             ),
           };
         });
+        // Narrate the change into the Polaris transcript so the agent's
+        // user can see what the click did. Most update flows are a single
+        // field — describe that specifically; otherwise fall back to a
+        // generic "edited" line.
+        const short = exampleId.slice(0, 8);
+        if (fields.review_status === 'approved') {
+          notePolarisActivity(`approved example ${short}…`);
+        } else if (fields.review_status === 'rejected') {
+          notePolarisActivity(`rejected example ${short}…`);
+        } else if (fields.label) {
+          notePolarisActivity(`relabeled example ${short}… as ${fields.label}`);
+        } else if (fields.input !== undefined || fields.expected_output !== undefined) {
+          notePolarisActivity(`edited example ${short}…`);
+        } else {
+          notePolarisActivity(`updated example ${short}…`);
+        }
       } catch (err) {
         console.error("Failed to update example:", err);
         // Roll back to the pre-update row so the UI doesn't lie about a
@@ -2206,6 +2437,7 @@ export default function ProjectWorkspace() {
       });
       try {
         await apiDeleteExample(dataset.id, exampleId);
+        notePolarisActivity(`deleted example ${exampleId.slice(0, 8)}…`);
       } catch (err) {
         console.error("Failed to delete example:", err);
         // Roll back so the row reappears.
@@ -2222,11 +2454,13 @@ export default function ProjectWorkspace() {
 
   const handleAutoReview = useCallback(async () => {
     if (!dataset) return;
+    notePolarisActivity("started auto-review");
     setLoading(true);
     try {
       await autoReviewExamples(dataset.id);
       const fullDs = await getDataset(dataset.session_id);
       setDataset(fullDs);
+      notePolarisActivity("auto-review complete");
     } catch (err) {
       console.error("Failed to auto-review:", err);
     } finally {
@@ -2430,46 +2664,9 @@ export default function ProjectWorkspace() {
     );
   }
 
-  const aiAssistButton = (
-    <button
-      onClick={() => setShowAssistant(!showAssistant)}
-      className="flex items-center gap-1.5 px-6 py-6 w-full text-left hover:bg-fill-neutral/30 transition-colors"
-    >
-      <ChatBubbleIcon />
-      <span className="text-base font-semibold text-fg-contrast">Polaris</span>
-    </button>
-  );
-
-  const polarisPanel = (
-    <div className="flex flex-col h-full min-h-0">
-      <div className="px-6 py-6 border-b border-border-hint flex items-center justify-between flex-shrink-0">
-        <div className="flex items-center gap-1.5">
-          <ChatBubbleIcon />
-          <span className="text-base font-semibold text-fg-contrast">
-            Polaris
-          </span>
-        </div>
-        <IconButton tone="dim" onClick={() => setShowAssistant(false)}>
-          <CloseIcon />
-        </IconButton>
-      </div>
-      <div className="flex-1 min-h-0 flex flex-col">
-        <ConversationPanel
-          messages={messages}
-          status={status}
-          validation={state.validation}
-          loading={loading}
-          onSend={handleSend}
-          onProceed={() => {}}
-          onKeepRefining={() => {}}
-          actionSuggestions={actionSuggestions}
-          onActionSuggestion={(action) => {
-            executeAgentAction({ action });
-          }}
-        />
-      </div>
-    </div>
-  );
+  // Polaris lives in the header (PolarisAgentButton) — the right rail no
+  // longer hosts it. The rail itself stays for other panels (radar, etc.)
+  // but its bottom slot is empty now.
 
   // --- Next-button state per panel ---
 
@@ -2549,6 +2746,7 @@ export default function ProjectWorkspace() {
           </div>
         </div>
         <div className="flex items-center gap-3">
+          <PolarisAgentButton />
           {role === "owner" && sessionId && (
             <Button
               size="small"
@@ -2596,28 +2794,32 @@ export default function ProjectWorkspace() {
           <SidebarGroup hideTopDivider>
             <SidebarItem
               label="Goal"
-              icon={<GoalsIcon width={24} height={24} />}
+              icon={<GoalsIcon width={18} height={18} />}
               active={activeTab === "goals" || activeTab === "users"}
               onClick={() => setActiveTab("goals")}
               disabled={!usersAvailable}
               disabledReason="Goal is the entry tab — it should always be available."
-              badge={
-                totalStoryCount > 0
-                  ? `${nonEmptyGoals.length}/${totalStoryCount}`
-                  : nonEmptyGoals.length > 0
-                    ? `${nonEmptyGoals.length}`
-                    : undefined
-              }
             />
             <SidebarItem
               label={isPromptEval ? "Prompt" : "Skill"}
-              icon={<SkillIcon width={24} height={24} />}
+              icon={<SkillIcon width={18} height={18} />}
               active={activeTab === "skill"}
               onClick={() => setActiveTab("skill")}
+              badge={(() => {
+                // Show the latest skill version (e.g. "v3"). Versions are
+                // stored newest-first when we append, but be defensive and
+                // pick the max number anyway.
+                const versions = state.skill_versions ?? [];
+                if (versions.length === 0) return undefined;
+                const latest = Math.max(
+                  ...versions.map((v) => Number(v.version ?? 0) || 0),
+                );
+                return latest > 0 ? `v${latest}` : undefined;
+              })()}
             />
             <SidebarItem
               label="Charter"
-              icon={<CharterIcon width={24} height={24} />}
+              icon={<CharterIcon width={18} height={18} />}
               active={activeTab === "charter"}
               onClick={() => setActiveTab("charter")}
               disabled={!charterAvailable}
@@ -2629,7 +2831,7 @@ export default function ProjectWorkspace() {
           <SidebarGroup>
             <SidebarItem
               label="Dataset"
-              icon={<DatasetIcon width={24} height={24} />}
+              icon={<DatasetIcon width={18} height={18} />}
               active={activeTab === "dataset"}
               onClick={() => setActiveTab("dataset")}
               disabled={!datasetAvailable}
@@ -2641,10 +2843,15 @@ export default function ProjectWorkspace() {
                     ? "Generate the charter first; the dataset is built from its criteria."
                     : undefined
               }
+              badge={
+                dataset?.examples && dataset.examples.length > 0
+                  ? `${dataset.examples.length}`
+                  : undefined
+              }
             />
             <SidebarItem
               label="Scorers"
-              icon={<ScorerIcon width={24} height={24} />}
+              icon={<ScorerIcon width={18} height={18} />}
               active={activeTab === "scorers"}
               onClick={() => setActiveTab("scorers")}
               disabled={!scorersAvailable}
@@ -2656,13 +2863,16 @@ export default function ProjectWorkspace() {
                     ? "Generate the charter first; scorers map to its criteria."
                     : undefined
               }
+              badge={
+                scorers.length > 0 ? `${scorers.length}` : undefined
+              }
             />
           </SidebarGroup>
 
           <SidebarGroup>
             <SidebarItem
               label="Evaluations"
-              icon={<StarIcon width={24} height={24} />}
+              icon={<StarIcon width={18} height={18} />}
               active={activeTab === "evaluate"}
               onClick={() => setActiveTab("evaluate")}
               disabled={!evaluateAvailable}
@@ -2850,8 +3060,7 @@ export default function ProjectWorkspace() {
               nextVariant={goalNextVariant}
               nextDisabled={goalNextDisabled}
               loading={loading}
-              rightBottom={showAssistant ? undefined : aiAssistButton}
-              rightBottomExpanded={showAssistant ? polarisPanel : undefined}
+              // Polaris moved to the header — no chat in the rail bottom.
               canEdit={canEdit}
             />
           )}
@@ -2878,8 +3087,7 @@ export default function ProjectWorkspace() {
               onCriteriaChanged={scheduleCharterSuggestionRegen}
               suggestionsLoading={charterSuggestionsLoading}
               loading={loading}
-              rightBottom={showAssistant ? undefined : aiAssistButton}
-              rightBottomExpanded={showAssistant ? polarisPanel : undefined}
+              // Polaris moved to the header — no chat in the rail bottom.
               onGenerateDataset={handleShortcutDataset}
               onGenerateScorers={handleShortcutScorers}
               onGenerateBoth={handleShortcutBoth}
@@ -3076,7 +3284,9 @@ export default function ProjectWorkspace() {
                   }
                 }}
                 onNavigateToEvaluate={() => setActiveTab("evaluate")}
-                externalGenerating={generatingScorersShortcut || generatingBoth}
+                externalGenerating={scorersGenerating || generatingBoth}
+                externalError={scorersError}
+                onGenerate={() => handleGenerateScorers()}
                 canEdit={canEdit}
               />
             </>
@@ -3303,7 +3513,15 @@ function SidebarItem({
             : "text-fg-contrast hover:bg-fill-neutral/50 font-medium"
       }`}
     >
-      {icon ?? <StarIcon />}
+      {/* Icon slot: every icon renders at 18×18 max, centered in a 24×24
+          box (1.5× the original 12-in-16 sizing). Wrapping in a
+          fixed-size flex-center container is the only reliable way to
+          normalize visual sizes when the icons have different
+          viewBoxes (16-vb vs 24-vb) and different content densities
+          (filled blobs vs concentric rings vs sparse dots). */}
+      <span className="flex w-6 h-6 items-center justify-center flex-shrink-0 [&_svg]:max-w-[18px] [&_svg]:max-h-[18px]">
+        {icon ?? <StarIcon width={18} height={18} />}
+      </span>
       <span className="truncate w-full">{label}</span>
       {loading && (
         <Loader2 className="w-4 h-4 text-fg-dim animate-spin flex-shrink-0" />
