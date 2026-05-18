@@ -107,7 +107,10 @@ export default function UsersPanel({
 
   // Horizontal scroll state for the role tab bar
   const tabScrollRef = useRef<HTMLDivElement | null>(null);
-  const tabButtonRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
+  // Tabs were `<button>` originally, but the per-tab hover affordances are
+  // also real buttons — invalid nesting. Now divs with role=button, so the
+  // ref map carries div elements.
+  const tabButtonRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(false);
 
@@ -675,8 +678,15 @@ export default function UsersPanel({
                 const isEditingThis = editingRole?.gi === index;
 
                 return (
-                  <button
+                  // Was a <button> but the hover affordances (Edit / Remove
+                  // IconButton) are real buttons nested inside — invalid
+                  // HTML and a React validateDOMNesting warning. Swapping
+                  // to a div with role=button preserves keyboard activation
+                  // and styling while letting the inner buttons live.
+                  <div
                     key={index}
+                    role="button"
+                    tabIndex={isEditingThis ? -1 : 0}
                     ref={(el) => {
                       if (el) tabButtonRefs.current.set(index, el);
                       else tabButtonRefs.current.delete(index);
@@ -687,7 +697,15 @@ export default function UsersPanel({
                         setAddingRole(false);
                       }
                     }}
-                    className={`group flex-shrink-0 flex items-center gap-2 py-3 px-4 text-base font-medium whitespace-nowrap transition-colors ${
+                    onKeyDown={(e) => {
+                      if (isEditingThis) return;
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setActiveRoleIndex(index);
+                        setAddingRole(false);
+                      }
+                    }}
+                    className={`group flex-shrink-0 flex items-center gap-2 py-3 px-4 text-base font-medium whitespace-nowrap transition-colors cursor-pointer outline-none focus-visible:ring-1 focus-visible:ring-accent ${
                       isActive
                         ? "bg-fill-neutral text-fg-contrast"
                         : "text-fg-dim hover:text-fg-contrast"
@@ -738,7 +756,7 @@ export default function UsersPanel({
                         </span>
                       </>
                     )}
-                  </button>
+                  </div>
                 );
               })}
             </div>
