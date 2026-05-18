@@ -1,10 +1,9 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { ChevronDown, Check, X, RefreshCw, Pencil, Trash2, Loader2 } from 'lucide-react'
-import type { Example, Charter, GapAnalysis, JudgeAgreement, AlignmentEntry } from '../types'
+import type { Example, Charter, GapAnalysis, JudgeAgreement } from '../types'
 import DeleteModal from './examples/DeleteModal'
 import GenerateModal from './examples/GenerateModal'
-import DatasetQABanner from './DatasetQABanner'
-import CoverageMap from './CoverageMap'
+import CharterSidebar from './CharterSidebar'
 import JudgeAgreementBadge from './JudgeAgreementBadge'
 
 type CellId = 'scenario' | 'input' | 'output' | 'labels' | 'status'
@@ -47,24 +46,17 @@ interface ExampleReviewProps {
   onSynthesize: (count?: number) => void
   onAutoReview: () => void
   onExport: () => void
-  /** Toggle the inline coverage map's collapsed state. Kept as a callback
-   *  rather than internal state so the parent can also scroll the panel
-   *  into view from the empty-state CTA. */
+  /** Opens the full Coverage Map matrix in a modal. The matrix lives in a
+   *  modal/subpage so the row workspace stays focused on per-row review;
+   *  the sidebar carries the at-a-glance signal (radar + score). */
   onShowCoverageMap: () => void
-  /** Cached gap analysis. When present, the inline Coverage Map panel
-   *  renders above the example list. */
+  /** Cached gap analysis. Drives the compact coverage summary in the
+   *  sidebar (radar + score + "Fix coverage" CTA). */
   gaps?: GapAnalysis | null
   /** Judge-human label agreement, rendered next to the stats counts. */
   agreement?: JudgeAgreement | null
-  /** Used to scope the Dataset QA banner dismissal key — a new dataset
-   *  resets the banner. */
-  datasetId?: string
-  /** Whether the inline coverage map is collapsed. Owned by the parent so
-   *  it can persist + restore across mounts. */
-  coverageCollapsed?: boolean
-  /** Per-cell + bulk-fill handlers wired from the inline coverage map's
-   *  "+" / "Fix coverage" buttons. Mirrors the old modal plumbing. */
-  onRequestCellGenerate?: (criterion: string, featureArea: string) => void
+  /** Bulk "fix every empty cell" — surfaced from the sidebar's compact
+   *  coverage summary. The matrix's per-cell "+" buttons live in the modal. */
   onRequestFillGaps?: () => void
   onNavigateToScorers?: () => void
   onHeaderClick?: () => void
@@ -119,9 +111,6 @@ export default function ExampleReview({
   onShowCoverageMap,
   gaps,
   agreement,
-  datasetId,
-  coverageCollapsed = false,
-  onRequestCellGenerate,
   onRequestFillGaps,
   onNavigateToScorers: _onNavigateToScorers,
   onHeaderClick: _onHeaderClick,
@@ -526,13 +515,14 @@ export default function ExampleReview({
           generating ? "pointer-events-none select-none" : ""
         }`}
       >
-        {/* Dataset QA framing — explains the phase before the user starts
-            clicking through rows. Dismissible; re-appears for fresh datasets
-            because the storage key is scoped to datasetId. */}
-        {datasetId && <DatasetQABanner datasetId={datasetId} />}
-
-        {/* Title */}
-        <h1 className="text-xl font-semibold text-fg-contrast leading-none">Dataset</h1>
+        {/* Title + Dataset QA subtitle — framing without a dismissable
+            banner. Distinguishes this phase from later eval-result review. */}
+        <div className="flex flex-col gap-1">
+          <h1 className="text-xl font-semibold text-fg-contrast leading-none">Dataset</h1>
+          <p className="text-xs text-fg-dim">
+            The test cases your eval will run against — review for quality, not model performance.
+          </p>
+        </div>
 
         {/* Stats + dataset-level utilities (Coverage map / Export / Auto-review /
             Suggest revisions / Generate). Sits directly under the title — these
@@ -555,10 +545,10 @@ export default function ExampleReview({
             <button
               onClick={onShowCoverageMap}
               className="flex items-center gap-1.5 px-2 py-1 text-xs text-fg-dim hover:text-fg-contrast border border-border-hint transition-colors"
-              title={coverageCollapsed ? 'Show coverage map' : 'Hide coverage map'}
+              title="Open the full coverage matrix"
             >
               {coverageScore != null && <CoverageDot score={coverageScore} />}
-              {coverageCollapsed ? 'Show coverage map' : 'Hide coverage map'}
+              Coverage map
             </button>
             <button
               onClick={onExport}
@@ -609,21 +599,6 @@ export default function ExampleReview({
             )}
           </div>
         </div>
-
-        {/* Inline coverage map — always present at the top of the dataset
-            workspace so curation gaps are visible without an extra click.
-            Collapse state is owned by the parent so it persists across
-            mounts (same toggle as the toolbar "Show / Hide" button). */}
-        {gaps && (
-          <CoverageMap
-            gaps={gaps}
-            variant="inline"
-            collapsed={coverageCollapsed}
-            onToggleCollapsed={onShowCoverageMap}
-            onRequestCellGenerate={onRequestCellGenerate}
-            onRequestFillGaps={onRequestFillGaps}
-          />
-        )}
 
         {/* Filters + per-row actions — sits closer to the table since it
             scopes to which rows are shown and what to do with the selected
@@ -718,8 +693,11 @@ export default function ExampleReview({
           )}
         </div>
 
-        {/* Grouped list */}
-        <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-0">
+        {/* Grouped list + right rail (charter context + compact coverage).
+            The list is the primary surface; the sidebar carries criteria
+            for the focused row and the at-a-glance coverage signal. */}
+        <div className="flex-1 min-h-0 flex gap-4">
+          <div className="flex-1 min-w-0 overflow-y-auto flex flex-col gap-0">
           {filtered.length === 0 && filterStatus === 'pending' && stats.total > 0 ? (
             <div className="flex-1 flex flex-col items-center justify-center">
               <div className="text-center max-w-sm">
@@ -767,10 +745,7 @@ export default function ExampleReview({
                 {groups.map(([groupName, items], gi) => (
                   <div key={groupName} className="flex flex-col">
                     {gi > 0 && <div className="h-4" />}
-                    <GroupHeader
-                      name={groupName}
-                      alignment={charter.alignment?.find(a => a.feature_area === groupName)}
-                    />
+                    <GroupHeader name={groupName} />
                     {items.map(ex => (
                       <ExampleRow
                         key={ex.id}
@@ -796,6 +771,15 @@ export default function ExampleReview({
               </div>
             </>
           )}
+          </div>
+          <CharterSidebar
+            charter={charter}
+            focusedFeatureArea={selectedExample?.feature_area}
+            focusedCoverageTags={selectedExample?.coverage_tags ?? []}
+            gaps={gaps}
+            onOpenCoverageMatrix={onShowCoverageMap}
+            onRequestFillGaps={onRequestFillGaps}
+          />
         </div>
       </div>
 
@@ -906,27 +890,13 @@ function ColumnHeaderRow() {
   )
 }
 
-function GroupHeader({ name, alignment }: { name: string; alignment?: AlignmentEntry }) {
-  // Sticky so the charter criteria stay pinned while the user scrolls
-  // through rows in the same feature_area — reviewers don't need to scroll
-  // away to recheck what good/bad means.
+function GroupHeader({ name }: { name: string }) {
+  // Sticky so the section label stays pinned while scrolling. Criteria for
+  // the focused row live in the right sidebar — keeping the header to the
+  // section name only avoids duplicating that info on every separator.
   return (
-    <div className="sticky top-0 z-10 px-4 py-2 bg-gray-200 flex flex-col gap-1">
+    <div className="sticky top-0 z-10 px-4 py-2 bg-gray-200">
       <span className="text-sm font-semibold text-white font-sans">{name}</span>
-      {alignment && (alignment.good || alignment.bad) && (
-        <div className="flex flex-col gap-0.5 text-[11px] leading-snug font-sans text-white/85">
-          {alignment.good && (
-            <span>
-              <span className="font-semibold">Good:</span> {alignment.good}
-            </span>
-          )}
-          {alignment.bad && (
-            <span>
-              <span className="font-semibold">Bad:</span> {alignment.bad}
-            </span>
-          )}
-        </div>
-      )}
     </div>
   )
 }
@@ -1010,8 +980,14 @@ function ExampleRow({
   const hasIssues = example.judge_verdict?.issues && example.judge_verdict.issues.length > 0
   const hasRevision = !!example.revision_suggestion
 
-  // Scenario column: prefer first coverage tag, fall back to feature_area
-  const scenarioText = example.coverage_tags[0] || example.feature_area
+  // Scenario column: chip per coverage_tag so reviewers see every criterion
+  // the row covers. Fall back to feature_area when no tags are present —
+  // that's mostly orphaned rows; the group header already shows the area.
+  const scenarioTags = example.coverage_tags.length > 0
+    ? example.coverage_tags
+    : example.feature_area
+      ? [example.feature_area]
+      : []
 
   return (
     <>
@@ -1025,13 +1001,26 @@ function ExampleRow({
             : 'bg-gray-150 hover:bg-fill-neutral-hover',
         ].join(' ')}
       >
-        {/* Scenario */}
+        {/* Scenario — coverage_tags rendered as chips so all tagged
+            criteria are visible, not just the first. Fallback to
+            feature_area only when tags are empty (orphaned rows). */}
         <div
           onClick={e => { e.stopPropagation(); onCellSelect('scenario') }}
           className={`flex-1 basis-0 self-stretch p-px overflow-hidden ${cellCls('scenario')}`}
         >
-          <div className="h-full p-2 flex flex-col gap-1 overflow-y-auto">
-            <div className="text-sm text-fg-contrast leading-[1.5]">{scenarioText}</div>
+          <div className="h-full p-2 flex flex-wrap gap-1 content-start overflow-y-auto">
+            {scenarioTags.length === 0 ? (
+              <span className="text-xs text-fg-dim italic">untagged</span>
+            ) : (
+              scenarioTags.map(tag => (
+                <span
+                  key={tag}
+                  className="inline-flex items-center px-1.5 py-0.5 text-[11px] leading-tight bg-fill-neutral text-fg-contrast border border-border-hint"
+                >
+                  {tag}
+                </span>
+              ))
+            )}
           </div>
         </div>
 

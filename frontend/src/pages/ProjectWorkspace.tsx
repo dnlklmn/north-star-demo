@@ -88,6 +88,7 @@ import SkillPanel from "../components/SkillPanel";
 import ExampleReview from "../components/ExampleReview";
 import { computeCoverageScore } from "../components/coverage";
 import GenerateModal from "../components/examples/GenerateModal";
+import CoverageMap from "../components/CoverageMap";
 import SettingsPanel from "../components/SettingsPanel";
 import ShareModal from "../components/ShareModal";
 import { useProjectEvents, type SynthProgressEvent } from "../hooks/useProjectEvents";
@@ -287,11 +288,10 @@ export default function ProjectWorkspace() {
   const [retagLoading, setRetagLoading] = useState(false);
   const [gapAnalysis, setGapAnalysis] = useState<GapAnalysis | null>(null);
   const [judgeAgreement, setJudgeAgreement] = useState<JudgeAgreement | null>(null);
-  // Inline coverage map collapse — default expanded so reviewers see gaps
-  // immediately. The collapse pref is persisted *per dataset* below so the
-  // toggle survives navigation away and back without leaking across
-  // projects.
-  const [coverageMapCollapsed, setCoverageMapCollapsed] = useState(false);
+  // Full coverage matrix lives in a modal — the dataset workspace surfaces
+  // the compact radar+score in the right sidebar and opens the matrix only
+  // on demand so the row list keeps maximum width.
+  const [showCoverageMap, setShowCoverageMap] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
 
@@ -368,11 +368,8 @@ export default function ProjectWorkspace() {
     notePolarisActivity(`opened ${activeTab} tab`);
   }, [activeTab]);
   useRegisterPolarisNav("coverage_map", () => {
-    // Coverage map is inline now — switch to the dataset tab and ensure
-    // the panel is expanded. Don't persist the choice, since Polaris is
-    // showing it for this view, not changing the user's default.
     setActiveTab("dataset");
-    setCoverageMapCollapsed(false);
+    setShowCoverageMap(true);
   });
   useRegisterPolarisNav("settings", () => setShowSettings(true));
   useRegisterPolarisNav("share", () => setShowShareModal(true));
@@ -1626,10 +1623,7 @@ export default function ProjectWorkspace() {
           try {
             const gaps = await getGapAnalysis(dataset.id);
             setGapAnalysis(gaps);
-            // Expand the inline panel just for this view — don't persist,
-            // since the user's collapse preference shouldn't get clobbered
-            // by an agent message.
-            setCoverageMapCollapsed(false);
+            setShowCoverageMap(true);
           } catch (err) {
             console.error("Failed to get coverage:", err);
           }
@@ -2005,23 +1999,6 @@ export default function ProjectWorkspace() {
       cancelled = true;
     };
   }, [dataset?.id, datasetExampleCount]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Restore the per-dataset coverage-map collapse preference. Reads on
-  // dataset switch so the user's last choice for *this* dataset wins.
-  useEffect(() => {
-    if (!dataset) {
-      setCoverageMapCollapsed(false);
-      return;
-    }
-    try {
-      const v = localStorage.getItem(
-        `northstar.coverageMap.collapsed.${dataset.id}`,
-      );
-      setCoverageMapCollapsed(v === "1");
-    } catch {
-      setCoverageMapCollapsed(false);
-    }
-  }, [dataset?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Judge-human agreement — re-fetch whenever review counts change so the
   // header metric tracks reviews landing in real time. Same dataset-empty
@@ -2610,20 +2587,10 @@ export default function ProjectWorkspace() {
 
   const handleShowCoverageMap = useCallback(async () => {
     if (!dataset) return;
-    // Inline now — the toolbar button toggles the panel's collapsed state.
-    // Persist per-dataset so the choice doesn't leak across projects.
-    setCoverageMapCollapsed(prev => {
-      const next = !prev;
-      try {
-        localStorage.setItem(
-          `northstar.coverageMap.collapsed.${dataset.id}`,
-          next ? "1" : "0",
-        );
-      } catch {
-        // Storage unavailable (private mode) — fall back to in-memory only.
-      }
-      return next;
-    });
+    // Open the matrix modal immediately, then refresh gaps in the
+    // background — the useEffect below keeps it warm so most opens are
+    // already up-to-date.
+    setShowCoverageMap(true);
     try {
       const gaps = await getGapAnalysis(dataset.id);
       setGapAnalysis(gaps);
@@ -3224,9 +3191,6 @@ export default function ProjectWorkspace() {
                     onShowCoverageMap={handleShowCoverageMap}
                     gaps={gapAnalysis}
                     agreement={judgeAgreement}
-                    datasetId={dataset.id}
-                    coverageCollapsed={coverageMapCollapsed}
-                    onRequestCellGenerate={handleRequestCellGenerate}
                     onRequestFillGaps={handleRequestFillGaps}
                     onNavigateToScorers={() => setActiveTab("scorers")}
                     onHeaderClick={() => {}}
@@ -3449,9 +3413,19 @@ export default function ProjectWorkspace() {
 
       </div>
 
-      {/* Coverage map is now rendered inline by ExampleReview — no overlay. */}
+      {/* Coverage matrix modal — opened on demand from the sidebar's
+          "View full matrix" button, the toolbar "Coverage map" button, or
+          a Polaris navigation. */}
+      {showCoverageMap && gapAnalysis && (
+        <CoverageMap
+          gaps={gapAnalysis}
+          onClose={() => setShowCoverageMap(false)}
+          onRequestCellGenerate={handleRequestCellGenerate}
+          onRequestFillGaps={handleRequestFillGaps}
+        />
+      )}
 
-      {/* Coverage-driven generate modal — staged by the inline CoverageMap, runs
+      {/* Coverage-driven generate modal — staged by the CoverageMap, runs
           synth scoped to the requested cell or set of empty cells. */}
       {coverageGenerateRequest && (
         <GenerateModal
