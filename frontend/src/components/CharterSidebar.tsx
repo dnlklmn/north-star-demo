@@ -4,6 +4,11 @@ import { computeCoverageScore, coverageStatus } from './coverage'
 
 interface CharterSidebarProps {
   charter: Charter
+  /** Charter at the time the dataset was generated. Rows' feature_area
+   *  strings are normalized against this at synth time, so we look up
+   *  alignment here first — using the live charter would miss matches
+   *  whenever the user edited the charter post-synth. */
+  charterSnapshot?: Charter | null
   /** feature_area of the currently focused row (set by click or scroll).
    *  Resolved against alignment by name match. */
   focusedFeatureArea: string | null | undefined
@@ -18,14 +23,28 @@ interface CharterSidebarProps {
 
 export default function CharterSidebar({
   charter,
+  charterSnapshot,
   focusedFeatureArea,
   focusedCoverageTags,
   gaps,
   onOpenCoverageMatrix,
   onRequestFillGaps,
 }: CharterSidebarProps) {
-  const allAlignment = charter.alignment ?? []
+  // Prefer the snapshot for matching — that's the alignment the rows were
+  // tagged against. Fall back to the live charter if the dataset has no
+  // snapshot (older datasets) or it's empty.
+  const snapshotAlignment = charterSnapshot?.alignment ?? []
+  const liveAlignment = charter.alignment ?? []
+  const allAlignment = snapshotAlignment.length > 0 ? snapshotAlignment : liveAlignment
   const matched = allAlignment.find(a => a.feature_area === focusedFeatureArea)
+  // Drift signal: when both lists are non-empty and their feature_area sets
+  // differ, the user edited the charter after synth and "Retag against
+  // charter" would help.
+  const usingSnapshot = snapshotAlignment.length > 0
+  const driftDetected =
+    usingSnapshot &&
+    liveAlignment.length > 0 &&
+    !sameFeatureAreas(snapshotAlignment, liveAlignment)
 
   // Full-height rail with a left border, matching Scorers / Evaluate. Inner
   // sections separate via border-b (not floating cards).
@@ -46,6 +65,13 @@ export default function CharterSidebar({
             {focusedFeatureArea || 'No row in view'}
           </div>
         </header>
+
+        {driftDetected && (
+          <div className="px-2 py-1.5 bg-warning/10 border-l-2 border-warning text-[11px] text-warning leading-snug">
+            The charter alignment has changed since this dataset was
+            generated. Run "Retag against charter" to align rows.
+          </div>
+        )}
 
         {!focusedFeatureArea ? (
           <p className="text-fg-dim">
@@ -96,6 +122,15 @@ export default function CharterSidebar({
       </section>
     </aside>
   )
+}
+
+function sameFeatureAreas(a: Charter['alignment'], b: Charter['alignment']): boolean {
+  if (a.length !== b.length) return false
+  const setA = new Set(a.map(e => e.feature_area))
+  for (const e of b) {
+    if (!setA.has(e.feature_area)) return false
+  }
+  return true
 }
 
 function CriterionBlock({ tone, label, text }: { tone: 'good' | 'bad'; label: string; text: string }) {
@@ -170,6 +205,8 @@ function CoverageSummary({
               }
             })}
             size={160}
+            labelFontSize={11}
+            labelMaxChars={14}
           />
         </div>
       )}

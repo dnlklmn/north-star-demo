@@ -25,6 +25,11 @@ const ACTIONS_BY_CELL: Record<CellId, ActionId[]> = {
 interface ExampleReviewProps {
   examples: Example[]
   charter: Charter
+  /** Charter at the time the dataset was created. The sidebar uses this for
+   *  the alignment lookup because rows' feature_area strings are normalized
+   *  against the snapshot at synth time — checking the live charter would
+   *  miss matches whenever the user edited the charter post-synth. */
+  charterSnapshot?: Charter | null
   loading: boolean
   /** Distinguishes "generating new examples" (long-running, blocking) from
    *  smaller utility loads like Auto-review or Suggest revisions. When true,
@@ -99,6 +104,7 @@ const UNMAPPED_FEATURE_AREA = '(unmapped)'
 export default function ExampleReview({
   examples,
   charter,
+  charterSnapshot,
   loading,
   generating = false,
   generatingTotal,
@@ -822,6 +828,7 @@ export default function ExampleReview({
       </div>
       <CharterSidebar
         charter={charter}
+        charterSnapshot={charterSnapshot}
         focusedFeatureArea={focusedExample?.feature_area}
         focusedCoverageTags={focusedExample?.coverage_tags ?? []}
         gaps={gaps}

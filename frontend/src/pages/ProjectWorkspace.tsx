@@ -3191,6 +3191,7 @@ export default function ProjectWorkspace() {
                     onShowCoverageMap={handleShowCoverageMap}
                     gaps={gapAnalysis}
                     agreement={judgeAgreement}
+                    charterSnapshot={dataset.charter_snapshot}
                     onRequestFillGaps={handleRequestFillGaps}
                     onNavigateToScorers={() => setActiveTab("scorers")}
                     onHeaderClick={() => {}}
