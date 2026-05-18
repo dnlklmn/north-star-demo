@@ -159,6 +159,16 @@ export default function CharterPanel({
   // last-viewed tab.
   const [activeTab, setActiveTab] = useState<CharterTab>("task");
 
+  // Cross-component focus signal: when another panel (e.g. the dataset
+  // sidebar's "Add now →" CTA) asks us to focus the alignment editor, we
+  // switch tabs without forcing a re-mount.
+  useEffect(() => {
+    const handler = () => setActiveTab("alignment");
+    window.addEventListener("northstar:focus-alignment", handler);
+    return () =>
+      window.removeEventListener("northstar:focus-alignment", handler);
+  }, []);
+
   // Cmd+Enter → primary footer action (generate both / regenerate / go to).
   useEffect(() => {
     if (!onGenerateBoth) return;

@@ -67,6 +67,11 @@ interface ExampleReviewProps {
    *  sidebar's "Add alignment criteria" CTA when the focused row's
    *  feature_area has no matching alignment entry. */
   onAddAlignmentCriteria?: () => void
+  /** Generate more examples scoped to a single feature_area. Surfaced as
+   *  a small "+ Add" affordance on each group separator so reviewers can
+   *  request more rows for a specific area without going through the
+   *  toolbar Generate button. */
+  onAddForFeatureArea?: (featureArea: string) => void
   onNavigateToScorers?: () => void
   onHeaderClick?: () => void
   isFocused?: boolean
@@ -123,6 +128,7 @@ export default function ExampleReview({
   agreement,
   onRequestFillGaps,
   onAddAlignmentCriteria,
+  onAddForFeatureArea,
   onNavigateToScorers: _onNavigateToScorers,
   onHeaderClick: _onHeaderClick,
   isFocused,
@@ -811,7 +817,14 @@ export default function ExampleReview({
                 {groups.map(([groupName, items], gi) => (
                   <div key={groupName} className="flex flex-col">
                     {gi > 0 && <div className="h-4" />}
-                    <GroupHeader name={groupName} />
+                    <GroupHeader
+                      name={groupName}
+                      onAdd={
+                        canEdit && onAddForFeatureArea && groupName !== '(unmapped)' && groupName !== '(off-target)'
+                          ? () => onAddForFeatureArea(groupName)
+                          : undefined
+                      }
+                    />
                     {items.map(ex => (
                       <ExampleRow
                         key={ex.id}
@@ -961,13 +974,22 @@ function ColumnHeaderRow() {
   )
 }
 
-function GroupHeader({ name }: { name: string }) {
+function GroupHeader({ name, onAdd }: { name: string; onAdd?: () => void }) {
   // Sticky so the section label stays pinned while scrolling. Criteria for
   // the focused row live in the right sidebar — keeping the header to the
   // section name only avoids duplicating that info on every separator.
   return (
-    <div className="sticky top-0 z-10 px-4 py-2 bg-gray-200">
+    <div className="sticky top-0 z-10 px-4 py-2 bg-gray-200 flex items-center justify-between gap-2">
       <span className="text-sm font-semibold text-white font-sans">{name}</span>
+      {onAdd && (
+        <button
+          onClick={onAdd}
+          className="text-xs font-medium text-white/80 hover:text-white px-2 py-0.5 border border-white/30 hover:border-white/60 transition-colors"
+          title={`Generate more examples for ${name}`}
+        >
+          + Add
+        </button>
+      )}
     </div>
   )
 }

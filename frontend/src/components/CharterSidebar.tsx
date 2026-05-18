@@ -87,18 +87,8 @@ export default function CharterSidebar({
             <CriterionBlock tone="good" label="Good" text={matched.good} />
             <CriterionBlock tone="bad" label="Bad" text={matched.bad} />
           </>
-        ) : allAlignment.length === 0 ? (
-          <NoAlignmentCTA
-            label="No alignment defined yet"
-            description="Define alignment entries on the Charter tab to see good/bad criteria here."
-            onClick={onAddAlignmentCriteria}
-          />
         ) : (
-          <NoAlignmentCTA
-            label="No alignment match for this row"
-            description={`This row's feature_area isn't one of the ${allAlignment.length} alignment ${allAlignment.length === 1 ? 'entry' : 'entries'} the charter defines.`}
-            onClick={onAddAlignmentCriteria}
-          />
+          <NoAlignmentCTA onClick={onAddAlignmentCriteria} />
         )}
 
         {focusedCoverageTags.length > 0 && (
@@ -130,27 +120,16 @@ function sameFeatureAreas(a: Charter['alignment'], b: Charter['alignment']): boo
   return true
 }
 
-function NoAlignmentCTA({
-  label,
-  description,
-  onClick,
-}: {
-  label: string
-  description: string
-  onClick?: () => void
-}) {
+function NoAlignmentCTA({ onClick }: { onClick?: () => void }) {
   return (
-    <div className="flex flex-col gap-2 text-fg-dim leading-relaxed">
-      <p>
-        <span className="text-fg-contrast font-medium">{label}.</span>{' '}
-        {description}
-      </p>
+    <div className="flex items-center gap-2 text-fg-dim leading-relaxed">
+      <span className="text-fg-contrast">No alignment match.</span>
       {onClick && (
         <button
           onClick={onClick}
-          className="self-start px-2 py-1 text-xs bg-fill-primary text-bg-default hover:bg-fill-primary-hover transition-opacity"
+          className="text-accent hover:text-accent-foreground hover:underline transition-colors"
         >
-          Add alignment criteria
+          Add now →
         </button>
       )}
     </div>

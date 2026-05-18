@@ -480,7 +480,8 @@ export default function ProjectWorkspace() {
         featureArea: string;
         currentCount: number;
       }
-    | { kind: "fill"; emptyCells: Array<{ criterion: string; featureArea: string }> };
+    | { kind: "fill"; emptyCells: Array<{ criterion: string; featureArea: string }> }
+    | { kind: "area"; featureArea: string };
   const [coverageGenerateRequest, setCoverageGenerateRequest] =
     useState<CoverageGenerateRequest | null>(null);
 
@@ -2650,6 +2651,14 @@ export default function ProjectWorkspace() {
             coverage_criteria: [req.criterion],
             count_per_scenario: count,
           });
+        } else if (req.kind === "area") {
+          // Generate for one feature_area across all charter coverage
+          // criteria — backend defaults to the full criteria list when
+          // coverage_criteria is omitted.
+          await synthesizeExamples(dataset.id, {
+            feature_areas: [req.featureArea],
+            count_per_scenario: count,
+          });
         } else {
           const missingCriteria = Array.from(new Set(req.emptyCells.map(c => c.criterion)));
           const missingAreas = Array.from(new Set(req.emptyCells.map(c => c.featureArea)));
@@ -3193,13 +3202,15 @@ export default function ProjectWorkspace() {
                     agreement={judgeAgreement}
                     charterSnapshot={dataset.charter_snapshot}
                     onRequestFillGaps={handleRequestFillGaps}
+                    onAddForFeatureArea={(featureArea) => {
+                      setCoverageGenerateRequest({ kind: "area", featureArea });
+                    }}
                     onAddAlignmentCriteria={() => {
-                      // Switch to the charter tab and fire a focus signal
-                      // so the alignment section is the user's landing
-                      // spot. CharterPanel can listen for this to scroll +
-                      // surface suggestions; for now the event is best-
-                      // effort — navigation alone is the guaranteed win.
+                      // Switch to the charter tab, focus alignment, kick
+                      // off a fresh suggestion fetch so the user lands on
+                      // a panel that's already loading proposals.
                       setActiveTab("charter");
+                      void handleSuggest();
                       window.setTimeout(() => {
                         window.dispatchEvent(
                           new CustomEvent("northstar:focus-alignment"),
@@ -3475,7 +3486,8 @@ type CoverageGenerateRequestExt =
       featureArea: string;
       currentCount: number;
     }
-  | { kind: "fill"; emptyCells: Array<{ criterion: string; featureArea: string }> };
+  | { kind: "fill"; emptyCells: Array<{ criterion: string; featureArea: string }> }
+  | { kind: "area"; featureArea: string };
 
 function buildCoverageGenerateModalProps(req: CoverageGenerateRequestExt): {
   suggestedCount: number;
@@ -3492,6 +3504,16 @@ function buildCoverageGenerateModalProps(req: CoverageGenerateRequestExt): {
     return {
       suggestedCount,
       suggestionReason: reason,
+      totalScenarios: 1,
+    };
+  }
+  if (req.kind === "area") {
+    // Per-feature_area: synth fans out across every charter coverage
+    // criterion for this area. Show 2 as the suggested count; copy
+    // explains the scope so the user can adjust.
+    return {
+      suggestedCount: 2,
+      suggestionReason: `Generate examples for every coverage criterion within "${req.featureArea}".`,
       totalScenarios: 1,
     };
   }
