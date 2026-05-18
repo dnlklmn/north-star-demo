@@ -1551,6 +1551,43 @@ Suggest actions when:
 - Proactively suggest helpful next actions based on the dataset state"""
 
 
+def _normalize_charter_string(s: str) -> str:
+    """Alphanumeric-lowercase normalization shared by the coverage matrix and
+    the write-time coverage_tag snap. Strips punctuation/whitespace so two
+    paraphrases of the same criterion collapse to the same key when their
+    first N characters agree."""
+    return "".join(c for c in (s or "").lower() if c.isalnum())
+
+
+def _resolve_charter_string(value: str, candidates: list[str]) -> str | None:
+    """Fuzzy match `value` to the best `candidate` by longest shared
+    normalized prefix. Returns the canonical candidate when the shared prefix
+    is at least 12 chars (or covers both fully-normalized strings when both
+    are shorter). Used by the coverage matrix and write-time snap so
+    paraphrased criterion strings still credit the right cell."""
+    v = _normalize_charter_string(value)
+    if not v:
+        return None
+    best: tuple[int, str] | None = None
+    for cand in candidates:
+        c = _normalize_charter_string(cand)
+        if not c:
+            continue
+        common = 0
+        for x, y in zip(v, c):
+            if x != y:
+                break
+            common += 1
+        if common == 0:
+            continue
+        min_required = min(12, len(v), len(c))
+        if common < min_required:
+            continue
+        if best is None or common > best[0]:
+            best = (common, cand)
+    return best[1] if best else None
+
+
 def _build_coverage_matrix(charter: dict, examples: list[dict]) -> dict[str, dict[str, int]]:
     """Count examples per (criterion × feature_area) cell.
 
@@ -1572,43 +1609,14 @@ def _build_coverage_matrix(charter: dict, examples: list[dict]) -> dict[str, dic
 
     matrix: dict[str, dict[str, int]] = {c: {fa: 0 for fa in feature_areas} for c in coverage}
 
-    def _normalize(s: str) -> str:
-        return "".join(c for c in (s or "").lower() if c.isalnum())
-
-    def _resolve(value: str, candidates: list[str]) -> str | None:
-        v = _normalize(value)
-        if not v:
-            return None
-        # Pick the candidate with the longest matching prefix. Falls back to
-        # None if nothing matches at least 12 chars (or both strings entirely
-        # below 12).
-        best: tuple[int, str] | None = None
-        for cand in candidates:
-            c = _normalize(cand)
-            if not c:
-                continue
-            common = 0
-            for x, y in zip(v, c):
-                if x != y:
-                    break
-                common += 1
-            if common == 0:
-                continue
-            min_required = min(12, len(v), len(c))
-            if common < min_required:
-                continue
-            if best is None or common > best[0]:
-                best = (common, cand)
-        return best[1] if best else None
-
     for ex in examples:
         if ex.get("review_status") == "rejected":
             continue
-        ex_fa = _resolve(ex.get("feature_area", ""), feature_areas)
+        ex_fa = _resolve_charter_string(ex.get("feature_area", ""), feature_areas)
         if ex_fa is None:
             continue
         for tag in ex.get("coverage_tags", []):
-            crit = _resolve(tag, coverage)
+            crit = _resolve_charter_string(tag, coverage)
             if crit is not None:
                 matrix[crit][ex_fa] += 1
     return matrix

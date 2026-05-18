@@ -1413,6 +1413,78 @@ def _export_generated_scorers(state: SessionState, scorers: list[dict]) -> int:
 UNMAPPED_FEATURE_AREA = "(unmapped)"
 
 
+def _normalize_synthesized_coverage_tags(generated: list[dict], charter: dict) -> tuple[int, int]:
+    """Snap each synthesized row's `coverage_tags` to canonical charter
+    coverage criteria using the same fuzzy resolver as the coverage matrix.
+
+    Why: the matrix in `_build_coverage_matrix` already fuzzy-matches tags at
+    read time, but downstream consumers (filters, exports, eval gating, the
+    sidebar's "Row covers" list) compare raw strings. Without snapping at
+    write time, a row whose LLM paraphrased a criterion ("FAQ-style
+    responses" vs charter's "FAQ responses") shows the LLM's wording
+    everywhere except the coverage matrix — inconsistent and confusing.
+
+    Per-tag behavior:
+      1. exact match against a charter criterion → keep as-is.
+      2. fuzzy resolve (>=12-char shared normalized prefix) → snap to the
+         canonical form.
+      3. otherwise → leave the tag alone. We don't drop unknowns: the LLM
+         occasionally adds useful descriptors the charter hasn't named yet,
+         and the matrix will simply not credit them — same outcome as before
+         this snap existed.
+
+    Returns (tags_snapped, tags_left_alone). Both are useful for warning
+    logs: lots of snaps means the LLM is paraphrasing the criteria; lots of
+    "left alone" means it's inventing categories not in the charter.
+    """
+    from .prompt import _resolve_charter_string
+
+    coverage = (charter.get("coverage") or {}).get("criteria") or []
+    if not coverage:
+        return 0, 0
+    canonical_lookup = {c.casefold().strip(): c for c in coverage if isinstance(c, str)}
+    snapped_total = 0
+    unmapped_total = 0
+    for ex in generated:
+        if not isinstance(ex, dict):
+            continue
+        tags = ex.get("coverage_tags")
+        if not isinstance(tags, list):
+            continue
+        new_tags: list[str] = []
+        for tag in tags:
+            if not isinstance(tag, str) or not tag.strip():
+                continue
+            if tag in coverage:
+                new_tags.append(tag)
+                continue
+            # Cheap exact-after-casefold check first; fuzzy resolver is the
+            # fallback for paraphrases.
+            exact = canonical_lookup.get(tag.casefold().strip())
+            if exact is not None:
+                new_tags.append(exact)
+                snapped_total += 1
+                continue
+            fuzzy = _resolve_charter_string(tag, coverage)
+            if fuzzy is not None:
+                new_tags.append(fuzzy)
+                snapped_total += 1
+                continue
+            new_tags.append(tag)
+            unmapped_total += 1
+        # Dedupe while preserving order — fuzzy snap can collapse two LLM
+        # paraphrases of the same criterion onto the same canonical string.
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for t in new_tags:
+            if t in seen:
+                continue
+            seen.add(t)
+            deduped.append(t)
+        ex["coverage_tags"] = deduped
+    return snapped_total, unmapped_total
+
+
 def _normalize_synthesized_feature_areas(generated: list[dict], charter: dict) -> int:
     """Snap each synthesized row's `feature_area` to a known alignment entry,
     or to ``UNMAPPED_FEATURE_AREA`` when it doesn't match any.
@@ -1906,6 +1978,11 @@ async def _retag_dataset_after_charter(session_id: str, charter: dict) -> None:
         for i in range(0, len(examples), batch_size):
             batch = examples[i:i + batch_size]
             retags, call_meta = await call_retag_examples_against_charter(charter, batch)
+            # Apply the same canonical-snap passes as synth so the retag
+            # writes consistent charter strings even when the LLM
+            # paraphrased.
+            _normalize_synthesized_feature_areas(retags, charter)
+            _normalize_synthesized_coverage_tags(retags, charter)
             for r in retags:
                 eid = r.get("example_id")
                 if not eid:
@@ -2612,6 +2689,16 @@ async def synthesize_examples(
                 "synthesize: %d/%d rows in this cell had out-of-range feature_area, snapped to %r",
                 unmapped, len(cell_examples), UNMAPPED_FEATURE_AREA,
             )
+        # Also snap paraphrased coverage_tags back to their canonical charter
+        # strings so the coverage matrix credits them and downstream
+        # consumers see consistent tag values.
+        tag_snapped, tag_unmapped = _normalize_synthesized_coverage_tags(cell_examples, charter)
+        if tag_snapped or tag_unmapped:
+            logger.info(
+                "synthesize: cell coverage_tag snap — %d paraphrases canonicalized, "
+                "%d tags left as-is (not in charter)",
+                tag_snapped, tag_unmapped,
+            )
         for ex in cell_examples:
             ex["source"] = "synthetic"
             # Keep the legacy is_adversarial column in sync with the new
@@ -2965,6 +3052,8 @@ async def retag_examples_against_charter(
     for i in range(0, len(examples), batch_size):
         batch = examples[i:i + batch_size]
         retags, call_meta = await call_retag_examples_against_charter(charter, batch)
+        _normalize_synthesized_feature_areas(retags, charter)
+        _normalize_synthesized_coverage_tags(retags, charter)
         for r in retags:
             eid = r.get("example_id")
             if not eid:
@@ -3264,6 +3353,13 @@ async def enrich_dataset(
         logger.warning(
             "enrich (%s): %d/%d rows had out-of-range feature_area, snapped to %r",
             req.gap_type, unmapped, len(generated), UNMAPPED_FEATURE_AREA,
+        )
+    tag_snapped, tag_unmapped = _normalize_synthesized_coverage_tags(generated, charter)
+    if tag_snapped or tag_unmapped:
+        logger.info(
+            "enrich (%s): coverage_tag snap — %d paraphrases canonicalized, "
+            "%d tags left as-is (not in charter)",
+            req.gap_type, tag_snapped, tag_unmapped,
         )
 
     for ex in generated:
