@@ -2794,7 +2794,7 @@ export default function ProjectWorkspace() {
           <SidebarGroup hideTopDivider>
             <SidebarItem
               label="Goal"
-              icon={<GoalsIcon width={20} height={20} />}
+              icon={<GoalsIcon width={12} height={12} />}
               active={activeTab === "goals" || activeTab === "users"}
               onClick={() => setActiveTab("goals")}
               disabled={!usersAvailable}
@@ -2802,7 +2802,7 @@ export default function ProjectWorkspace() {
             />
             <SidebarItem
               label={isPromptEval ? "Prompt" : "Skill"}
-              icon={<SkillIcon width={20} height={20} />}
+              icon={<SkillIcon width={12} height={12} />}
               active={activeTab === "skill"}
               onClick={() => setActiveTab("skill")}
               badge={(() => {
@@ -2819,7 +2819,7 @@ export default function ProjectWorkspace() {
             />
             <SidebarItem
               label="Charter"
-              icon={<CharterIcon width={20} height={20} />}
+              icon={<CharterIcon width={12} height={12} />}
               active={activeTab === "charter"}
               onClick={() => setActiveTab("charter")}
               disabled={!charterAvailable}
@@ -2831,7 +2831,7 @@ export default function ProjectWorkspace() {
           <SidebarGroup>
             <SidebarItem
               label="Dataset"
-              icon={<DatasetIcon width={20} height={20} />}
+              icon={<DatasetIcon width={12} height={12} />}
               active={activeTab === "dataset"}
               onClick={() => setActiveTab("dataset")}
               disabled={!datasetAvailable}
@@ -2851,7 +2851,7 @@ export default function ProjectWorkspace() {
             />
             <SidebarItem
               label="Scorers"
-              icon={<ScorerIcon width={20} height={20} />}
+              icon={<ScorerIcon width={12} height={12} />}
               active={activeTab === "scorers"}
               onClick={() => setActiveTab("scorers")}
               disabled={!scorersAvailable}
@@ -2872,7 +2872,7 @@ export default function ProjectWorkspace() {
           <SidebarGroup>
             <SidebarItem
               label="Evaluations"
-              icon={<StarIcon width={20} height={20} />}
+              icon={<StarIcon width={12} height={12} />}
               active={activeTab === "evaluate"}
               onClick={() => setActiveTab("evaluate")}
               disabled={!evaluateAvailable}
@@ -3513,7 +3513,14 @@ function SidebarItem({
             : "text-fg-contrast hover:bg-fill-neutral/50 font-medium"
       }`}
     >
-      {icon ?? <StarIcon />}
+      {/* Icon slot: every icon renders at 12×12 max, centered in a 16×16
+          box. Wrapping in a fixed-size flex-center container is the only
+          reliable way to normalize visual sizes when the icons have
+          different viewBoxes (16-vb vs 24-vb) and different content
+          densities (filled blobs vs concentric rings vs sparse dots). */}
+      <span className="flex w-4 h-4 items-center justify-center flex-shrink-0 [&_svg]:max-w-3 [&_svg]:max-h-3">
+        {icon ?? <StarIcon width={12} height={12} />}
+      </span>
       <span className="truncate w-full">{label}</span>
       {loading && (
         <Loader2 className="w-4 h-4 text-fg-dim animate-spin flex-shrink-0" />
