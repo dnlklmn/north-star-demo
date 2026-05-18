@@ -764,11 +764,10 @@ export default function ProjectWorkspace() {
     state.charter.coverage.criteria.length || state.charter.alignment.length
   );
   const nonEmptyGoals = goals.filter((g) => g.trim());
-  const totalStoryCount = storyGroups.reduce(
-    (sum, g) =>
-      sum + (g.role.trim() ? g.stories.filter((s) => s.what.trim()).length : 0),
-    0,
-  );
+  // totalStoryCount was used by the Goals tab badge ("3/10"); the badge
+  // was removed because the meaning of the ratio wasn't obvious. The
+  // value is no longer surfaced anywhere — leaving it derived in case a
+  // future tooltip wants it would just be dead state.
 
   // Tab availability. Goals is the entry point and always open; everything
   // downstream gates on its own data. Triggered- and prompt-eval projects
@@ -2795,28 +2794,32 @@ export default function ProjectWorkspace() {
           <SidebarGroup hideTopDivider>
             <SidebarItem
               label="Goal"
-              icon={<GoalsIcon width={24} height={24} />}
+              icon={<GoalsIcon width={20} height={20} />}
               active={activeTab === "goals" || activeTab === "users"}
               onClick={() => setActiveTab("goals")}
               disabled={!usersAvailable}
               disabledReason="Goal is the entry tab — it should always be available."
-              badge={
-                totalStoryCount > 0
-                  ? `${nonEmptyGoals.length}/${totalStoryCount}`
-                  : nonEmptyGoals.length > 0
-                    ? `${nonEmptyGoals.length}`
-                    : undefined
-              }
             />
             <SidebarItem
               label={isPromptEval ? "Prompt" : "Skill"}
-              icon={<SkillIcon width={24} height={24} />}
+              icon={<SkillIcon width={20} height={20} />}
               active={activeTab === "skill"}
               onClick={() => setActiveTab("skill")}
+              badge={(() => {
+                // Show the latest skill version (e.g. "v3"). Versions are
+                // stored newest-first when we append, but be defensive and
+                // pick the max number anyway.
+                const versions = state.skill_versions ?? [];
+                if (versions.length === 0) return undefined;
+                const latest = Math.max(
+                  ...versions.map((v) => Number(v.version ?? 0) || 0),
+                );
+                return latest > 0 ? `v${latest}` : undefined;
+              })()}
             />
             <SidebarItem
               label="Charter"
-              icon={<CharterIcon width={24} height={24} />}
+              icon={<CharterIcon width={20} height={20} />}
               active={activeTab === "charter"}
               onClick={() => setActiveTab("charter")}
               disabled={!charterAvailable}
@@ -2828,7 +2831,7 @@ export default function ProjectWorkspace() {
           <SidebarGroup>
             <SidebarItem
               label="Dataset"
-              icon={<DatasetIcon width={24} height={24} />}
+              icon={<DatasetIcon width={20} height={20} />}
               active={activeTab === "dataset"}
               onClick={() => setActiveTab("dataset")}
               disabled={!datasetAvailable}
@@ -2840,10 +2843,15 @@ export default function ProjectWorkspace() {
                     ? "Generate the charter first; the dataset is built from its criteria."
                     : undefined
               }
+              badge={
+                dataset?.examples && dataset.examples.length > 0
+                  ? `${dataset.examples.length}`
+                  : undefined
+              }
             />
             <SidebarItem
               label="Scorers"
-              icon={<ScorerIcon width={24} height={24} />}
+              icon={<ScorerIcon width={20} height={20} />}
               active={activeTab === "scorers"}
               onClick={() => setActiveTab("scorers")}
               disabled={!scorersAvailable}
@@ -2855,13 +2863,16 @@ export default function ProjectWorkspace() {
                     ? "Generate the charter first; scorers map to its criteria."
                     : undefined
               }
+              badge={
+                scorers.length > 0 ? `${scorers.length}` : undefined
+              }
             />
           </SidebarGroup>
 
           <SidebarGroup>
             <SidebarItem
               label="Evaluations"
-              icon={<StarIcon width={24} height={24} />}
+              icon={<StarIcon width={20} height={20} />}
               active={activeTab === "evaluate"}
               onClick={() => setActiveTab("evaluate")}
               disabled={!evaluateAvailable}
