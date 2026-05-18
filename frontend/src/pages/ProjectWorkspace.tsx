@@ -2130,17 +2130,13 @@ export default function ProjectWorkspace() {
       ) {
         return;
       }
-      // Charter is a hard prerequisite — without criteria the backend has
-      // nothing to draft from. Surface it explicitly so the user sees why
-      // nothing happened.
-      if (!hasCharter) {
-        const msg =
-          "this project has no charter yet — fill in goals / stories and generate the charter first";
-        console.warn("[scorers] generate skipped:", msg);
-        setScorersError(msg);
-        notePolarisActivity(`scorer draft failed: ${msg}`);
-        return;
-      }
+      // Don't pre-empt on the frontend — the panel's "Generate scorers"
+      // button is already gated on the charter having at least one
+      // criterion (any of coverage/balance/alignment/rot). The parent's
+      // hasCharter check was stricter than the button's hasCriteria, so
+      // a project with only balance/rot criteria would see the button
+      // enabled but the click would bail silently. Let the backend
+      // return a 400 if it can't draft, and we'll show that error.
       console.log("[scorers] handleGenerateScorers start", {
         sessionId,
         scorerCount: scorers.length,

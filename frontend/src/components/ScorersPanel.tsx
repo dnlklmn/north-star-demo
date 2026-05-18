@@ -126,7 +126,17 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
   // and button-triggered paths share the same flow. The regenerate
   // confirm dialog lives in the parent now too.
   const handleGenerate = async () => {
-    await onGenerate?.()
+    console.log("[scorers] panel button clicked", {
+      hasOnGenerate: typeof onGenerate === "function",
+      hasCriteria,
+      scorerCount: scorers.length,
+      generating,
+    })
+    if (!onGenerate) {
+      console.error("[scorers] onGenerate prop is missing — generation cannot run")
+      return
+    }
+    await onGenerate()
   }
 
   const handleCopy = (code: string) => {
