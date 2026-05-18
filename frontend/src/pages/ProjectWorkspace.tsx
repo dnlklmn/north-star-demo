@@ -367,7 +367,13 @@ export default function ProjectWorkspace() {
     }
     notePolarisActivity(`opened ${activeTab} tab`);
   }, [activeTab]);
-  useRegisterPolarisNav("coverage_map", () => setShowCoverageMap(true));
+  useRegisterPolarisNav("coverage_map", () => {
+    // Coverage map is inline now — switch to the dataset tab and ensure
+    // the panel is expanded. Don't persist the choice, since Polaris is
+    // showing it for this view, not changing the user's default.
+    setActiveTab("dataset");
+    setCoverageMapCollapsed(false);
+  });
   useRegisterPolarisNav("settings", () => setShowSettings(true));
   useRegisterPolarisNav("share", () => setShowShareModal(true));
   useRegisterPolarisNav("example", (props) => {
