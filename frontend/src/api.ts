@@ -1,4 +1,4 @@
-import type { ActivityEvent, CreateSessionResponse, CreateSkillVersionRequest, CreatedShareToken, EvalMode, EvalRunSummary, RunEvalRequest, SendMessageResponse, SessionState, ShareTokenSummary, SkillVersion, SuggestImprovementsResponse, Charter, Dataset, Example, GapAnalysis, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse, ProjectSummary, StoryGroup, ScorerDef } from './types'
+import type { ActivityEvent, CreateSessionResponse, CreateSkillVersionRequest, CreatedShareToken, EvalMode, EvalRunSummary, RunEvalRequest, SendMessageResponse, SessionState, ShareTokenSummary, SkillVersion, SuggestImprovementsResponse, Charter, Dataset, Example, GapAnalysis, JudgeAgreement, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse, ProjectSummary, StoryGroup, ScorerDef } from './types'
 import { getShareToken, setAccessRole } from './shareToken'
 
 export const API_BASE = import.meta.env.VITE_API_URL || '/api'
@@ -1032,6 +1032,12 @@ export async function suggestRevisions(datasetId: string, exampleIds?: string[])
 export async function getGapAnalysis(datasetId: string): Promise<GapAnalysis> {
   const res = await apiFetch(`${BASE}/datasets/${datasetId}/gaps`)
   if (!res.ok) throw new Error(`Failed to get gaps: ${res.status}`)
+  return res.json()
+}
+
+export async function getJudgeAgreement(datasetId: string): Promise<JudgeAgreement> {
+  const res = await apiFetch(`${BASE}/datasets/${datasetId}/judge-agreement`)
+  if (!res.ok) throw new Error(`Failed to get judge agreement: ${res.status}`)
   return res.json()
 }
 

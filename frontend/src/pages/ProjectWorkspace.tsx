@@ -30,6 +30,7 @@ import type {
   Dataset,
   Example,
   GapAnalysis,
+  JudgeAgreement,
   ScorerDef,
   AlignmentEntry,
   TaskDefinition,
@@ -54,6 +55,7 @@ import {
   refreshDatasetFromTurns,
   retagExamplesAgainstCharter,
   getGapAnalysis,
+  getJudgeAgreement,
   exportDataset,
   datasetChat,
   updateSessionName,
@@ -84,7 +86,6 @@ import ScorersPanel from "../components/ScorersPanel";
 import EvaluatePanel from "../components/EvaluatePanel";
 import SkillPanel from "../components/SkillPanel";
 import ExampleReview from "../components/ExampleReview";
-import CoverageMap from "../components/CoverageMap";
 import { computeCoverageScore } from "../components/coverage";
 import GenerateModal from "../components/examples/GenerateModal";
 import SettingsPanel from "../components/SettingsPanel";
@@ -285,7 +286,12 @@ export default function ProjectWorkspace() {
   const [revisionsLoading, setRevisionsLoading] = useState(false);
   const [retagLoading, setRetagLoading] = useState(false);
   const [gapAnalysis, setGapAnalysis] = useState<GapAnalysis | null>(null);
-  const [showCoverageMap, setShowCoverageMap] = useState(false);
+  const [judgeAgreement, setJudgeAgreement] = useState<JudgeAgreement | null>(null);
+  // Inline coverage map collapse — default expanded so reviewers see gaps
+  // immediately. The collapse pref is persisted *per dataset* below so the
+  // toggle survives navigation away and back without leaking across
+  // projects.
+  const [coverageMapCollapsed, setCoverageMapCollapsed] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
 
@@ -1614,7 +1620,10 @@ export default function ProjectWorkspace() {
           try {
             const gaps = await getGapAnalysis(dataset.id);
             setGapAnalysis(gaps);
-            setShowCoverageMap(true);
+            // Expand the inline panel just for this view — don't persist,
+            // since the user's collapse preference shouldn't get clobbered
+            // by an agent message.
+            setCoverageMapCollapsed(false);
           } catch (err) {
             console.error("Failed to get coverage:", err);
           }
@@ -1990,6 +1999,48 @@ export default function ProjectWorkspace() {
       cancelled = true;
     };
   }, [dataset?.id, datasetExampleCount]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Restore the per-dataset coverage-map collapse preference. Reads on
+  // dataset switch so the user's last choice for *this* dataset wins.
+  useEffect(() => {
+    if (!dataset) {
+      setCoverageMapCollapsed(false);
+      return;
+    }
+    try {
+      const v = localStorage.getItem(
+        `northstar.coverageMap.collapsed.${dataset.id}`,
+      );
+      setCoverageMapCollapsed(v === "1");
+    } catch {
+      setCoverageMapCollapsed(false);
+    }
+  }, [dataset?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Judge-human agreement — re-fetch whenever review counts change so the
+  // header metric tracks reviews landing in real time. Same dataset-empty
+  // gate as gap analysis.
+  const reviewedCount = (dataset?.examples || []).filter(
+    e => e.review_status !== "pending",
+  ).length;
+  useEffect(() => {
+    if (!dataset || datasetExampleCount === 0) {
+      setJudgeAgreement(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const agreement = await getJudgeAgreement(dataset.id);
+        if (!cancelled) setJudgeAgreement(agreement);
+      } catch (err) {
+        console.error("Failed to fetch judge agreement:", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [dataset?.id, datasetExampleCount, reviewedCount]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleAcceptSuggestion = useCallback(
     async (suggestion: Suggestion) => {
@@ -2553,9 +2604,20 @@ export default function ProjectWorkspace() {
 
   const handleShowCoverageMap = useCallback(async () => {
     if (!dataset) return;
-    // Refresh in case it's stale, but open the modal immediately — the
-    // useEffect above keeps it warm so most opens are zero-latency.
-    setShowCoverageMap(true);
+    // Inline now — the toolbar button toggles the panel's collapsed state.
+    // Persist per-dataset so the choice doesn't leak across projects.
+    setCoverageMapCollapsed(prev => {
+      const next = !prev;
+      try {
+        localStorage.setItem(
+          `northstar.coverageMap.collapsed.${dataset.id}`,
+          next ? "1" : "0",
+        );
+      } catch {
+        // Storage unavailable (private mode) — fall back to in-memory only.
+      }
+      return next;
+    });
     try {
       const gaps = await getGapAnalysis(dataset.id);
       setGapAnalysis(gaps);
@@ -3154,6 +3216,12 @@ export default function ProjectWorkspace() {
                     onAutoReview={handleAutoReview}
                     onExport={handleExport}
                     onShowCoverageMap={handleShowCoverageMap}
+                    gaps={gapAnalysis}
+                    agreement={judgeAgreement}
+                    datasetId={dataset.id}
+                    coverageCollapsed={coverageMapCollapsed}
+                    onRequestCellGenerate={handleRequestCellGenerate}
+                    onRequestFillGaps={handleRequestFillGaps}
                     onNavigateToScorers={() => setActiveTab("scorers")}
                     onHeaderClick={() => {}}
                     isFocused={true}
@@ -3375,17 +3443,9 @@ export default function ProjectWorkspace() {
 
       </div>
 
-      {/* Coverage map overlay */}
-      {showCoverageMap && gapAnalysis && (
-        <CoverageMap
-          gaps={gapAnalysis}
-          onClose={() => setShowCoverageMap(false)}
-          onRequestCellGenerate={handleRequestCellGenerate}
-          onRequestFillGaps={handleRequestFillGaps}
-        />
-      )}
+      {/* Coverage map is now rendered inline by ExampleReview — no overlay. */}
 
-      {/* Coverage-driven generate modal — staged by the CoverageMap, runs
+      {/* Coverage-driven generate modal — staged by the inline CoverageMap, runs
           synth scoped to the requested cell or set of empty cells. */}
       {coverageGenerateRequest && (
         <GenerateModal

@@ -233,10 +233,26 @@ export interface Example {
   /** Triggered-mode label. null = standard mode. */
   should_trigger?: boolean | null
   /** Adversarial probe (prompt injection, credential leakage attempts, etc).
-   *  null = normal row. True = safety scorers weight this heavily. */
+   *  null = normal row. True = safety scorers weight this heavily.
+   *  Superseded by `scenario_type === 'adversarial'`; retained for legacy rows. */
   is_adversarial?: boolean | null
+  /** Scenario taxonomy set at synthesis time. null on legacy rows — UI treats
+   *  null as "happy". */
+  scenario_type?: 'happy' | 'edge' | 'adversarial' | 'degenerate' | null
+  difficulty?: 'trivial' | 'typical' | 'hard' | 'ambiguous' | null
+  /** "eval" rows are the working set; "golden" rows are hand-promoted; "discovery"
+   *  rows are scratch-pad scenarios. Default for synthesized rows is "eval". */
+  tier?: 'discovery' | 'eval' | 'golden'
   created_at: string
   updated_at: string
+}
+
+export interface JudgeAgreement {
+  reviewed_count: number
+  agreement_count: number
+  agreement_rate: number
+  kappa: number | null
+  not_enough_data: boolean
 }
 
 export interface TriggerVerdict {

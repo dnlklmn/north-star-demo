@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -299,7 +299,19 @@ class Example(BaseModel):
     # leakage attempts, requests to call disallowed domains, etc. When true,
     # safety scorers are weighted more heavily and execution scorers may
     # consider refusal a valid 'good' output. None = normal row.
+    # Superseded by scenario_type == "adversarial"; kept for read-back of legacy rows.
     is_adversarial: Optional[bool] = None
+    # Scenario taxonomy populated at synthesis time. Folds is_adversarial into a
+    # richer categorical (happy / edge / adversarial / degenerate). None on
+    # legacy rows; the review prompt and dataset-QA UX treat None as "happy".
+    scenario_type: Optional[Literal["happy", "edge", "adversarial", "degenerate"]] = None
+    # Self-assessed by the synthesis agent. None on legacy rows.
+    difficulty: Optional[Literal["trivial", "typical", "hard", "ambiguous"]] = None
+    # Tier marks how this row is treated downstream. "eval" rows participate in
+    # auto-review and eval runs; "golden" rows are hand-promoted and held to a
+    # higher bar; "discovery" rows are scratch-pad scenarios that haven't been
+    # vetted yet. Default "eval" preserves existing behavior.
+    tier: Literal["discovery", "eval", "golden"] = "eval"
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -342,6 +354,9 @@ class UpdateExampleRequest(BaseModel):
     revision_suggestion: Optional[dict] = None
     should_trigger: Optional[bool] = None
     is_adversarial: Optional[bool] = None
+    scenario_type: Optional[Literal["happy", "edge", "adversarial", "degenerate"]] = None
+    difficulty: Optional[Literal["trivial", "typical", "hard", "ambiguous"]] = None
+    tier: Optional[Literal["discovery", "eval", "golden"]] = None
 
 
 class CreateExampleRequest(BaseModel):
@@ -353,6 +368,9 @@ class CreateExampleRequest(BaseModel):
     label_reason: Optional[str] = None
     should_trigger: Optional[bool] = None
     is_adversarial: Optional[bool] = None
+    scenario_type: Optional[Literal["happy", "edge", "adversarial", "degenerate"]] = None
+    difficulty: Optional[Literal["trivial", "typical", "hard", "ambiguous"]] = None
+    tier: Literal["discovery", "eval", "golden"] = "eval"
 
 
 # --- Triggered mode (skill eval) requests ---

@@ -1,8 +1,11 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { ChevronDown, Check, X, RefreshCw, Pencil, Trash2, Loader2 } from 'lucide-react'
-import type { Example, Charter } from '../types'
+import type { Example, Charter, GapAnalysis, JudgeAgreement, AlignmentEntry } from '../types'
 import DeleteModal from './examples/DeleteModal'
 import GenerateModal from './examples/GenerateModal'
+import DatasetQABanner from './DatasetQABanner'
+import CoverageMap from './CoverageMap'
+import JudgeAgreementBadge from './JudgeAgreementBadge'
 
 type CellId = 'scenario' | 'input' | 'output' | 'labels' | 'status'
 type ActionId = 'approve' | 'reject' | 'relabel' | 'edit' | 'delete'
@@ -44,7 +47,25 @@ interface ExampleReviewProps {
   onSynthesize: (count?: number) => void
   onAutoReview: () => void
   onExport: () => void
+  /** Toggle the inline coverage map's collapsed state. Kept as a callback
+   *  rather than internal state so the parent can also scroll the panel
+   *  into view from the empty-state CTA. */
   onShowCoverageMap: () => void
+  /** Cached gap analysis. When present, the inline Coverage Map panel
+   *  renders above the example list. */
+  gaps?: GapAnalysis | null
+  /** Judge-human label agreement, rendered next to the stats counts. */
+  agreement?: JudgeAgreement | null
+  /** Used to scope the Dataset QA banner dismissal key — a new dataset
+   *  resets the banner. */
+  datasetId?: string
+  /** Whether the inline coverage map is collapsed. Owned by the parent so
+   *  it can persist + restore across mounts. */
+  coverageCollapsed?: boolean
+  /** Per-cell + bulk-fill handlers wired from the inline coverage map's
+   *  "+" / "Fix coverage" buttons. Mirrors the old modal plumbing. */
+  onRequestCellGenerate?: (criterion: string, featureArea: string) => void
+  onRequestFillGaps?: () => void
   onNavigateToScorers?: () => void
   onHeaderClick?: () => void
   isFocused?: boolean
@@ -96,6 +117,12 @@ export default function ExampleReview({
   onAutoReview,
   onExport,
   onShowCoverageMap,
+  gaps,
+  agreement,
+  datasetId,
+  coverageCollapsed = false,
+  onRequestCellGenerate,
+  onRequestFillGaps,
   onNavigateToScorers: _onNavigateToScorers,
   onHeaderClick: _onHeaderClick,
   isFocused,
@@ -499,6 +526,11 @@ export default function ExampleReview({
           generating ? "pointer-events-none select-none" : ""
         }`}
       >
+        {/* Dataset QA framing — explains the phase before the user starts
+            clicking through rows. Dismissible; re-appears for fresh datasets
+            because the storage key is scoped to datasetId. */}
+        {datasetId && <DatasetQABanner datasetId={datasetId} />}
+
         {/* Title */}
         <h1 className="text-xl font-semibold text-fg-contrast leading-none">Dataset</h1>
 
@@ -507,22 +539,26 @@ export default function ExampleReview({
             are about the dataset as a whole. Filters and per-row actions live
             in a second toolbar below. */}
         <div className="flex items-center justify-between gap-2 flex-wrap">
-          <div className="text-xs text-fg-dim">
-            {stats.total} total · {stats.pending} pending · {stats.approved} approved
-            {stats.newSinceRefresh > 0 && (
-              <>
-                {' · '}
-                <span className="text-accent font-medium">{stats.newSinceRefresh} new</span>
-              </>
-            )}
+          <div className="flex items-center gap-3 flex-wrap text-xs text-fg-dim">
+            <span>
+              {stats.total} total · {stats.pending} pending · {stats.approved} approved
+              {stats.newSinceRefresh > 0 && (
+                <>
+                  {' · '}
+                  <span className="text-accent font-medium">{stats.newSinceRefresh} new</span>
+                </>
+              )}
+            </span>
+            {agreement && <JudgeAgreementBadge agreement={agreement} />}
           </div>
           <div className="flex items-center gap-2">
             <button
               onClick={onShowCoverageMap}
               className="flex items-center gap-1.5 px-2 py-1 text-xs text-fg-dim hover:text-fg-contrast border border-border-hint transition-colors"
+              title={coverageCollapsed ? 'Show coverage map' : 'Hide coverage map'}
             >
               {coverageScore != null && <CoverageDot score={coverageScore} />}
-              Coverage map
+              {coverageCollapsed ? 'Show coverage map' : 'Hide coverage map'}
             </button>
             <button
               onClick={onExport}
@@ -573,6 +609,21 @@ export default function ExampleReview({
             )}
           </div>
         </div>
+
+        {/* Inline coverage map — always present at the top of the dataset
+            workspace so curation gaps are visible without an extra click.
+            Collapse state is owned by the parent so it persists across
+            mounts (same toggle as the toolbar "Show / Hide" button). */}
+        {gaps && (
+          <CoverageMap
+            gaps={gaps}
+            variant="inline"
+            collapsed={coverageCollapsed}
+            onToggleCollapsed={onShowCoverageMap}
+            onRequestCellGenerate={onRequestCellGenerate}
+            onRequestFillGaps={onRequestFillGaps}
+          />
+        )}
 
         {/* Filters + per-row actions — sits closer to the table since it
             scopes to which rows are shown and what to do with the selected
@@ -716,7 +767,10 @@ export default function ExampleReview({
                 {groups.map(([groupName, items], gi) => (
                   <div key={groupName} className="flex flex-col">
                     {gi > 0 && <div className="h-4" />}
-                    <GroupHeader name={groupName} />
+                    <GroupHeader
+                      name={groupName}
+                      alignment={charter.alignment?.find(a => a.feature_area === groupName)}
+                    />
                     {items.map(ex => (
                       <ExampleRow
                         key={ex.id}
@@ -852,10 +906,27 @@ function ColumnHeaderRow() {
   )
 }
 
-function GroupHeader({ name }: { name: string }) {
+function GroupHeader({ name, alignment }: { name: string; alignment?: AlignmentEntry }) {
+  // Sticky so the charter criteria stay pinned while the user scrolls
+  // through rows in the same feature_area — reviewers don't need to scroll
+  // away to recheck what good/bad means.
   return (
-    <div className="px-4 py-2 bg-gray-200">
+    <div className="sticky top-0 z-10 px-4 py-2 bg-gray-200 flex flex-col gap-1">
       <span className="text-sm font-semibold text-white font-sans">{name}</span>
+      {alignment && (alignment.good || alignment.bad) && (
+        <div className="flex flex-col gap-0.5 text-[11px] leading-snug font-sans text-white/85">
+          {alignment.good && (
+            <span>
+              <span className="font-semibold">Good:</span> {alignment.good}
+            </span>
+          )}
+          {alignment.bad && (
+            <span>
+              <span className="font-semibold">Bad:</span> {alignment.bad}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   )
 }

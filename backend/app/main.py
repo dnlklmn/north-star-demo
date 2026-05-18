@@ -2529,6 +2529,9 @@ async def import_examples(
             "label_reason": ex.get("label_reason"),
             "should_trigger": ex.get("should_trigger"),
             "is_adversarial": ex.get("is_adversarial"),
+            "scenario_type": ex.get("scenario_type"),
+            "difficulty": ex.get("difficulty"),
+            "tier": ex.get("tier", "eval"),
         })
 
     created = await db.bulk_create_examples(dataset_id, normalized)
@@ -2611,6 +2614,12 @@ async def synthesize_examples(
             )
         for ex in cell_examples:
             ex["source"] = "synthetic"
+            # Keep the legacy is_adversarial column in sync with the new
+            # scenario_type taxonomy so downstream code that hasn't migrated
+            # off is_adversarial yet (safety scorers, exports, etc.) still
+            # sees adversarial rows correctly.
+            if ex.get("scenario_type") == "adversarial" and ex.get("is_adversarial") is None:
+                ex["is_adversarial"] = True
         try:
             inserted = await db.bulk_create_examples(dataset_id, cell_examples)
         except Exception as err:
@@ -2722,6 +2731,9 @@ async def add_example(
         label_reason=req.label_reason,
         should_trigger=req.should_trigger,
         is_adversarial=req.is_adversarial,
+        scenario_type=req.scenario_type,
+        difficulty=req.difficulty,
+        tier=req.tier,
     )
     await db.update_dataset_stats(dataset_id)
     return example
@@ -2785,7 +2797,9 @@ async def auto_review_examples(
         batch_for_review = [
             {"id": ex["id"], "feature_area": ex["feature_area"],
              "input": ex["input"], "expected_output": ex["expected_output"],
-             "label": ex["label"], "should_trigger": ex.get("should_trigger")}
+             "label": ex["label"], "should_trigger": ex.get("should_trigger"),
+             "scenario_type": ex.get("scenario_type")
+                 or ("adversarial" if ex.get("is_adversarial") else None)}
             for ex in batch
         ]
         reviews, call_meta = await call_review_examples(charter, batch_for_review)
@@ -3144,6 +3158,80 @@ async def analyze_gaps(dataset_id: str):
         "coverage_matrix": matrix,
         "summary": summary,
     }
+
+
+@app.get("/datasets/{dataset_id}/judge-agreement")
+async def judge_agreement(dataset_id: str):
+    """Cohen's kappa + raw agreement between the judge's suggested_label and
+    the reviewer's final label, over rows the human has actually reviewed.
+
+    Returns ``not_enough_data: True`` (with the running counts) when fewer
+    than 10 reviewed rows carry a judge suggestion — kappa is noisy below
+    that. Frontend renders the metric with a warning color when agreement
+    drops below 80% or kappa falls under 0.6 with >=20 rows.
+    """
+    dataset = await db.get_dataset(dataset_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    examples = await db.get_examples(dataset_id)
+    pairs: list[tuple[str, str]] = []
+    for ex in examples:
+        # "Reviewed" = the human took an action other than leaving it pending.
+        # Approved, rejected, and needs_edit all carry a settled label.
+        if ex.get("review_status") == "pending":
+            continue
+        verdict = ex.get("judge_verdict") or {}
+        # Triggered-mode rows surface the model's suggestion under
+        # execution_verdict instead of at the top level. Both paths land
+        # in the same comparison.
+        suggested = verdict.get("suggested_label")
+        if suggested is None:
+            exec_v = verdict.get("execution_verdict") or {}
+            suggested = exec_v.get("suggested_label")
+        label = ex.get("label")
+        if suggested in ("good", "bad") and label in ("good", "bad"):
+            pairs.append((str(suggested), str(label)))
+
+    reviewed_count = len(pairs)
+    agreement_count = sum(1 for s, lab in pairs if s == lab)
+    agreement_rate = (agreement_count / reviewed_count) if reviewed_count else 0.0
+
+    # Cohen's kappa over the 2x2 confusion matrix. Tiny by hand:
+    #   po = observed agreement
+    #   pe = expected agreement by chance, computed from each rater's marginal
+    #
+    # Edge case: when exactly one rater is unanimous (e.g. judge always picks
+    # "good" but the human picks both), the marginals make kappa undefined
+    # under the textbook formula — by convention we surface that as None.
+    # When both raters are unanimous and agree, agreement_rate==1 and kappa==1.
+    kappa: float | None = None
+    if reviewed_count >= 2:
+        n = reviewed_count
+        s_good = sum(1 for s, _ in pairs if s == "good")
+        l_good = sum(1 for _, lab in pairs if lab == "good")
+        s_unanimous = s_good in (0, n)
+        l_unanimous = l_good in (0, n)
+        if s_unanimous and l_unanimous:
+            kappa = 1.0 if agreement_rate == 1.0 else 0.0
+        elif s_unanimous != l_unanimous:
+            # Exactly one rater is unanimous — kappa is undefined under the
+            # textbook formula. Surface as None and let the frontend hide it.
+            kappa = None
+        else:
+            pe_good = (s_good / n) * (l_good / n)
+            pe_bad = ((n - s_good) / n) * ((n - l_good) / n)
+            pe = pe_good + pe_bad
+            kappa = (agreement_rate - pe) / (1.0 - pe)
+
+    return {
+        "reviewed_count": reviewed_count,
+        "agreement_count": agreement_count,
+        "agreement_rate": agreement_rate,
+        "kappa": kappa,
+        "not_enough_data": reviewed_count < 10,
+    }
+
 
 
 @app.post("/datasets/{dataset_id}/enrich")
