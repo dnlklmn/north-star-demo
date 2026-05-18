@@ -1,4 +1,4 @@
-import type { ActivityEvent, CreateSessionResponse, CreateSkillVersionRequest, CreatedShareToken, EvalMode, EvalRunSummary, RunEvalRequest, SendMessageResponse, SessionState, ShareTokenSummary, SkillVersion, SuggestImprovementsResponse, Charter, Dataset, Example, GapAnalysis, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse, ProjectSummary, StoryGroup, ScorerDef } from './types'
+import type { ActivityEvent, CreateSessionResponse, CreateSkillVersionRequest, CreatedShareToken, EvalMode, EvalRunSummary, RunEvalRequest, SendMessageResponse, SessionState, ShareTokenSummary, SkillReferenceKind, SkillReferenceSummary, SkillVersion, SuggestImprovementsResponse, Charter, Dataset, Example, GapAnalysis, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse, ProjectSummary, StoryGroup, ScorerDef } from './types'
 import { getShareToken, setAccessRole } from './shareToken'
 
 export const API_BASE = import.meta.env.VITE_API_URL || '/api'
@@ -663,12 +663,42 @@ export async function setEvalRunRowNote(
 export async function promoteSkillVersion(
   sessionId: string,
   versionId: string,
+  opts: { refreshReferences?: boolean } = {},
 ): Promise<SkillVersion> {
+  // Backend accepts an absent body (legacy callers); only include one when
+  // the caller explicitly opted out of the default refresh, so the simple
+  // "promote" path stays a bare POST.
+  const init: RequestInit = { method: 'POST' }
+  if (opts.refreshReferences === false) {
+    init.headers = { 'Content-Type': 'application/json' }
+    init.body = JSON.stringify({ refresh_references: false })
+  }
   const res = await apiFetch(
     `${BASE}/sessions/${sessionId}/skill-versions/${versionId}/promote`,
-    { method: 'POST' },
+    init,
   )
   if (!res.ok) throw new Error(`Failed to promote skill version: ${res.status}`)
+  return res.json()
+}
+
+export async function listSkillReferences(
+  sessionId: string,
+): Promise<SkillReferenceSummary[]> {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/skill-references`)
+  if (!res.ok) throw new Error(`Failed to list skill references: ${res.status}`)
+  const data: { references: SkillReferenceSummary[] } = await res.json()
+  return data.references
+}
+
+export async function regenerateSkillReference(
+  sessionId: string,
+  kind: SkillReferenceKind,
+): Promise<SkillReferenceSummary> {
+  const res = await apiFetch(
+    `${BASE}/sessions/${sessionId}/skill-references/${kind}/regenerate`,
+    { method: 'POST' },
+  )
+  if (!res.ok) throw new Error(`Failed to regenerate ${kind}: ${res.status}`)
   return res.json()
 }
 

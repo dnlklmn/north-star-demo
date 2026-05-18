@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Eye, History, Loader2, RotateCcw } from 'lucide-react'
-import type { SkillVersion } from '../types'
+import { Eye, FileText, History, Loader2, RefreshCw, RotateCcw } from 'lucide-react'
+import type { SkillReferenceSummary, SkillVersion } from '../types'
 import {
   createSkillVersion,
   discardSkillVersion,
   fetchSkillFromUrl,
+  listSkillReferences,
   listSkillVersions,
   promoteSkillVersion,
+  regenerateSkillReference,
   restoreSkillVersion,
   seedFromSkill,
   setSessionMode,
@@ -171,6 +173,10 @@ export default function SkillPanel({
     oldText: string
     newText: string
   } | null>(null)
+  const [references, setReferences] = useState<SkillReferenceSummary[]>([])
+  const [refreshRefsOnPromote, setRefreshRefsOnPromote] = useState(true)
+  const [refViewing, setRefViewing] = useState<SkillReferenceSummary | null>(null)
+  const [refBusy, setRefBusy] = useState<string | null>(null)
 
   // Sync draft with external changes (e.g. EvaluatePanel just saved a new
   // version, or Home just created a fresh blank session).
@@ -186,6 +192,22 @@ export default function SkillPanel({
       // non-fatal
     }
   }, [sessionId])
+
+  const refreshReferences = useCallback(async () => {
+    try {
+      const refs = await listSkillReferences(sessionId)
+      setReferences(refs)
+    } catch {
+      // Non-fatal: References section just renders empty + retry-on-next-mount.
+      // A broken refs fetch shouldn't block the rest of the Skill panel.
+    }
+  }, [sessionId])
+
+  // Load once on mount; refreshes happen after promote / regenerate. Tied
+  // to sessionId so switching projects refetches.
+  useEffect(() => {
+    void refreshReferences()
+  }, [refreshReferences])
 
   // Keep local state in sync with the parent — the session-state SSE feed
   // overwrites `state.skill_versions` after every mutation, so we mirror it
@@ -611,11 +633,17 @@ export default function SkillPanel({
                   : !isCandidate && v.id === activeVersion?.id
                 const handlePromote = async () => {
                   try {
-                    await promoteSkillVersion(sessionId, v.id)
+                    await promoteSkillVersion(sessionId, v.id, {
+                      refreshReferences: refreshRefsOnPromote,
+                    })
                     const refreshed = await listSkillVersions(sessionId)
                     setVersions(refreshed)
                     onSkillBodyChange(v.body)
                     await onCandidateChanged?.()
+                    // Pull the latest reference set so staleness banners and
+                    // file bodies reflect what just got generated (or not,
+                    // if the toggle was off).
+                    void refreshReferences()
                   } catch (err) {
                     setError(err instanceof Error ? err.message : 'Failed to promote candidate')
                   }
@@ -707,6 +735,18 @@ export default function SkillPanel({
                       )}
                       {isCandidate && canEdit && (
                         <>
+                          <label
+                            className="flex items-center gap-1 text-[10px] text-muted-foreground select-none cursor-pointer"
+                            title="Regenerate examples.md, off-target.md, and criteria.md against the newly active skill version. Skipped per file when source data hasn't moved."
+                          >
+                            <input
+                              type="checkbox"
+                              className="w-3 h-3"
+                              checked={refreshRefsOnPromote}
+                              onChange={(e) => setRefreshRefsOnPromote(e.target.checked)}
+                            />
+                            refresh refs
+                          </label>
                           <button
                             onClick={handleDiscard}
                             className="px-2 py-0.5 text-[10px] font-medium border border-border bg-surface hover:bg-muted/30"
@@ -740,7 +780,143 @@ export default function SkillPanel({
           </section>
         )}
 
+        {references.length > 0 && (
+          <section>
+            <div className="flex items-center gap-2 mb-3 mt-6">
+              <FileText className="w-4 h-4 text-muted-foreground" />
+              <h3 className="text-sm font-semibold text-foreground">Reference files</h3>
+              <span
+                className="text-xs text-muted-foreground"
+                title="Bundled markdown files Claude reads on demand. Regenerated when you promote a candidate (or on the per-file button below)."
+              >
+                ({references.length} file{references.length === 1 ? '' : 's'})
+              </span>
+            </div>
+            <ul className="space-y-1">
+              {references.map((r) => {
+                const versionLabel = r.generated_at_skill_version_number
+                  ? `built from v${r.generated_at_skill_version_number}`
+                  : 'not yet generated'
+                const staleHint =
+                  r.stale_reason === 'inputs'
+                    ? 'Source data (dataset / stories / charter) has changed since this file was generated.'
+                    : r.stale_reason === 'missing'
+                      ? 'This file hasn’t been generated yet. Click regenerate to build it.'
+                      : 'In sync with the current source data.'
+                const isBusy = refBusy === r.kind
+                const handleRegen = async () => {
+                  setRefBusy(r.kind)
+                  try {
+                    await regenerateSkillReference(sessionId, r.kind)
+                    await refreshReferences()
+                  } catch (err) {
+                    setError(
+                      err instanceof Error
+                        ? err.message
+                        : `Failed to regenerate ${r.filename}`,
+                    )
+                  } finally {
+                    setRefBusy(null)
+                  }
+                }
+                return (
+                  <li
+                    key={r.kind}
+                    className={`flex items-center gap-3 px-3 py-2 text-xs border ${
+                      r.is_stale
+                        ? 'bg-warning/5 border-warning'
+                        : 'bg-muted/10 border-border'
+                    }`}
+                  >
+                    <span className="font-mono text-foreground">{r.filename}</span>
+                    {r.is_stale ? (
+                      <span
+                        className="font-mono text-[10px] uppercase px-1.5 py-0.5 bg-warning/15 text-warning"
+                        title={staleHint}
+                      >
+                        stale ({r.stale_reason})
+                      </span>
+                    ) : (
+                      <span
+                        className="font-mono text-[10px] uppercase px-1.5 py-0.5 bg-success/15 text-success"
+                        title={staleHint}
+                      >
+                        in sync
+                      </span>
+                    )}
+                    <span className="text-muted-foreground truncate flex-1">
+                      {versionLabel}
+                    </span>
+                    <div className="flex gap-1 flex-shrink-0">
+                      {r.body && (
+                        <button
+                          onClick={() => setRefViewing(r)}
+                          className="p-1 text-muted-foreground hover:text-foreground"
+                          title="View file body"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                      {canEdit && (
+                        <button
+                          onClick={handleRegen}
+                          disabled={isBusy}
+                          className="p-1 text-muted-foreground hover:text-foreground disabled:opacity-50"
+                          title={
+                            r.stale_reason === 'missing'
+                              ? `Generate ${r.filename}`
+                              : `Regenerate ${r.filename} from current state`
+                          }
+                        >
+                          {isBusy ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <RefreshCw className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  </li>
+                )
+              })}
+            </ul>
+          </section>
+        )}
+
       </div>
+
+      {refViewing && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-6"
+          onClick={() => setRefViewing(null)}
+        >
+          <div
+            className="bg-surface border border-border max-w-3xl w-full max-h-[80vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+              <div className="flex items-center gap-2">
+                <FileText className="w-4 h-4 text-muted-foreground" />
+                <span className="font-mono text-sm text-foreground">{refViewing.filename}</span>
+                <span className="text-xs text-muted-foreground">
+                  {refViewing.generated_at_skill_version_number
+                    ? `from v${refViewing.generated_at_skill_version_number}`
+                    : 'not yet generated'}
+                </span>
+              </div>
+              <button
+                onClick={() => setRefViewing(null)}
+                className="text-xs text-muted-foreground hover:text-foreground"
+              >
+                Close
+              </button>
+            </div>
+            <pre className="flex-1 overflow-auto p-4 text-xs whitespace-pre-wrap font-mono text-foreground">
+              {refViewing.body || '(empty)'}
+            </pre>
+          </div>
+        </div>
+      )}
 
       {diffVs && (
         <DiffModal
