@@ -54,18 +54,35 @@ export default function CharterSidebar({
             <CriterionBlock tone="good" label="Good" text={matched.good} />
             <CriterionBlock tone="bad" label="Bad" text={matched.bad} />
           </>
-        ) : (
+        ) : allAlignment.length === 0 ? (
           <p className="text-fg-dim leading-relaxed">
-            No matching alignment entry in the charter for this row's
-            feature_area. The reference list below shows every alignment entry
-            the charter defines.
+            The charter doesn't define any alignment entries yet. Add some on
+            the Charter tab to see good/bad criteria here.
           </p>
+        ) : (
+          <div className="flex flex-col gap-2 text-fg-dim leading-relaxed">
+            <p>
+              This row's feature_area isn't one of the {allAlignment.length}{' '}
+              alignment {allAlignment.length === 1 ? 'entry' : 'entries'} the
+              charter defines:
+            </p>
+            <ul className="space-y-0.5 text-fg-contrast">
+              {allAlignment.map(a => (
+                <li key={a.feature_area} className="leading-snug">
+                  • {a.feature_area}
+                </li>
+              ))}
+            </ul>
+          </div>
         )}
 
         {focusedCoverageTags.length > 0 && (
           <div>
-            <div className="text-[10px] uppercase tracking-wide text-fg-dim mb-1">
-              Row covers
+            <div
+              className="text-[10px] uppercase tracking-wide text-fg-dim mb-1"
+              title="Coverage tags identify which scenarios this row claims to test."
+            >
+              Coverage tags
             </div>
             <ul className="space-y-0.5 text-fg-contrast">
               {focusedCoverageTags.map(tag => (
@@ -73,31 +90,6 @@ export default function CharterSidebar({
               ))}
             </ul>
           </div>
-        )}
-
-        {!matched && allAlignment.length > 0 && (
-          <details className="text-fg-dim">
-            <summary className="cursor-pointer text-[10px] uppercase tracking-wide hover:text-fg-contrast">
-              All alignment entries ({allAlignment.length})
-            </summary>
-            <ul className="mt-2 space-y-2">
-              {allAlignment.map(a => (
-                <li key={a.feature_area} className="leading-snug">
-                  <div className="font-semibold text-fg-contrast">{a.feature_area}</div>
-                  {a.good && (
-                    <div className="text-fg-dim">
-                      <span className="text-success">Good:</span> {a.good}
-                    </div>
-                  )}
-                  {a.bad && (
-                    <div className="text-fg-dim">
-                      <span className="text-danger">Bad:</span> {a.bad}
-                    </div>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </details>
         )}
       </section>
     </aside>
