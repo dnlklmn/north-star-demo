@@ -23,7 +23,7 @@ interface CharterSidebarProps {
   onOpenCoverageMatrix?: () => void
   onRequestFillGaps?: () => void
   /** Whether a synth/fill-gaps request is in flight. Disables the
-   *  "Fix coverage" button and shows an inline spinner — same gating as
+   *  "Improve coverage" button and shows an inline spinner — same gating as
    *  the toolbar's Generate button. */
   fillingGaps?: boolean
   /** Navigate to the Charter tab's alignment section so the user can add or
@@ -325,7 +325,7 @@ function CoverageSummary({
           {fillingGaps && <Loader2 className="w-3 h-3 animate-spin" />}
           {fillingGaps
             ? 'Generating…'
-            : `Fix coverage (${emptyCount} gap${emptyCount === 1 ? '' : 's'})`}
+            : `Improve coverage (${emptyCount} gap${emptyCount === 1 ? '' : 's'})`}
         </button>
       )}
     </section>

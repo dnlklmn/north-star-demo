@@ -43,7 +43,7 @@ interface ExampleReviewProps {
    *  the sidebar carries the at-a-glance signal (radar + score). */
   onShowCoverageMap: () => void
   /** Cached gap analysis. Drives the compact coverage summary in the
-   *  sidebar (radar + score + "Fix coverage" CTA). */
+   *  sidebar (radar + score + "Improve coverage" CTA). */
   gaps?: GapAnalysis | null
   /** Judge-human label agreement, rendered next to the stats counts. */
   agreement?: JudgeAgreement | null
@@ -648,7 +648,7 @@ export default function ExampleReview({
               <button
                 onClick={() => setShowGenerateModal(true)}
                 disabled={loading}
-                className="px-2.5 py-1 text-xs bg-fill-primary text-bg-default hover:bg-fill-primary-hover transition-colors disabled:opacity-50 inline-flex items-center gap-1.5"
+                className="px-2.5 py-1 text-xs border border-border-hint hover:bg-fill-neutral transition-colors disabled:opacity-50 inline-flex items-center gap-1.5"
               >
                 {loading && <Loader2 className="w-3 h-3 animate-spin" />}
                 {loading ? 'Generating…' : 'Generate more'}
