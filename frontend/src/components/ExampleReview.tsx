@@ -611,33 +611,20 @@ export default function ExampleReview({
           generating ? "pointer-events-none select-none" : ""
         }`}
       >
-        {/* Title + Dataset QA subtitle — framing without a dismissable
-            banner. Distinguishes this phase from later eval-result review. */}
-        <div className="flex flex-col gap-1">
-          <h1 className="text-xl font-semibold text-fg-contrast leading-none">Dataset</h1>
-          <p className="text-xs text-fg-dim">
-            The test cases your eval will run against — review for quality, not model performance.
-          </p>
-        </div>
-
-        {/* Dataset-level utilities. The per-status / per-label / per-area
-            counts moved into the filter dropdowns below, so this row is
-            actions only. Judge agreement badge sits left so it stays
-            visible without the noisy "X total · Y pending" line above it. */}
-        <div className="flex items-center justify-between gap-2 flex-wrap">
-          <div className="flex items-center gap-3 flex-wrap text-xs text-fg-dim">
-            {agreement && <JudgeAgreementBadge agreement={agreement} />}
-            {stats.newSinceRefresh > 0 && (
-              <span className="text-accent font-medium">
-                {stats.newSinceRefresh} new since refresh
-              </span>
-            )}
+        {/* Title row with dataset-level actions inline on the right. The
+            subtitle sits under the h1 in the left column; actions align to
+            the top so they don't sag with the second line of text. */}
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="flex flex-col gap-1">
+            <h1 className="text-xl font-semibold text-fg-contrast leading-none">Dataset</h1>
+            <p className="text-xs text-fg-dim">
+              The test cases your eval will run against — review for quality, not model performance.
+            </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <button
               onClick={onExport}
-              disabled={stats.approved === 0}
-              className="px-2 py-1 text-xs text-fg-dim hover:text-fg-contrast border border-border-hint transition-colors disabled:opacity-40"
+              className="px-2 py-1 text-xs text-fg-dim hover:text-fg-contrast border border-border-hint transition-colors"
               title="Download approved rows as a JSON file"
             >
               Export JSON
@@ -686,6 +673,20 @@ export default function ExampleReview({
             )}
           </div>
         </div>
+
+        {/* Inline stats: judge agreement + "new since refresh" badge.
+            Replaces the removed "X total · Y pending" line — these are the
+            standalone signals worth surfacing above the filter row. */}
+        {(agreement || stats.newSinceRefresh > 0) && (
+          <div className="flex items-center gap-3 flex-wrap text-xs text-fg-dim -mt-3">
+            {agreement && <JudgeAgreementBadge agreement={agreement} />}
+            {stats.newSinceRefresh > 0 && (
+              <span className="text-accent font-medium">
+                {stats.newSinceRefresh} new since refresh
+              </span>
+            )}
+          </div>
+        )}
 
         {/* Filters + per-row actions — sits closer to the table since it
             scopes to which rows are shown and what to do with the selected
@@ -738,19 +739,25 @@ export default function ExampleReview({
           {canEdit && (
             <div className="flex items-center gap-2 flex-wrap">
               <ActionButton
-                icon={<Check className="w-4 h-4" />}
-                shortcut="A"
-                label="pprove"
-                variant={ACTIONS_BY_CELL[focusedCell].includes('approve') ? 'neutral' : 'outline'}
-                onClick={() => actOnSelected(ex => onUpdateExample(ex.id, { review_status: 'approved' }))}
+                icon={<Trash2 className="w-4 h-4" />}
+                shortcut="D"
+                label="elete"
+                iconOnly
+                ariaLabel="Delete (D)"
+                title="Delete (D)"
+                variant={ACTIONS_BY_CELL[focusedCell].includes('delete') ? 'neutral' : 'outline'}
+                onClick={() => actOnSelected(ex => setDeleteConfirmId(ex.id))}
                 disabled={!selectedExample}
               />
               <ActionButton
-                icon={<X className="w-4 h-4" />}
-                shortcut="R"
-                label="eject"
-                variant={ACTIONS_BY_CELL[focusedCell].includes('reject') ? 'neutral' : 'outline'}
-                onClick={() => actOnSelected(ex => onUpdateExample(ex.id, { review_status: 'rejected' }))}
+                icon={<Pencil className="w-4 h-4" />}
+                shortcut="E"
+                label="dit"
+                iconOnly
+                ariaLabel="Edit (E)"
+                title="Edit (E)"
+                variant={ACTIONS_BY_CELL[focusedCell].includes('edit') ? 'neutral' : 'outline'}
+                onClick={() => actOnSelected(ex => beginEdit(ex.id))}
                 disabled={!selectedExample}
               />
               <ActionButton
@@ -767,19 +774,19 @@ export default function ExampleReview({
                 disabled={!selectedExample}
               />
               <ActionButton
-                icon={<Pencil className="w-4 h-4" />}
-                shortcut="E"
-                label="dit"
-                variant={ACTIONS_BY_CELL[focusedCell].includes('edit') ? 'neutral' : 'outline'}
-                onClick={() => actOnSelected(ex => beginEdit(ex.id))}
+                icon={<X className="w-4 h-4" />}
+                shortcut="R"
+                label="eject"
+                variant={ACTIONS_BY_CELL[focusedCell].includes('reject') ? 'neutral' : 'outline'}
+                onClick={() => actOnSelected(ex => onUpdateExample(ex.id, { review_status: 'rejected' }))}
                 disabled={!selectedExample}
               />
               <ActionButton
-                icon={<Trash2 className="w-4 h-4" />}
-                shortcut="D"
-                label="elete"
-                variant={ACTIONS_BY_CELL[focusedCell].includes('delete') ? 'neutral' : 'outline'}
-                onClick={() => actOnSelected(ex => setDeleteConfirmId(ex.id))}
+                icon={<Check className="w-4 h-4" />}
+                shortcut="A"
+                label="pprove"
+                variant={ACTIONS_BY_CELL[focusedCell].includes('approve') ? 'neutral' : 'outline'}
+                onClick={() => actOnSelected(ex => onUpdateExample(ex.id, { review_status: 'approved' }))}
                 disabled={!selectedExample}
               />
             </div>
@@ -921,12 +928,16 @@ function FilterSelect({
 }) {
   // Native <select> styled to look like the Figma ButtonMed:
   // dark surface, hint border, mono label, chevron on the right.
+  // Capped at 200px so the filter cluster doesn't crowd the per-row
+  // action buttons on the right — long option labels still expand in
+  // the native dropdown popup when open.
   return (
-    <div className="relative">
+    <div className="relative w-[180px]">
       <select
         value={value}
         onChange={e => onChange(e.target.value)}
-        className="appearance-none h-10 pl-3 pr-9 text-sm font-mono font-semibold text-fg-contrast bg-transparent border border-border-hint hover:bg-fill-neutral transition-colors cursor-pointer focus:outline-none focus:border-border-primary"
+        title={options.find(o => o.value === value)?.label || placeholder}
+        className="w-full appearance-none h-10 pl-3 pr-9 text-sm font-mono font-semibold text-fg-contrast bg-transparent border border-border-hint hover:bg-fill-neutral transition-colors cursor-pointer focus:outline-none focus:border-border-primary truncate"
       >
         <option value="">{placeholder}</option>
         {options.map(o => (
@@ -948,6 +959,9 @@ function ActionButton({
   onClick,
   disabled,
   variant = 'neutral',
+  iconOnly = false,
+  ariaLabel,
+  title,
 }: {
   icon?: React.ReactNode
   prefix?: string
@@ -956,6 +970,11 @@ function ActionButton({
   onClick: () => void
   disabled?: boolean
   variant?: 'neutral' | 'outline'
+  /** Hide the label text and render the icon only. The keyboard shortcut
+   *  still works; the label travels into aria-label / title for a11y. */
+  iconOnly?: boolean
+  ariaLabel?: string
+  title?: string
 }) {
   // 'neutral' = filled — used for actions relevant to the focused cell.
   // 'outline' = transparent w/ border — actions still available but
@@ -964,18 +983,23 @@ function ActionButton({
     variant === 'neutral'
       ? 'bg-fill-neutral text-fg-contrast hover:bg-fill-neutral-hover'
       : 'bg-transparent text-fg-contrast border border-border-hint hover:bg-fill-neutral'
+  const paddingCls = iconOnly ? 'h-10 w-10 justify-center' : 'h-10 px-2'
   return (
     <button
       onClick={onClick}
       disabled={disabled}
-      className={`h-10 px-2 flex items-center gap-2 text-sm font-mono font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${variantCls}`}
+      aria-label={ariaLabel ?? (iconOnly ? `${prefix ?? ''}${shortcut}${label}` : undefined)}
+      title={title ?? (iconOnly ? `${prefix ?? ''}${shortcut}${label} (${shortcut.toUpperCase()})` : undefined)}
+      className={`${paddingCls} flex items-center gap-2 text-sm font-mono font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${variantCls}`}
     >
       {icon}
-      <span className="leading-none">
-        {prefix}
-        <span className="underline">{shortcut}</span>
-        {label}
-      </span>
+      {!iconOnly && (
+        <span className="leading-none">
+          {prefix}
+          <span className="underline">{shortcut}</span>
+          {label}
+        </span>
+      )}
     </button>
   )
 }
