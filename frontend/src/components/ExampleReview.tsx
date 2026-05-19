@@ -594,7 +594,7 @@ export default function ExampleReview({
           Evaluate. */}
       <div className="flex-1 min-h-0 flex overflow-hidden">
       <div
-        className={`flex-1 min-w-0 flex flex-col gap-6 p-6 overflow-hidden ${
+        className={`flex-1 min-w-0 flex flex-col gap-6 pt-6 px-6 pb-0 overflow-hidden ${
           generating ? "pointer-events-none select-none" : ""
         }`}
       >
@@ -1001,7 +1001,7 @@ function ActionButton({
 
 function ColumnHeaderRow() {
   return (
-    <div className="flex items-end gap-4 px-4 py-2 text-sm text-fg-contrast">
+    <div className="flex items-end gap-4 py-2 text-sm text-fg-contrast">
       <div className="flex-1 basis-0">Input</div>
       <div className="flex-1 basis-0">Output</div>
       <div className="w-[200px] flex-shrink-0">Labels</div>
@@ -1015,7 +1015,7 @@ function GroupHeader({ name, onAdd }: { name: string; onAdd?: () => void }) {
   // the focused row live in the right sidebar — keeping the header to the
   // section name only avoids duplicating that info on every separator.
   return (
-    <div className="sticky top-0 z-10 px-4 py-2 bg-gray-200 flex items-center justify-between gap-2">
+    <div className="sticky top-0 z-10 py-2 bg-gray-200 flex items-center justify-between gap-2">
       <span className="text-sm font-semibold text-white font-sans">{name}</span>
       {onAdd && (
         <button
@@ -1116,7 +1116,7 @@ function ExampleRow({
         data-row-id={example.id}
         onClick={onSelect}
         className={[
-          'flex items-stretch gap-4 px-4 py-4 cursor-pointer transition-colors max-h-[480px]',
+          'flex items-stretch gap-4 py-4 cursor-pointer transition-colors max-h-[480px]',
           isSelected
             ? 'bg-bg-default outline outline-2 outline-border-primary -outline-offset-2'
             : 'bg-gray-150 hover:bg-fill-neutral-hover',
