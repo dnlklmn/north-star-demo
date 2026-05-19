@@ -2640,29 +2640,78 @@ export default function ProjectWorkspace() {
       setCoverageGenerateRequest(null);
       setLoading(true);
       try {
+        // Build the initial target set. "cell" and "area" requests imply
+        // their own scope; "fill" passes through the empty cells the
+        // sidebar collected from the matrix.
+        let targets: Array<{ criterion: string; featureArea: string }>;
         if (req.kind === "cell") {
-          await synthesizeExamples(dataset.id, {
-            feature_areas: [req.featureArea],
-            coverage_criteria: [req.criterion],
-            count_per_scenario: count,
-          });
+          targets = [{ criterion: req.criterion, featureArea: req.featureArea }];
         } else if (req.kind === "area") {
-          // Generate for one feature_area across all charter coverage
-          // criteria — backend defaults to the full criteria list when
-          // coverage_criteria is omitted.
+          // Area scope = the focused feature_area × every charter
+          // coverage criterion. We need the full list of criteria to
+          // form the per-cell targets that drive the retry loop, so
+          // expand here.
+          const allCriteria = state.charter.coverage?.criteria ?? [];
+          targets = allCriteria.length > 0
+            ? allCriteria.map(c => ({ criterion: c, featureArea: req.featureArea }))
+            : // No charter criteria yet — fall back to a single open-ended
+              // synth scoped to the area, with no per-cell breakdown.
+              [{ criterion: "", featureArea: req.featureArea }];
+        } else {
+          targets = req.emptyCells;
+        }
+
+        // Retry-until-resolved: after each synth pass, refetch the
+        // matrix and rescope to cells that are STILL empty. Caps the
+        // total LLM cost at MAX_ATTEMPTS so an adversarial / impossible
+        // cell can't loop forever — leftover gaps surface in the
+        // sidebar where the user can decide whether to retry or accept.
+        const MAX_ATTEMPTS = 3;
+        let remaining = targets;
+        for (
+          let attempt = 1;
+          attempt <= MAX_ATTEMPTS && remaining.length > 0;
+          attempt++
+        ) {
+          const criteria = Array.from(
+            new Set(remaining.map(c => c.criterion).filter(c => c.length > 0)),
+          );
+          const areas = Array.from(new Set(remaining.map(c => c.featureArea)));
           await synthesizeExamples(dataset.id, {
-            feature_areas: [req.featureArea],
+            feature_areas: areas,
+            // Only pass coverage_criteria when we have specific targets;
+            // an empty list means "use the full charter list" on the
+            // backend, which is the right fallback for the no-criteria
+            // area case.
+            ...(criteria.length > 0 ? { coverage_criteria: criteria } : {}),
             count_per_scenario: count,
           });
-        } else {
-          const missingCriteria = Array.from(new Set(req.emptyCells.map(c => c.criterion)));
-          const missingAreas = Array.from(new Set(req.emptyCells.map(c => c.featureArea)));
-          await synthesizeExamples(dataset.id, {
-            feature_areas: missingAreas,
-            coverage_criteria: missingCriteria,
-            count_per_scenario: count,
+          // Refetch the matrix and prune cells that the new rows
+          // covered.
+          let nextGaps: GapAnalysis | null = null;
+          try {
+            nextGaps = await getGapAnalysis(dataset.id);
+            setGapAnalysis(nextGaps);
+          } catch (err) {
+            console.error("Failed to refresh gaps after fix-coverage attempt:", err);
+            break;
+          }
+          const matrix = nextGaps.coverage_matrix || {};
+          remaining = remaining.filter(c => {
+            // Cells without a real criterion (the area-fallback case)
+            // are resolved when any row landed in this area — check the
+            // matrix's row totals for this area.
+            if (!c.criterion) {
+              const total = Object.values(matrix).reduce(
+                (acc, row) => acc + ((row || {})[c.featureArea] ?? 0),
+                0,
+              );
+              return total === 0;
+            }
+            return ((matrix[c.criterion] || {})[c.featureArea] ?? 0) === 0;
           });
         }
+
         const fullDs = await getDataset(dataset.session_id);
         setDataset(fullDs);
       } catch (err) {
@@ -2671,7 +2720,7 @@ export default function ProjectWorkspace() {
         setLoading(false);
       }
     },
-    [dataset, coverageGenerateRequest],
+    [dataset, coverageGenerateRequest, state.charter],
   );
 
   const handleExport = useCallback(async () => {
