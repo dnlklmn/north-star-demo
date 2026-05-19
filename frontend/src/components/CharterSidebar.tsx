@@ -1,6 +1,7 @@
+import { Loader2, Maximize2 } from 'lucide-react'
 import type { Charter, GapAnalysis } from '../types'
 import RadarChart from './RadarChart'
-import { computeCoverageScore, coverageStatus } from './coverage'
+import { computeCoverageScore } from './coverage'
 
 interface CharterSidebarProps {
   charter: Charter
@@ -19,6 +20,10 @@ interface CharterSidebarProps {
   gaps?: GapAnalysis | null
   onOpenCoverageMatrix?: () => void
   onRequestFillGaps?: () => void
+  /** Whether a synth/fill-gaps request is in flight. Disables the
+   *  "Fix coverage" button and shows an inline spinner — same gating as
+   *  the toolbar's Generate button. */
+  fillingGaps?: boolean
   /** Navigate to the Charter tab's alignment section so the user can add or
    *  edit alignment entries. Called from the "Add alignment criteria" CTA
    *  in the no-match branch of the charter criteria block. */
@@ -33,6 +38,7 @@ export default function CharterSidebar({
   gaps,
   onOpenCoverageMatrix,
   onRequestFillGaps,
+  fillingGaps = false,
   onAddAlignmentCriteria,
 }: CharterSidebarProps) {
   // Prefer the snapshot for matching — that's the alignment the rows were
@@ -59,6 +65,7 @@ export default function CharterSidebar({
         gaps={gaps}
         onOpenMatrix={onOpenCoverageMatrix}
         onRequestFillGaps={onRequestFillGaps}
+        fillingGaps={fillingGaps}
       />
 
       <section className="p-6 flex flex-col gap-3 text-xs">
@@ -150,10 +157,12 @@ function CoverageSummary({
   gaps,
   onOpenMatrix,
   onRequestFillGaps,
+  fillingGaps,
 }: {
   gaps?: GapAnalysis | null
   onOpenMatrix?: () => void
   onRequestFillGaps?: () => void
+  fillingGaps?: boolean
 }) {
   if (!gaps) {
     return (
@@ -177,19 +186,39 @@ function CoverageSummary({
   return (
     <section className="p-6 border-b border-border-hint flex flex-col gap-3 text-xs">
       <header className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5">
-          {score != null && <CoverageDot score={score} />}
+        {/* Title inlines the percentage and cell count — the indicator
+            dot is gone (the radar fill already shows the same signal). */}
+        <div className="flex items-baseline gap-2 min-w-0">
           <span className="text-sm font-semibold text-fg-contrast">Coverage</span>
+          {score != null && (
+            <span className="text-fg-dim truncate">
+              {Math.round(score * 100)}% ({totalCells - emptyCount}/{totalCells})
+            </span>
+          )}
         </div>
-        {score != null && (
-          <span className="text-fg-dim">
-            {Math.round(score * 100)}% ({totalCells - emptyCount}/{totalCells})
-          </span>
+        {/* Top-right expand opens the full matrix modal. Same target as
+            clicking the radar itself. */}
+        {onOpenMatrix && (
+          <button
+            onClick={onOpenMatrix}
+            className="text-fg-dim hover:text-fg-contrast transition-colors"
+            aria-label="Open coverage matrix"
+            title="Open coverage matrix"
+          >
+            <Maximize2 className="w-3.5 h-3.5" />
+          </button>
         )}
       </header>
 
       {featureAreas.length >= 3 && (
-        <div className="flex justify-center">
+        <button
+          type="button"
+          onClick={onOpenMatrix}
+          disabled={!onOpenMatrix}
+          aria-label="Open coverage matrix"
+          title="Open coverage matrix"
+          className="flex justify-center w-full cursor-pointer hover:opacity-90 transition-opacity disabled:cursor-default"
+        >
           <RadarChart
             dimensions={featureAreas.map(fa => {
               const coveredCount = criteria.filter(
@@ -211,38 +240,21 @@ function CoverageSummary({
             labelFontSize={11}
             labelMaxChars={14}
           />
-        </div>
+        </button>
       )}
 
-      <div className="flex flex-col gap-1.5">
-        {onRequestFillGaps && emptyCount > 0 && (
-          <button
-            onClick={onRequestFillGaps}
-            className="w-full py-1.5 px-2 bg-fill-primary text-bg-default text-xs font-medium hover:bg-fill-primary-hover transition-opacity"
-          >
-            Fix coverage ({emptyCount} gap{emptyCount === 1 ? '' : 's'})
-          </button>
-        )}
-        {onOpenMatrix && (
-          <button
-            onClick={onOpenMatrix}
-            className="w-full py-1.5 px-2 text-xs text-fg-dim hover:text-fg-contrast border border-border-hint transition-colors"
-          >
-            View full matrix
-          </button>
-        )}
-      </div>
+      {onRequestFillGaps && emptyCount > 0 && (
+        <button
+          onClick={onRequestFillGaps}
+          disabled={fillingGaps}
+          className="w-full py-1.5 px-2 bg-fill-primary text-bg-default text-xs font-medium hover:bg-fill-primary-hover transition-opacity disabled:opacity-60 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5"
+        >
+          {fillingGaps && <Loader2 className="w-3 h-3 animate-spin" />}
+          {fillingGaps
+            ? 'Generating…'
+            : `Fix coverage (${emptyCount} gap${emptyCount === 1 ? '' : 's'})`}
+        </button>
+      )}
     </section>
   )
-}
-
-function CoverageDot({ score }: { score: number }) {
-  const status = coverageStatus(score)
-  const cls =
-    status === 'good'
-      ? 'bg-success'
-      : status === 'warn'
-        ? 'bg-warning'
-        : 'bg-danger'
-  return <span className={`inline-block w-2 h-2 rounded-full ${cls}`} />
 }

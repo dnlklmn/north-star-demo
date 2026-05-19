@@ -7,20 +7,7 @@ import CharterSidebar from './CharterSidebar'
 import JudgeAgreementBadge from './JudgeAgreementBadge'
 
 type CellId = 'input' | 'output' | 'labels' | 'status'
-type ActionId = 'approve' | 'reject' | 'relabel' | 'edit' | 'delete'
-
 const CELL_ORDER: CellId[] = ['input', 'output', 'labels', 'status']
-
-// What action set is contextually relevant when each cell is focused.
-// Status owns approve/reject + delete (the row-level destructive action,
-// homeless now that the scenario cell was retired — coverage_tags live in
-// the sidebar). Labels owns relabel, input/output own edit.
-const ACTIONS_BY_CELL: Record<CellId, ActionId[]> = {
-  input: ['edit'],
-  output: ['edit'],
-  labels: ['relabel'],
-  status: ['approve', 'reject', 'delete'],
-}
 
 interface ExampleReviewProps {
   examples: Example[]
@@ -737,6 +724,11 @@ export default function ExampleReview({
           </div>
 
           {canEdit && (
+            // Variants are static per action — they don't flip based on
+            // which cell is focused. Approve / Reject are the primary
+            // decisions (neutral, filled); Delete / Edit / Relabel are
+            // secondary (outline). Keeps the action cluster visually
+            // stable as the user navigates rows.
             <div className="flex items-center gap-2 flex-wrap">
               <ActionButton
                 icon={<Trash2 className="w-4 h-4" />}
@@ -745,7 +737,7 @@ export default function ExampleReview({
                 iconOnly
                 ariaLabel="Delete (D)"
                 title="Delete (D)"
-                variant={ACTIONS_BY_CELL[focusedCell].includes('delete') ? 'neutral' : 'outline'}
+                variant="outline"
                 onClick={() => actOnSelected(ex => setDeleteConfirmId(ex.id))}
                 disabled={!selectedExample}
               />
@@ -756,7 +748,7 @@ export default function ExampleReview({
                 iconOnly
                 ariaLabel="Edit (E)"
                 title="Edit (E)"
-                variant={ACTIONS_BY_CELL[focusedCell].includes('edit') ? 'neutral' : 'outline'}
+                variant="outline"
                 onClick={() => actOnSelected(ex => beginEdit(ex.id))}
                 disabled={!selectedExample}
               />
@@ -765,7 +757,7 @@ export default function ExampleReview({
                 prefix="Re"
                 shortcut="l"
                 label="abel"
-                variant={ACTIONS_BY_CELL[focusedCell].includes('relabel') ? 'neutral' : 'outline'}
+                variant="outline"
                 onClick={() =>
                   actOnSelected(ex =>
                     onUpdateExample(ex.id, { label: ex.label === 'good' ? 'bad' : 'good' }),
@@ -777,7 +769,7 @@ export default function ExampleReview({
                 icon={<X className="w-4 h-4" />}
                 shortcut="R"
                 label="eject"
-                variant={ACTIONS_BY_CELL[focusedCell].includes('reject') ? 'neutral' : 'outline'}
+                variant="neutral"
                 onClick={() => actOnSelected(ex => onUpdateExample(ex.id, { review_status: 'rejected' }))}
                 disabled={!selectedExample}
               />
@@ -785,7 +777,7 @@ export default function ExampleReview({
                 icon={<Check className="w-4 h-4" />}
                 shortcut="A"
                 label="pprove"
-                variant={ACTIONS_BY_CELL[focusedCell].includes('approve') ? 'neutral' : 'outline'}
+                variant="neutral"
                 onClick={() => actOnSelected(ex => onUpdateExample(ex.id, { review_status: 'approved' }))}
                 disabled={!selectedExample}
               />
@@ -890,6 +882,7 @@ export default function ExampleReview({
         gaps={gaps}
         onOpenCoverageMatrix={onShowCoverageMap}
         onRequestFillGaps={onRequestFillGaps}
+        fillingGaps={loading}
         onAddAlignmentCriteria={onAddAlignmentCriteria}
       />
       </div>
