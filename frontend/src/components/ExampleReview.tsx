@@ -4,7 +4,6 @@ import type { Example, Charter, GapAnalysis, JudgeAgreement } from '../types'
 import DeleteModal from './examples/DeleteModal'
 import GenerateModal from './examples/GenerateModal'
 import CharterSidebar from './CharterSidebar'
-import JudgeAgreementBadge from './JudgeAgreementBadge'
 
 type CellId = 'input' | 'output' | 'labels' | 'status'
 const CELL_ORDER: CellId[] = ['input', 'output', 'labels', 'status']
@@ -109,7 +108,7 @@ export default function ExampleReview({
   onExport,
   onShowCoverageMap,
   gaps,
-  agreement,
+  agreement: _agreement,
   onRequestFillGaps,
   onAddAlignmentCriteria,
   onAddForFeatureArea,
@@ -206,16 +205,17 @@ export default function ExampleReview({
   }, [])
   // Edit state carries both row id and which cell is being edited so only
   // that one cell becomes a textarea. The other cells stay read-only.
-  const [editing, setEditing] = useState<{ id: string; cell: 'input' | 'output' } | null>(null)
+  const [editing, setEditing] = useState<{ id: string; cell: 'input' | 'output' | 'labels' } | null>(null)
   const editingId = editing?.id ?? null
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
   const [showGenerateModal, setShowGenerateModal] = useState(false)
 
-  // Edit defaults to whichever of input/output is focused. If the focused
-  // cell isn't one of those, fall back to input — the action button is in
-  // 'outline' state for non-edit cells, but still works.
+  // Edit targets the focused cell when it's an editable one (input /
+  // output / labels). Falls back to input otherwise — that's the most
+  // common edit target.
   const beginEdit = useCallback((exampleId: string) => {
-    const cell = focusedCell === 'output' ? 'output' : 'input'
+    const cell: 'input' | 'output' | 'labels' =
+      focusedCell === 'output' || focusedCell === 'labels' ? focusedCell : 'input'
     setEditing({ id: exampleId, cell })
   }, [focusedCell])
 
@@ -428,6 +428,7 @@ export default function ExampleReview({
           break
         case 'e':
         case 'E':
+        case 'Enter':
           if (selectedExample) {
             e.preventDefault()
             beginEdit(selectedExample.id)
@@ -657,17 +658,17 @@ export default function ExampleReview({
           </div>
         </div>
 
-        {/* Inline stats: judge agreement + "new since refresh" badge.
-            Replaces the removed "X total · Y pending" line — these are the
-            standalone signals worth surfacing above the filter row. */}
-        {(agreement || stats.newSinceRefresh > 0) && (
+        {/* JudgeAgreementBadge is intentionally hidden for now — the
+            metric is computed and the endpoint still serves it, but with
+            small reviewed counts it's noise more than signal. Re-enable
+            when there's a story for how reviewers should act on it.
+            "New since refresh" is still worth surfacing for prompt-eval
+            workflows. */}
+        {stats.newSinceRefresh > 0 && (
           <div className="flex items-center gap-3 flex-wrap text-xs text-fg-dim -mt-3">
-            {agreement && <JudgeAgreementBadge agreement={agreement} />}
-            {stats.newSinceRefresh > 0 && (
-              <span className="text-accent font-medium">
-                {stats.newSinceRefresh} new since refresh
-              </span>
-            )}
+            <span className="text-accent font-medium">
+              {stats.newSinceRefresh} new since refresh
+            </span>
           </div>
         )}
 
@@ -1048,7 +1049,7 @@ function ExampleRow({
   example: Example
   isSelected: boolean
   /** Which single cell is being edited on this row. Null means read-only. */
-  editingCell: 'input' | 'output' | null
+  editingCell: 'input' | 'output' | 'labels' | null
   focusedCell: CellId
   onSelect: () => void
   onCellSelect: (cell: CellId) => void
@@ -1070,14 +1071,33 @@ function ExampleRow({
       : ''
   const [editInput, setEditInput] = useState(example.input)
   const [editOutput, setEditOutput] = useState(example.expected_output)
+  // Labels cell renders the row's label + source as comma-separated
+  // text. The edit buffer holds the same shape; on save we split on
+  // commas and apply the first token as the label (validated against
+  // the enum), the second as the source.
+  const labelsDisplay = `${example.label}, ${example.source}`
+  const [editLabels, setEditLabels] = useState(labelsDisplay)
   // Track the source values we hydrated edit state from. When the parent
   // updates the underlying example, reset the edit buffers. Derived during
   // render to avoid a setState-in-effect cascade.
-  const [prevSource, setPrevSource] = useState({ input: example.input, output: example.expected_output })
-  if (prevSource.input !== example.input || prevSource.output !== example.expected_output) {
-    setPrevSource({ input: example.input, output: example.expected_output })
+  const [prevSource, setPrevSource] = useState({
+    input: example.input,
+    output: example.expected_output,
+    labels: labelsDisplay,
+  })
+  if (
+    prevSource.input !== example.input ||
+    prevSource.output !== example.expected_output ||
+    prevSource.labels !== labelsDisplay
+  ) {
+    setPrevSource({
+      input: example.input,
+      output: example.expected_output,
+      labels: labelsDisplay,
+    })
     setEditInput(example.input)
     setEditOutput(example.expected_output)
+    setEditLabels(labelsDisplay)
   }
   const [showRevision, setShowRevision] = useState(false)
   const rowRef = useRef<HTMLDivElement>(null)
@@ -1097,6 +1117,16 @@ function ExampleRow({
     } as Partial<Example>
     if (editingCell === 'input') update.input = editInput
     else if (editingCell === 'output') update.expected_output = editOutput
+    else if (editingCell === 'labels') {
+      // Split on commas, lowercase, validate against the known enums.
+      // Tokens that don't validate are dropped so a typo in "manuel"
+      // doesn't silently overwrite the source.
+      const tokens = editLabels.split(',').map(t => t.trim().toLowerCase())
+      const labelTok = tokens.find(t => t === 'good' || t === 'bad' || t === 'unlabeled')
+      const sourceTok = tokens.find(t => t === 'manual' || t === 'synthetic' || t === 'imported')
+      if (labelTok) update.label = labelTok as Example['label']
+      if (sourceTok) update.source = sourceTok as Example['source']
+    }
     onUpdate(update)
     onCancelEdit()
   }
@@ -1172,16 +1202,27 @@ function ExampleRow({
           </div>
         </div>
 
-        {/* Labels */}
+        {/* Labels — plain comma-separated text "label, source". Edits
+            inline via Enter or the Edit action; on save we parse and
+            validate each token against the known enums. */}
         <div
           onClick={e => { e.stopPropagation(); onCellSelect('labels') }}
           className={`w-[200px] flex-shrink-0 self-stretch p-px ${cellCls('labels')}`}
         >
           <div className="h-full p-2 flex flex-col gap-1">
-            <div className="flex items-start gap-1 flex-wrap">
-              <Chip>{example.label === 'good' ? 'Good' : example.label === 'bad' ? 'Bad' : 'Unlabeled'}</Chip>
-              <Chip>{example.source.charAt(0).toUpperCase() + example.source.slice(1)}</Chip>
-            </div>
+            {editingCell === 'labels' ? (
+              <EditCell
+                value={editLabels}
+                onChange={setEditLabels}
+                onSave={handleSaveEdit}
+                onCancel={onCancelEdit}
+                singleLine
+              />
+            ) : (
+              <div className="text-sm text-fg-contrast leading-[1.5] break-words">
+                {labelsDisplay}
+              </div>
+            )}
           </div>
         </div>
 
@@ -1353,61 +1394,63 @@ function OverflowMenu({ items }: { items: OverflowMenuItem[] }) {
   )
 }
 
-function Chip({ children }: { children: React.ReactNode }) {
-  // gray-300 (#4d4d4d) so the chip pops on every row state: clearly
-  // visible against the default row (gray-150), still distinct on hover
-  // (gray-200) and selected (bg-default ≈ near-black). The previous
-  // gray-150 was identical to the default row background, so chips were
-  // invisible until you hovered or selected the row.
-  return (
-    <span className="px-2 py-1 bg-gray-300 text-sm text-fg-contrast">
-      {children}
-    </span>
-  )
-}
-
 function EditCell({
   value,
   onChange,
   onSave,
   onCancel,
+  singleLine = false,
 }: {
   value: string
   onChange: (v: string) => void
   onSave: () => void
   onCancel: () => void
+  /** Renders a single-line <input> instead of a textarea. Used for the
+   *  labels cell where the value is a short "label, source" string. */
+  singleLine?: boolean
 }) {
-  const ref = useRef<HTMLTextAreaElement>(null)
+  const ref = useRef<HTMLTextAreaElement | HTMLInputElement>(null)
   // Mount-time focus + cursor at end of text. Selecting via setSelectionRange
   // after focus works across browsers; just calling .focus() leaves the cursor
   // at position 0 in some implementations.
   useEffect(() => {
-    const ta = ref.current
-    if (!ta) return
-    ta.focus()
-    const len = ta.value.length
-    ta.setSelectionRange(len, len)
+    const el = ref.current
+    if (!el) return
+    el.focus()
+    const len = el.value.length
+    el.setSelectionRange(len, len)
   }, [])
+  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement | HTMLInputElement>) => {
+    // Enter saves; in the textarea case Shift+Enter inserts a newline.
+    // Esc cancels. Mirrors the inline-edit pattern in the rest of the app.
+    if (e.key === 'Enter' && (singleLine || !e.shiftKey)) {
+      e.preventDefault()
+      onSave()
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      onCancel()
+    }
+  }
   return (
     <div className="flex flex-col gap-1" onClick={e => e.stopPropagation()}>
-      <textarea
-        ref={ref}
-        value={value}
-        onChange={e => onChange(e.target.value)}
-        onKeyDown={e => {
-          // Enter saves, Shift+Enter inserts a newline. Esc cancels. Mirrors
-          // the inline-edit pattern in the rest of the app.
-          if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault()
-            onSave()
-          } else if (e.key === 'Escape') {
-            e.preventDefault()
-            onCancel()
-          }
-        }}
-        className="w-full p-2 text-sm bg-bg-default border border-border-hint resize-none text-fg-contrast leading-[1.5]"
-        rows={4}
-      />
+      {singleLine ? (
+        <input
+          ref={ref as React.RefObject<HTMLInputElement>}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          onKeyDown={onKeyDown}
+          className="w-full p-2 text-sm bg-bg-default border border-border-hint text-fg-contrast leading-[1.5]"
+        />
+      ) : (
+        <textarea
+          ref={ref as React.RefObject<HTMLTextAreaElement>}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          onKeyDown={onKeyDown}
+          className="w-full p-2 text-sm bg-bg-default border border-border-hint resize-none text-fg-contrast leading-[1.5]"
+          rows={4}
+        />
+      )}
       <div className="flex gap-1 justify-end">
         <button
           onClick={onCancel}
