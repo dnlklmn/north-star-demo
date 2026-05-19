@@ -1280,8 +1280,13 @@ function ExampleRow({
 }
 
 function Chip({ children }: { children: React.ReactNode }) {
+  // gray-300 (#4d4d4d) so the chip pops on every row state: clearly
+  // visible against the default row (gray-150), still distinct on hover
+  // (gray-200) and selected (bg-default ≈ near-black). The previous
+  // gray-150 was identical to the default row background, so chips were
+  // invisible until you hovered or selected the row.
   return (
-    <span className="px-2 py-1 bg-gray-150 text-sm text-fg-contrast">
+    <span className="px-2 py-1 bg-gray-300 text-sm text-fg-contrast">
       {children}
     </span>
   )
