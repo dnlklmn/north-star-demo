@@ -1000,10 +1000,13 @@ function ActionButton({
 /* ── Table parts ────────────────────────────────────────────────── */
 
 function ColumnHeaderRow() {
+  // Sticky at the top of the scroll area so column labels stay anchored
+  // as the user scrolls through rows. GroupHeader sits below this (its
+  // `top` accounts for this row's height).
   return (
-    <div className="flex items-end gap-4 py-2 text-sm text-fg-contrast">
+    <div className="sticky top-0 z-20 bg-bg-default flex items-end gap-4 px-4 py-2 text-[10px] uppercase tracking-wide text-fg-dim">
       <div className="flex-1 basis-0">Input</div>
-      <div className="flex-1 basis-0">Output</div>
+      <div className="flex-1 basis-0">Expected output</div>
       <div className="w-[200px] flex-shrink-0">Labels</div>
       <div className="w-[100px] flex-shrink-0">Status</div>
     </div>
@@ -1015,7 +1018,7 @@ function GroupHeader({ name, onAdd }: { name: string; onAdd?: () => void }) {
   // the focused row live in the right sidebar — keeping the header to the
   // section name only avoids duplicating that info on every separator.
   return (
-    <div className="sticky top-0 z-10 py-2 bg-gray-200 flex items-center justify-between gap-2">
+    <div className="sticky top-[28px] z-10 px-4 py-2 bg-gray-200 flex items-center justify-between gap-2">
       <span className="text-sm font-semibold text-white font-sans">{name}</span>
       {onAdd && (
         <button
@@ -1060,11 +1063,15 @@ function ExampleRow({
   onSuggestRevision?: (exampleId: string) => void
   onStartEdit: () => void
 }) {
-  // Light-grey wash on the focused cell, with a 2px transparent gap on all
-  // sides (achieved via padding + bg-clip-content). Padding stays applied
-  // to every cell so non-focused → focused doesn't shift content.
+  // Cell focus wash with a 2px transparent gap (padding + bg-clip-content).
+  // We use bg-fill-neutral-hover so the highlight is visible against every
+  // row state — default (gray-150), hover (also fill-neutral-hover, which
+  // blends but the row's hover bg already cues "active"), and selected
+  // (bg-default, where the highlight stands out clearly).
   const cellCls = (cell: CellId) =>
-    isSelected && focusedCell === cell ? 'bg-gray-150 bg-clip-content' : ''
+    isSelected && focusedCell === cell
+      ? 'bg-fill-neutral-hover bg-clip-content'
+      : ''
   const [editInput, setEditInput] = useState(example.input)
   const [editOutput, setEditOutput] = useState(example.expected_output)
   // Track the source values we hydrated edit state from. When the parent
@@ -1116,7 +1123,7 @@ function ExampleRow({
         data-row-id={example.id}
         onClick={onSelect}
         className={[
-          'flex items-stretch gap-4 py-4 cursor-pointer transition-colors max-h-[480px]',
+          'flex items-stretch gap-4 px-4 py-4 cursor-pointer transition-colors max-h-[480px]',
           isSelected
             ? 'bg-bg-default outline outline-2 outline-border-primary -outline-offset-2'
             : 'bg-gray-150 hover:bg-fill-neutral-hover',
