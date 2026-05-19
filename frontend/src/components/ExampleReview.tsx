@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { ChevronDown, Check, X, RefreshCw, Pencil, Trash2, Loader2 } from 'lucide-react'
+import { ChevronDown, Check, X, RefreshCw, Pencil, Trash2, Loader2, MoreHorizontal } from 'lucide-react'
 import type { Example, Charter, GapAnalysis, JudgeAgreement } from '../types'
 import DeleteModal from './examples/DeleteModal'
 import GenerateModal from './examples/GenerateModal'
@@ -609,45 +609,41 @@ export default function ExampleReview({
             </p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            <button
-              onClick={onExport}
-              className="px-2 py-1 text-xs text-fg-dim hover:text-fg-contrast border border-border-hint transition-colors"
-              title="Download approved rows as a JSON file"
-            >
-              Export JSON
-            </button>
-            {canEdit && (
-              <button
-                onClick={onAutoReview}
-                disabled={loading || stats.pending === 0}
-                className="px-2 py-1 text-xs border border-border-hint hover:bg-fill-neutral transition-colors disabled:opacity-50"
-                title="Run the LLM judge on pending rows to suggest good/bad and flag issues."
-              >
-                Auto-review
-              </button>
-            )}
-            {canEdit && onRetagAgainstCharter && (
-              <button
-                onClick={onRetagAgainstCharter}
-                disabled={loading || retagLoading || stats.total === 0}
-                className="px-2 py-1 text-xs border border-border-hint hover:bg-fill-neutral transition-colors disabled:opacity-50"
-                title="Re-tag every row's feature_area and coverage_tags against the current charter. Useful after generating or editing the charter so the Coverage Map matrix lines up."
-              >
-                {retagLoading ? 'Retagging…' : 'Retag against charter'}
-              </button>
-            )}
-            {canEdit && onSuggestRevisions && (
-              <button
-                onClick={onSuggestRevisions}
-                disabled={loading || revisionsLoading || examplesWithIssues === 0}
-                className="px-2 py-1 text-xs border border-border-hint hover:bg-fill-neutral transition-colors disabled:opacity-50"
-                title="Suggest fixes for rows the judge flagged with issues (only enabled after auto-review marks at least one row's judge_verdict.issues). Doesn't change the good/bad label — just refines the input or expected_output."
-              >
-                {revisionsLoading
-                  ? 'Suggesting...'
-                  : `Fix flagged${examplesWithIssues > 0 ? ` (${examplesWithIssues})` : ''}`}
-              </button>
-            )}
+            <OverflowMenu
+              items={[
+                {
+                  label: 'Export JSON',
+                  hint: 'Download approved rows as a JSON file.',
+                  onClick: onExport,
+                },
+                ...(canEdit
+                  ? [{
+                      label: 'Auto-review',
+                      hint: 'Run the LLM judge on pending rows to suggest good/bad and flag issues.',
+                      onClick: onAutoReview,
+                      disabled: loading || stats.pending === 0,
+                    }]
+                  : []),
+                ...(canEdit && onRetagAgainstCharter
+                  ? [{
+                      label: retagLoading ? 'Retagging…' : 'Retag against charter',
+                      hint: "Re-tag every row's feature_area and coverage_tags against the current charter. Useful after generating or editing the charter so the Coverage Map matrix lines up.",
+                      onClick: onRetagAgainstCharter,
+                      disabled: loading || retagLoading || stats.total === 0,
+                    }]
+                  : []),
+                ...(canEdit && onSuggestRevisions
+                  ? [{
+                      label: revisionsLoading
+                        ? 'Suggesting…'
+                        : `Fix flagged${examplesWithIssues > 0 ? ` (${examplesWithIssues})` : ''}`,
+                      hint: "Suggest fixes for rows the judge flagged with issues (only enabled after auto-review marks at least one row's judge_verdict.issues). Doesn't change the good/bad label — just refines the input or expected_output.",
+                      onClick: onSuggestRevisions,
+                      disabled: loading || revisionsLoading || examplesWithIssues === 0,
+                    }]
+                  : []),
+              ]}
+            />
             {canEdit && (
               <button
                 onClick={() => setShowGenerateModal(true)}
@@ -1276,6 +1272,79 @@ function ExampleRow({
         </div>
       )}
     </>
+  )
+}
+
+interface OverflowMenuItem {
+  label: string
+  /** One-line tooltip shown on hover of the menu row — same copy that
+   *  used to live in each button's `title`. */
+  hint?: string
+  onClick?: () => void
+  disabled?: boolean
+}
+
+function OverflowMenu({ items }: { items: OverflowMenuItem[] }) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  // Dismiss on outside click and Escape — the dropdown is uncontrolled
+  // and doesn't trap focus, so these two are the minimum needed for it
+  // to feel like a real menu.
+  useEffect(() => {
+    if (!open) return
+    const onPointer = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    window.addEventListener('mousedown', onPointer)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('mousedown', onPointer)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  if (items.length === 0) return null
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="h-7 w-7 inline-flex items-center justify-center text-fg-dim hover:text-fg-contrast border border-border-hint hover:bg-fill-neutral transition-colors"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="More actions"
+        title="More actions"
+      >
+        <MoreHorizontal className="w-4 h-4" />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 top-full mt-1 z-40 min-w-[220px] bg-bg-default border border-border-hint shadow-lg flex flex-col"
+        >
+          {items.map(item => (
+            <button
+              key={item.label}
+              role="menuitem"
+              disabled={item.disabled}
+              title={item.hint}
+              onClick={() => {
+                if (item.disabled) return
+                item.onClick?.()
+                setOpen(false)
+              }}
+              className="text-left px-3 py-2 text-xs text-fg-contrast hover:bg-fill-neutral transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 
