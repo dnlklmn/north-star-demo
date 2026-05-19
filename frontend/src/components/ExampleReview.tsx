@@ -1014,7 +1014,7 @@ function GroupHeader({ name, onAdd }: { name: string; onAdd?: () => void }) {
   // the focused row live in the right sidebar — keeping the header to the
   // section name only avoids duplicating that info on every separator.
   return (
-    <div className="sticky top-[28px] z-10 p-2 bg-gray-200 flex items-center justify-between gap-2">
+    <div className="sticky top-[28px] z-10 py-2 px-4 bg-gray-200 flex items-center justify-between gap-2">
       <span className="text-sm font-semibold text-white font-sans">{name}</span>
       {onAdd && (
         <button
