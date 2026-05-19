@@ -598,13 +598,13 @@ export default function ExampleReview({
           generating ? "pointer-events-none select-none" : ""
         }`}
       >
-        {/* Title row with dataset-level actions inline on the right. The
-            subtitle sits under the h1 in the left column; actions align to
-            the top so they don't sag with the second line of text. */}
+        {/* Title row with dataset-level actions inline on the right.
+            Title + subtitle styling mirrors CharterPanel (via PanelLayout)
+            so the page headers feel consistent across tabs. */}
         <div className="flex items-start justify-between gap-4 flex-wrap">
-          <div className="flex flex-col gap-1">
-            <h1 className="text-xl font-semibold text-fg-contrast leading-none">Dataset</h1>
-            <p className="text-xs text-fg-dim">
+          <div>
+            <h2 className="text-2xl font-medium text-fg-contrast">Dataset</h2>
+            <p className="text-base text-fg-dim mt-1">
               The test cases your eval will run against — review for quality, not model performance.
             </p>
           </div>
