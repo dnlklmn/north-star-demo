@@ -194,7 +194,7 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
           the idle/empty state below so the empty page mirrors the centered
           dataset empty state. */}
       {scorers.length > 0 && (
-        <div className="px-6 pt-6 flex items-start justify-between gap-4 flex-wrap flex-shrink-0">
+        <div className="pt-6 pr-6 flex items-start justify-between gap-4 flex-wrap flex-shrink-0">
           <div>
             <h2 className="text-2xl font-medium text-fg-contrast">Scorers</h2>
             <p className="text-base text-fg-dim mt-1">
@@ -251,7 +251,7 @@ export default function ScorersPanel({ charter, hasDataset: _hasDataset, session
       )}
 
       <div className="flex-1 flex min-h-0">
-        <div className="flex-1 overflow-y-auto p-6">
+        <div className="flex-1 overflow-y-auto pt-6 pr-6 pb-6">
         {/* Show the parent-owned generate error first (survives tab switch),
             fall back to the panel-local Braintrust-prompt error. */}
         {(externalError || error) && (
