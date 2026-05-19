@@ -9,7 +9,7 @@ import type {
   Suggestion,
   TaskDefinition,
 } from "../types";
-import RadarChart from "./RadarChart";
+import ResponsiveRadar from "./ResponsiveRadar";
 import PanelLayout from "./PanelLayout";
 import SuggestionBox, { SuggestionCard } from "./SuggestionBox";
 import ItemList, { HelpPopover } from "./ItemList";
@@ -19,7 +19,6 @@ import IconButton from "./ui/IconButton";
 import {
   ReturnKeyIcon,
   CmdReturnIcon,
-  CoverageIcon,
   DragHandleIcon,
   CloseIcon,
   PlusIcon,
@@ -270,13 +269,10 @@ export default function CharterPanel({
       rightTop={
         hasRadarData ? (
           <div>
-            <div className="flex items-center gap-2 mb-3">
-              <CoverageIcon className="text-fg-dim" />
+            <div className="mb-3">
               <span className="text-base font-semibold text-fg-contrast">Coverage</span>
             </div>
-            <div className="flex justify-center">
-              <RadarChart dimensions={radarDimensions} size={200} />
-            </div>
+            <ResponsiveRadar dimensions={radarDimensions} />
           </div>
         ) : undefined
       }

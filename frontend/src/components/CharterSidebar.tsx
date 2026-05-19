@@ -1,7 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
 import { Loader2, Maximize2 } from 'lucide-react'
 import type { Charter, GapAnalysis } from '../types'
-import RadarChart from './RadarChart'
+import ResponsiveRadar from './ResponsiveRadar'
 import { computeCoverageScore } from './coverage'
 import { useSidebarWidth } from '../lib/useSidebarWidth'
 
@@ -146,71 +145,6 @@ function sameFeatureAreas(a: Charter['alignment'], b: Charter['alignment']): boo
   return true
 }
 
-/**
- * Wraps RadarChart in a container measured by ResizeObserver so the
- * radar (and its labels) fills the available sidebar width. As the
- * user drags the sidebar wider, the chart grows; narrower and it
- * shrinks. Label font / max-chars scale with size too so labels stay
- * legible and wrap appropriately. Clicking the chart opens the
- * matrix modal.
- */
-function ResponsiveRadar({
-  dimensions,
-  onClick,
-}: {
-  dimensions: React.ComponentProps<typeof RadarChart>['dimensions']
-  onClick?: () => void
-}) {
-  const wrapperRef = useRef<HTMLButtonElement>(null)
-  const [size, setSize] = useState(160)
-
-  useEffect(() => {
-    const el = wrapperRef.current
-    if (!el || typeof ResizeObserver === 'undefined') return
-    const ro = new ResizeObserver(entries => {
-      const entry = entries[0]
-      if (!entry) return
-      // contentRect.width is the container's inner width (already
-      // excludes padding). Floor to avoid sub-pixel jitter that would
-      // re-render every frame during drag.
-      const w = Math.floor(entry.contentRect.width)
-      if (w > 0) {
-        // Clamp to a sensible range — radars below ~140px squish the
-        // labels; above ~240px the radar dominates the sidebar without
-        // adding any extra information (the chart is already legible).
-        setSize(Math.max(140, Math.min(240, w)))
-      }
-    })
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [])
-
-  // Label font stays fixed at the RadarChart default (14px) — the
-  // chart resizing already provides plenty of visual signal; scaling
-  // the type alongside made small radars look anemic and large ones
-  // shouty. Wrap threshold still scales with size so labels wrap
-  // tighter on narrow sidebars and looser on wide ones.
-  const labelMaxChars = Math.max(14, Math.min(24, Math.round(size / 12)))
-
-  return (
-    <button
-      type="button"
-      ref={wrapperRef}
-      onClick={onClick}
-      disabled={!onClick}
-      aria-label="Open coverage matrix"
-      title="Open coverage matrix"
-      className="flex justify-center w-full cursor-pointer hover:opacity-90 transition-opacity disabled:cursor-default"
-    >
-      <RadarChart
-        dimensions={dimensions}
-        size={size}
-        labelMaxChars={labelMaxChars}
-      />
-    </button>
-  )
-}
-
 function NoAlignmentCTA({ onClick }: { onClick?: () => void }) {
   return (
     <div className="flex items-center gap-2 text-fg-dim leading-relaxed">
@@ -297,6 +231,8 @@ function CoverageSummary({
       {featureAreas.length >= 3 && (
         <ResponsiveRadar
           onClick={onOpenMatrix}
+          ariaLabel="Open coverage matrix"
+          title="Open coverage matrix"
           dimensions={featureAreas.map(fa => {
             const coveredCount = criteria.filter(
               c => ((matrix[c] || {})[fa] || 0) > 0,
