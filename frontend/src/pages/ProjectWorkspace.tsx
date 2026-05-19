@@ -86,7 +86,6 @@ import ScorersPanel from "../components/ScorersPanel";
 import EvaluatePanel from "../components/EvaluatePanel";
 import SkillPanel from "../components/SkillPanel";
 import ExampleReview from "../components/ExampleReview";
-import { computeCoverageScore } from "../components/coverage";
 import GenerateModal from "../components/examples/GenerateModal";
 import CoverageMap from "../components/CoverageMap";
 import SettingsPanel from "../components/SettingsPanel";
@@ -465,10 +464,6 @@ export default function ProjectWorkspace() {
       }),
     );
   });
-
-  // Coverage map status comes from the gap analysis. Compute once per
-  // gapAnalysis change so the dataset toolbar dot stays in sync.
-  const coverageScore = computeCoverageScore(gapAnalysis);
 
   // Coverage-driven generate modal. The dataset toolbar still has its own
   // local Generate flow inside ExampleReview; this one is reserved for
@@ -3220,7 +3215,6 @@ export default function ProjectWorkspace() {
                     onNavigateToScorers={() => setActiveTab("scorers")}
                     onHeaderClick={() => {}}
                     isFocused={true}
-                    coverageScore={coverageScore}
                     onSuggestRevision={handleSuggestRevision}
                     onSuggestRevisions={handleBulkSuggestRevisions}
                     onAcceptRevision={handleAcceptRevision}

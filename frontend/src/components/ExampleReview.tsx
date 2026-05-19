@@ -76,9 +76,6 @@ interface ExampleReviewProps {
   onHeaderClick?: () => void
   isFocused?: boolean
   coverageGaps?: { uncoveredCount: number; totalScenarios: number } | null
-  /** 0–1 dataset coverage score, used for the dot on the "Coverage map"
-   *  button. Null when no matrix has been computed yet. */
-  coverageScore?: number | null
   onSuggestRevision?: (exampleId: string) => void
   onSuggestRevisions?: () => void
   onAcceptRevision?: (exampleId: string) => void
@@ -133,7 +130,6 @@ export default function ExampleReview({
   onHeaderClick: _onHeaderClick,
   isFocused,
   coverageGaps,
-  coverageScore,
   onSuggestRevision,
   onSuggestRevisions,
   onAcceptRevision,
@@ -513,11 +509,29 @@ export default function ExampleReview({
     pending: examples.filter(e => e.review_status === 'pending').length,
     approved: examples.filter(e => e.review_status === 'approved').length,
     rejected: examples.filter(e => e.review_status === 'rejected').length,
+    needsEdit: examples.filter(e => e.review_status === 'needs_edit').length,
+    good: examples.filter(e => e.label === 'good').length,
+    bad: examples.filter(e => e.label === 'bad').length,
+    unlabeled: examples.filter(e => e.label === 'unlabeled').length,
     // Rows tagged "new" in coverage_tags arrived via the prompt-eval
     // auto-refresh (turns landed since the last visit). Surface the count
     // in the header so the user notices fresh evidence without digging.
     newSinceRefresh: examples.filter(e => (e.coverage_tags || []).includes('new')).length,
   }
+  // Per-feature_area row counts. Computed across `examples` (not the
+  // filtered set) so the dropdown numbers are stable while the user
+  // narrows down — otherwise picking a status would shrink the area
+  // counts back to what's currently visible, which makes the dropdown
+  // unhelpful for navigation.
+  const areaCounts = useMemo(() => {
+    const m: Record<string, number> = {}
+    for (const ex of examples) {
+      const fa = ex.feature_area || ''
+      m[fa] = (m[fa] ?? 0) + 1
+    }
+    return m
+  }, [examples])
+  const unmappedCount = areaCounts[UNMAPPED_FEATURE_AREA] ?? 0
 
   const actOnSelected = (fn: (ex: Example) => void) => {
     if (selectedExample) fn(selectedExample)
@@ -606,44 +620,34 @@ export default function ExampleReview({
           </p>
         </div>
 
-        {/* Stats + dataset-level utilities (Coverage map / Export / Auto-review /
-            Suggest revisions / Generate). Sits directly under the title — these
-            are about the dataset as a whole. Filters and per-row actions live
-            in a second toolbar below. */}
+        {/* Dataset-level utilities. The per-status / per-label / per-area
+            counts moved into the filter dropdowns below, so this row is
+            actions only. Judge agreement badge sits left so it stays
+            visible without the noisy "X total · Y pending" line above it. */}
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <div className="flex items-center gap-3 flex-wrap text-xs text-fg-dim">
-            <span>
-              {stats.total} total · {stats.pending} pending · {stats.approved} approved
-              {stats.newSinceRefresh > 0 && (
-                <>
-                  {' · '}
-                  <span className="text-accent font-medium">{stats.newSinceRefresh} new</span>
-                </>
-              )}
-            </span>
             {agreement && <JudgeAgreementBadge agreement={agreement} />}
+            {stats.newSinceRefresh > 0 && (
+              <span className="text-accent font-medium">
+                {stats.newSinceRefresh} new since refresh
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-2">
-            <button
-              onClick={onShowCoverageMap}
-              className="flex items-center gap-1.5 px-2 py-1 text-xs text-fg-dim hover:text-fg-contrast border border-border-hint transition-colors"
-              title="Open the full coverage matrix"
-            >
-              {coverageScore != null && <CoverageDot score={coverageScore} />}
-              Coverage map
-            </button>
             <button
               onClick={onExport}
               disabled={stats.approved === 0}
               className="px-2 py-1 text-xs text-fg-dim hover:text-fg-contrast border border-border-hint transition-colors disabled:opacity-40"
+              title="Download approved rows as a JSON file"
             >
-              Export
+              Export JSON
             </button>
             {canEdit && (
               <button
                 onClick={onAutoReview}
                 disabled={loading || stats.pending === 0}
                 className="px-2 py-1 text-xs border border-border-hint hover:bg-fill-neutral transition-colors disabled:opacity-50"
+                title="Run the LLM judge on pending rows to suggest good/bad and flag issues."
               >
                 Auto-review
               </button>
@@ -663,7 +667,7 @@ export default function ExampleReview({
                 onClick={onSuggestRevisions}
                 disabled={loading || revisionsLoading || examplesWithIssues === 0}
                 className="px-2 py-1 text-xs border border-border-hint hover:bg-fill-neutral transition-colors disabled:opacity-50"
-                title="Suggest fixes for examples auto-review flagged with issues. Doesn't change the good/bad label — just refines the input or expected_output to better match the scenario."
+                title="Suggest fixes for rows the judge flagged with issues (only enabled after auto-review marks at least one row's judge_verdict.issues). Doesn't change the good/bad label — just refines the input or expected_output."
               >
                 {revisionsLoading
                   ? 'Suggesting...'
@@ -674,9 +678,10 @@ export default function ExampleReview({
               <button
                 onClick={() => setShowGenerateModal(true)}
                 disabled={loading}
-                className="px-2.5 py-1 text-xs bg-fill-primary text-bg-default hover:bg-fill-primary-hover transition-colors disabled:opacity-50"
+                className="px-2.5 py-1 text-xs bg-fill-primary text-bg-default hover:bg-fill-primary-hover transition-colors disabled:opacity-50 inline-flex items-center gap-1.5"
               >
-                {loading ? 'Generating...' : 'Generate'}
+                {loading && <Loader2 className="w-3 h-3 animate-spin" />}
+                {loading ? 'Generating…' : 'Generate more'}
               </button>
             )}
           </div>
@@ -690,36 +695,42 @@ export default function ExampleReview({
             <FilterSelect
               value={filterArea}
               onChange={setFilterArea}
-              placeholder="All areas"
+              placeholder={`All areas (${stats.total})`}
               options={[
-                ...featureAreas.map(a => ({ value: a, label: a })),
+                ...featureAreas.map(a => ({
+                  value: a,
+                  label: `${a} (${areaCounts[a] ?? 0})`,
+                })),
                 // Surface the synthetic "(unmapped)" option only when there
                 // are rows that match it — listing it on a clean dataset
                 // would just be noise.
                 ...(hasUnmappedRows
-                  ? [{ value: UNMAPPED_FEATURE_AREA, label: 'Unmapped (no alignment)' }]
+                  ? [{
+                      value: UNMAPPED_FEATURE_AREA,
+                      label: `Unmapped — no alignment (${unmappedCount})`,
+                    }]
                   : []),
               ]}
             />
             <FilterSelect
               value={filterLabel}
               onChange={setFilterLabel}
-              placeholder="All labels"
+              placeholder={`All labels (${stats.total})`}
               options={[
-                { value: 'good', label: 'Good' },
-                { value: 'bad', label: 'Bad' },
-                { value: 'unlabeled', label: 'Unlabeled' },
+                { value: 'good', label: `Good (${stats.good})` },
+                { value: 'bad', label: `Bad (${stats.bad})` },
+                { value: 'unlabeled', label: `Unlabeled (${stats.unlabeled})` },
               ]}
             />
             <FilterSelect
               value={filterStatus}
               onChange={setFilterStatus}
-              placeholder="All status"
+              placeholder={`All status (${stats.total})`}
               options={[
-                { value: 'pending', label: 'Pending' },
-                { value: 'approved', label: 'Approved' },
-                { value: 'rejected', label: 'Rejected' },
-                { value: 'needs_edit', label: 'Needs edit' },
+                { value: 'pending', label: `Pending (${stats.pending})` },
+                { value: 'approved', label: `Approved (${stats.approved})` },
+                { value: 'rejected', label: `Rejected (${stats.rejected})` },
+                { value: 'needs_edit', label: `Needs edit (${stats.needsEdit})` },
               ]}
             />
           </div>
@@ -807,7 +818,7 @@ export default function ExampleReview({
                     disabled={stats.approved === 0}
                     className="w-full py-2.5 px-4 bg-fill-primary text-bg-default text-sm font-medium hover:bg-fill-primary-hover transition-colors disabled:opacity-50"
                   >
-                    Export dataset ({stats.approved} examples)
+                    Export JSON ({stats.approved} approved)
                   </button>
                 </div>
               </div>
@@ -1310,13 +1321,6 @@ function EditCell({
       </div>
     </div>
   )
-}
-
-function CoverageDot({ score }: { score: number }) {
-  // Same three-tier scheme as the CoverageMap header dot, the charter
-  // dimension chips, etc. Keeps the visual language consistent.
-  const cls = score >= 0.8 ? 'bg-success' : score >= 0.4 ? 'bg-warning' : 'bg-danger'
-  return <span className={`inline-block w-2 h-2 rounded-full ${cls}`} />
 }
 
 function StatusDot({ status }: { status: Example['review_status'] }) {
