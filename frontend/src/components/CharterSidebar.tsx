@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react'
 import { Loader2, Maximize2 } from 'lucide-react'
 import type { Charter, GapAnalysis } from '../types'
 import RadarChart from './RadarChart'
@@ -145,6 +146,70 @@ function sameFeatureAreas(a: Charter['alignment'], b: Charter['alignment']): boo
   return true
 }
 
+/**
+ * Wraps RadarChart in a container measured by ResizeObserver so the
+ * radar (and its labels) fills the available sidebar width. As the
+ * user drags the sidebar wider, the chart grows; narrower and it
+ * shrinks. Label font / max-chars scale with size too so labels stay
+ * legible and wrap appropriately. Clicking the chart opens the
+ * matrix modal.
+ */
+function ResponsiveRadar({
+  dimensions,
+  onClick,
+}: {
+  dimensions: React.ComponentProps<typeof RadarChart>['dimensions']
+  onClick?: () => void
+}) {
+  const wrapperRef = useRef<HTMLButtonElement>(null)
+  const [size, setSize] = useState(160)
+
+  useEffect(() => {
+    const el = wrapperRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(entries => {
+      const entry = entries[0]
+      if (!entry) return
+      // contentRect.width is the container's inner width (already
+      // excludes padding). Floor to avoid sub-pixel jitter that would
+      // re-render every frame during drag.
+      const w = Math.floor(entry.contentRect.width)
+      if (w > 0) {
+        // Clamp to a sensible range — radars below ~140px squish the
+        // labels into the chart; above ~480px they read as billboards.
+        setSize(Math.max(140, Math.min(480, w)))
+      }
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  // Scale text + wrap threshold with the radar size: small radars get
+  // 11px / wrap-at-14-chars (the previous fixed sidebar setting); large
+  // radars use the default 14 / 24.
+  const labelFontSize = Math.max(11, Math.min(14, Math.round(size / 18)))
+  const labelMaxChars = Math.max(14, Math.min(24, Math.round(size / 12)))
+
+  return (
+    <button
+      type="button"
+      ref={wrapperRef}
+      onClick={onClick}
+      disabled={!onClick}
+      aria-label="Open coverage matrix"
+      title="Open coverage matrix"
+      className="flex justify-center w-full cursor-pointer hover:opacity-90 transition-opacity disabled:cursor-default"
+    >
+      <RadarChart
+        dimensions={dimensions}
+        size={size}
+        labelFontSize={labelFontSize}
+        labelMaxChars={labelMaxChars}
+      />
+    </button>
+  )
+}
+
 function NoAlignmentCTA({ onClick }: { onClick?: () => void }) {
   return (
     <div className="flex items-center gap-2 text-fg-dim leading-relaxed">
@@ -229,36 +294,25 @@ function CoverageSummary({
       </header>
 
       {featureAreas.length >= 3 && (
-        <button
-          type="button"
+        <ResponsiveRadar
           onClick={onOpenMatrix}
-          disabled={!onOpenMatrix}
-          aria-label="Open coverage matrix"
-          title="Open coverage matrix"
-          className="flex justify-center w-full cursor-pointer hover:opacity-90 transition-opacity disabled:cursor-default"
-        >
-          <RadarChart
-            dimensions={featureAreas.map(fa => {
-              const coveredCount = criteria.filter(
-                c => ((matrix[c] || {})[fa] || 0) > 0,
-              ).length
-              const pct = criteria.length > 0 ? coveredCount / criteria.length : 0
-              return {
-                label: fa,
-                value: pct,
-                status:
-                  pct >= 0.7
-                    ? ('good' as const)
-                    : pct > 0
-                      ? ('weak' as const)
-                      : ('fail' as const),
-              }
-            })}
-            size={160}
-            labelFontSize={11}
-            labelMaxChars={14}
-          />
-        </button>
+          dimensions={featureAreas.map(fa => {
+            const coveredCount = criteria.filter(
+              c => ((matrix[c] || {})[fa] || 0) > 0,
+            ).length
+            const pct = criteria.length > 0 ? coveredCount / criteria.length : 0
+            return {
+              label: fa,
+              value: pct,
+              status:
+                pct >= 0.7
+                  ? ('good' as const)
+                  : pct > 0
+                    ? ('weak' as const)
+                    : ('fail' as const),
+            }
+          })}
+        />
       )}
 
       {onRequestFillGaps && emptyCount > 0 && (
