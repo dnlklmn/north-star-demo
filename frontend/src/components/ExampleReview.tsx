@@ -1000,7 +1000,7 @@ function ColumnHeaderRow() {
   // as the user scrolls through rows. GroupHeader sits below this (its
   // `top` accounts for this row's height).
   return (
-    <div className="sticky top-0 z-20 bg-bg-default flex items-end gap-2 py-2 text-[10px] uppercase tracking-wide text-fg-dim">
+    <div className="sticky top-0 z-20 bg-bg-default flex items-end gap-2 p-2 text-[10px] uppercase tracking-wide text-fg-dim">
       <div className="flex-1 basis-0">Input</div>
       <div className="flex-1 basis-0">Expected output</div>
       <div className="w-[200px] flex-shrink-0">Labels</div>
@@ -1014,7 +1014,7 @@ function GroupHeader({ name, onAdd }: { name: string; onAdd?: () => void }) {
   // the focused row live in the right sidebar — keeping the header to the
   // section name only avoids duplicating that info on every separator.
   return (
-    <div className="sticky top-[28px] z-10 py-2 bg-gray-200 flex items-center justify-between gap-2">
+    <div className="sticky top-[28px] z-10 p-2 bg-gray-200 flex items-center justify-between gap-2">
       <span className="text-sm font-semibold text-white font-sans">{name}</span>
       {onAdd && (
         <button
@@ -1119,12 +1119,12 @@ function ExampleRow({
         data-row-id={example.id}
         onClick={onSelect}
         className={[
-          // Tight padding inside the row: 2px vertical (py-0.5) and no
-          // horizontal padding so cells align flush at the column edge
-          // — matches the title row above and Charter's content area.
-          // The 2px breathing room each cell needs comes from its own
-          // p-0.5 inner padding.
-          'flex items-stretch gap-2 py-0.5 cursor-pointer transition-colors max-h-[480px]',
+          // 8px padding on every side of the row so cells get consistent
+          // breathing room. Cell inner padding (p-2) is the same value
+          // so the focused-cell highlight has the same visual weight as
+          // the row padding. Column header and group header use the
+          // same p-2 so column edges line up across the three layers.
+          'flex items-stretch gap-2 p-2 cursor-pointer transition-colors max-h-[480px]',
           isSelected
             ? 'bg-bg-default outline outline-2 outline-border-primary -outline-offset-2'
             : 'bg-gray-150 hover:bg-fill-neutral-hover',
@@ -1135,7 +1135,7 @@ function ExampleRow({
           onClick={e => { e.stopPropagation(); onCellSelect('input') }}
           className={`flex-1 basis-0 self-stretch p-px overflow-hidden ${cellCls('input')}`}
         >
-          <div className="h-full p-0.5 overflow-y-auto">
+          <div className="h-full p-2 overflow-y-auto">
             {editingCell === 'input' ? (
               <EditCell
                 value={editInput}
@@ -1156,7 +1156,7 @@ function ExampleRow({
           onClick={e => { e.stopPropagation(); onCellSelect('output') }}
           className={`flex-1 basis-0 self-stretch p-px overflow-hidden ${cellCls('output')}`}
         >
-          <div className="h-full p-0.5 overflow-y-auto">
+          <div className="h-full p-2 overflow-y-auto">
             {editingCell === 'output' ? (
               <EditCell
                 value={editOutput}
@@ -1177,7 +1177,7 @@ function ExampleRow({
           onClick={e => { e.stopPropagation(); onCellSelect('labels') }}
           className={`w-[200px] flex-shrink-0 self-stretch p-px ${cellCls('labels')}`}
         >
-          <div className="h-full p-0.5 flex flex-col gap-1">
+          <div className="h-full p-2 flex flex-col gap-1">
             <div className="flex items-start gap-1 flex-wrap">
               <Chip>{example.label === 'good' ? 'Good' : example.label === 'bad' ? 'Bad' : 'Unlabeled'}</Chip>
               <Chip>{example.source.charAt(0).toUpperCase() + example.source.slice(1)}</Chip>
@@ -1190,7 +1190,7 @@ function ExampleRow({
           onClick={e => { e.stopPropagation(); onCellSelect('status') }}
           className={`w-[100px] flex-shrink-0 self-stretch p-px ${cellCls('status')}`}
         >
-          <div className="h-full p-0.5 flex flex-col gap-1">
+          <div className="h-full p-2 flex flex-col gap-1">
             <div className="flex items-center gap-1.5">
               <StatusDot status={example.review_status} />
               <span className="text-sm text-fg-contrast capitalize">
