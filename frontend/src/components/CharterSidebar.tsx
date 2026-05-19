@@ -2,6 +2,7 @@ import { Loader2, Maximize2 } from 'lucide-react'
 import type { Charter, GapAnalysis } from '../types'
 import RadarChart from './RadarChart'
 import { computeCoverageScore } from './coverage'
+import { useSidebarWidth } from '../lib/useSidebarWidth'
 
 interface CharterSidebarProps {
   charter: Charter
@@ -41,6 +42,7 @@ export default function CharterSidebar({
   fillingGaps = false,
   onAddAlignmentCriteria,
 }: CharterSidebarProps) {
+  const [sidebarWidth, startResize, isResizing] = useSidebarWidth()
   // Prefer the snapshot for matching — that's the alignment the rows were
   // tagged against. Fall back to the live charter if the dataset has no
   // snapshot (older datasets) or it's empty.
@@ -57,10 +59,26 @@ export default function CharterSidebar({
     liveAlignment.length > 0 &&
     !sameFeatureAreas(snapshotAlignment, liveAlignment)
 
-  // Full-height rail with a left border, matching Scorers / Evaluate. Inner
-  // sections separate via border-b (not floating cards).
+  // Full-height rail with a left border, matching Scorers / Evaluate.
+  // Width and resize handle are shared with PanelLayout via useSidebarWidth
+  // so dragging the divider on any page resizes the rail on every page.
   return (
-    <aside className="w-80 shrink-0 border-l border-border-hint flex flex-col overflow-y-auto">
+    <aside
+      style={{ width: `${sidebarWidth}px` }}
+      className="relative shrink-0 border-l border-border-hint flex flex-col overflow-y-auto"
+    >
+      {/* Drag handle on the left edge — same width / offset / colors as
+          PanelLayout's so the resize affordance is identical between
+          pages. */}
+      <div
+        onMouseDown={startResize}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+        className={`absolute top-0 bottom-0 -left-[3px] w-[6px] cursor-col-resize z-10 ${
+          isResizing ? 'bg-purple-700/30' : 'hover:bg-purple-700/20'
+        } transition-colors`}
+      />
       <CoverageSummary
         gaps={gaps}
         onOpenMatrix={onOpenCoverageMatrix}

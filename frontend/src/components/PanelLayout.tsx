@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import type { ReactNode } from "react";
 import { AIIcon } from "./ui/Icons";
+import { useSidebarWidth } from "../lib/useSidebarWidth";
 
 interface Props {
   title: string;
@@ -26,10 +27,6 @@ interface Props {
   children: ReactNode;
 }
 
-const DEFAULT_RIGHT_WIDTH = 360;
-const MIN_RIGHT_WIDTH = 280;
-const MAX_RIGHT_WIDTH = 600;
-
 export default function PanelLayout({
   title,
   subtitle,
@@ -42,56 +39,13 @@ export default function PanelLayout({
   rightBottomExpanded,
   children,
 }: Props) {
-  const [rightWidth, setRightWidth] = useState<number>(() => {
-    if (typeof window === "undefined") return DEFAULT_RIGHT_WIDTH;
-    const stored = window.localStorage.getItem("ns:suggestions-width");
-    const parsed = stored ? Number(stored) : NaN;
-    return Number.isFinite(parsed)
-      ? Math.min(MAX_RIGHT_WIDTH, Math.max(MIN_RIGHT_WIDTH, parsed))
-      : DEFAULT_RIGHT_WIDTH;
-  });
-  const dragStateRef = useRef<{ startX: number; startWidth: number } | null>(
-    null,
-  );
-  const [isResizing, setIsResizing] = useState(false);
+  // Width + resize handle come from a shared hook so the dataset
+  // workspace's sidebar tracks the same value — resize on Charter, see
+  // it apply on Dataset (and vice versa).
+  const [rightWidth, startResize, isResizing] = useSidebarWidth();
   // When rightBottomExpanded is active, collapse Suggestions by default so
   // Polaris fills the rail from just below the suggestions header.
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
-
-  useEffect(() => {
-    if (!isResizing) return;
-    const handleMove = (e: MouseEvent) => {
-      const s = dragStateRef.current;
-      if (!s) return;
-      const delta = s.startX - e.clientX;
-      const next = Math.min(
-        MAX_RIGHT_WIDTH,
-        Math.max(MIN_RIGHT_WIDTH, s.startWidth + delta),
-      );
-      setRightWidth(next);
-    };
-    const handleUp = () => {
-      dragStateRef.current = null;
-      setIsResizing(false);
-      try {
-        window.localStorage.setItem("ns:suggestions-width", String(rightWidth));
-      } catch {
-        // localStorage unavailable (private mode, quota) — width simply isn't persisted.
-      }
-    };
-    window.addEventListener("mousemove", handleMove);
-    window.addEventListener("mouseup", handleUp);
-    return () => {
-      window.removeEventListener("mousemove", handleMove);
-      window.removeEventListener("mouseup", handleUp);
-    };
-  }, [isResizing, rightWidth]);
-
-  const startResize = (e: React.MouseEvent) => {
-    e.preventDefault();
-    dragStateRef.current = { startX: e.clientX, startWidth: rightWidth };
-    setIsResizing(true);
-  };
 
   return (
     <div className="flex-1 flex min-h-0 gap-6">
