@@ -1000,7 +1000,7 @@ function ColumnHeaderRow() {
   // as the user scrolls through rows. GroupHeader sits below this (its
   // `top` accounts for this row's height).
   return (
-    <div className="sticky top-0 z-20 bg-bg-default flex items-end gap-4 px-4 py-2 text-[10px] uppercase tracking-wide text-fg-dim">
+    <div className="sticky top-0 z-20 bg-bg-default flex items-end gap-2 py-2 text-[10px] uppercase tracking-wide text-fg-dim">
       <div className="flex-1 basis-0">Input</div>
       <div className="flex-1 basis-0">Expected output</div>
       <div className="w-[200px] flex-shrink-0">Labels</div>
@@ -1014,7 +1014,7 @@ function GroupHeader({ name, onAdd }: { name: string; onAdd?: () => void }) {
   // the focused row live in the right sidebar — keeping the header to the
   // section name only avoids duplicating that info on every separator.
   return (
-    <div className="sticky top-[28px] z-10 px-4 py-2 bg-gray-200 flex items-center justify-between gap-2">
+    <div className="sticky top-[28px] z-10 py-2 bg-gray-200 flex items-center justify-between gap-2">
       <span className="text-sm font-semibold text-white font-sans">{name}</span>
       {onAdd && (
         <button
@@ -1119,11 +1119,12 @@ function ExampleRow({
         data-row-id={example.id}
         onClick={onSelect}
         className={[
-          // Tight 2px vertical padding so the row hugs its cells; horizontal
-          // padding kept at px-4 so columns stay aligned with the sticky
-          // column header. Inter-cell gap shrunk from gap-4 → gap-2 to
-          // match the new density.
-          'flex items-stretch gap-2 px-4 py-0.5 cursor-pointer transition-colors max-h-[480px]',
+          // Tight padding inside the row: 2px vertical (py-0.5) and no
+          // horizontal padding so cells align flush at the column edge
+          // — matches the title row above and Charter's content area.
+          // The 2px breathing room each cell needs comes from its own
+          // p-0.5 inner padding.
+          'flex items-stretch gap-2 py-0.5 cursor-pointer transition-colors max-h-[480px]',
           isSelected
             ? 'bg-bg-default outline outline-2 outline-border-primary -outline-offset-2'
             : 'bg-gray-150 hover:bg-fill-neutral-hover',
