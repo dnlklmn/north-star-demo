@@ -1119,7 +1119,11 @@ function ExampleRow({
         data-row-id={example.id}
         onClick={onSelect}
         className={[
-          'flex items-stretch gap-4 px-4 py-4 cursor-pointer transition-colors max-h-[480px]',
+          // Tight 2px vertical padding so the row hugs its cells; horizontal
+          // padding kept at px-4 so columns stay aligned with the sticky
+          // column header. Inter-cell gap shrunk from gap-4 → gap-2 to
+          // match the new density.
+          'flex items-stretch gap-2 px-4 py-0.5 cursor-pointer transition-colors max-h-[480px]',
           isSelected
             ? 'bg-bg-default outline outline-2 outline-border-primary -outline-offset-2'
             : 'bg-gray-150 hover:bg-fill-neutral-hover',
@@ -1130,7 +1134,7 @@ function ExampleRow({
           onClick={e => { e.stopPropagation(); onCellSelect('input') }}
           className={`flex-1 basis-0 self-stretch p-px overflow-hidden ${cellCls('input')}`}
         >
-          <div className="h-full p-2 overflow-y-auto">
+          <div className="h-full p-0.5 overflow-y-auto">
             {editingCell === 'input' ? (
               <EditCell
                 value={editInput}
@@ -1151,7 +1155,7 @@ function ExampleRow({
           onClick={e => { e.stopPropagation(); onCellSelect('output') }}
           className={`flex-1 basis-0 self-stretch p-px overflow-hidden ${cellCls('output')}`}
         >
-          <div className="h-full p-2 overflow-y-auto">
+          <div className="h-full p-0.5 overflow-y-auto">
             {editingCell === 'output' ? (
               <EditCell
                 value={editOutput}
@@ -1172,7 +1176,7 @@ function ExampleRow({
           onClick={e => { e.stopPropagation(); onCellSelect('labels') }}
           className={`w-[200px] flex-shrink-0 self-stretch p-px ${cellCls('labels')}`}
         >
-          <div className="h-full p-2 flex flex-col gap-2">
+          <div className="h-full p-0.5 flex flex-col gap-1">
             <div className="flex items-start gap-1 flex-wrap">
               <Chip>{example.label === 'good' ? 'Good' : example.label === 'bad' ? 'Bad' : 'Unlabeled'}</Chip>
               <Chip>{example.source.charAt(0).toUpperCase() + example.source.slice(1)}</Chip>
@@ -1185,7 +1189,7 @@ function ExampleRow({
           onClick={e => { e.stopPropagation(); onCellSelect('status') }}
           className={`w-[100px] flex-shrink-0 self-stretch p-px ${cellCls('status')}`}
         >
-          <div className="h-full p-2 flex flex-col gap-2">
+          <div className="h-full p-0.5 flex flex-col gap-1">
             <div className="flex items-center gap-1.5">
               <StatusDot status={example.review_status} />
               <span className="text-sm text-fg-contrast capitalize">
