@@ -176,18 +176,20 @@ function ResponsiveRadar({
       const w = Math.floor(entry.contentRect.width)
       if (w > 0) {
         // Clamp to a sensible range — radars below ~140px squish the
-        // labels into the chart; above ~480px they read as billboards.
-        setSize(Math.max(140, Math.min(480, w)))
+        // labels; above ~240px the radar dominates the sidebar without
+        // adding any extra information (the chart is already legible).
+        setSize(Math.max(140, Math.min(240, w)))
       }
     })
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
 
-  // Scale text + wrap threshold with the radar size: small radars get
-  // 11px / wrap-at-14-chars (the previous fixed sidebar setting); large
-  // radars use the default 14 / 24.
-  const labelFontSize = Math.max(11, Math.min(14, Math.round(size / 18)))
+  // Label font stays fixed at the RadarChart default (14px) — the
+  // chart resizing already provides plenty of visual signal; scaling
+  // the type alongside made small radars look anemic and large ones
+  // shouty. Wrap threshold still scales with size so labels wrap
+  // tighter on narrow sidebars and looser on wide ones.
   const labelMaxChars = Math.max(14, Math.min(24, Math.round(size / 12)))
 
   return (
@@ -203,7 +205,6 @@ function ResponsiveRadar({
       <RadarChart
         dimensions={dimensions}
         size={size}
-        labelFontSize={labelFontSize}
         labelMaxChars={labelMaxChars}
       />
     </button>
