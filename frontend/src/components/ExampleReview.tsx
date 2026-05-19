@@ -177,11 +177,12 @@ export default function ExampleReview({
   // sidebar's charter criteria track what the eye is on, without
   // hijacking the click-selected row. Falls back to selectedId.
   const [scrollFocusedId, setScrollFocusedId] = useState<string | null>(null)
-  // Which input last changed the focused row. Click wins over scroll: once
-  // the user has explicitly clicked a row, scrolling away doesn't move the
-  // sidebar off it. A subsequent click flips this back to 'click'; an
-  // IntersectionObserver tick flips it to 'scroll' only when the user
-  // hasn't clicked since.
+  // Which input last changed the focused row. Explicit selection (click or
+  // arrow-key nav) wins over scroll: once the user has actively picked a
+  // row, scrolling away doesn't move the sidebar off it. Scroll only drives
+  // the sidebar before the user has interacted (default) or never if they
+  // have. The 'click' tag covers both pointer clicks and keyboard
+  // navigation — both are explicit user picks.
   const [lastFocusSource, setLastFocusSource] = useState<'click' | 'scroll'>(
     'scroll',
   )
@@ -408,13 +409,20 @@ export default function ExampleReview({
         case 'ArrowUp':
         case 'k':
           e.preventDefault()
-          if (selectedIndex > 0) setSelectedId(orderedExamples[selectedIndex - 1].id)
+          if (selectedIndex > 0) {
+            setSelectedId(orderedExamples[selectedIndex - 1].id)
+            // Keyboard nav counts as an explicit selection — pin the
+            // sidebar to it just like a click would.
+            setLastFocusSource('click')
+          }
           break
         case 'ArrowDown':
         case 'j':
           e.preventDefault()
-          if (selectedIndex < orderedExamples.length - 1)
+          if (selectedIndex < orderedExamples.length - 1) {
             setSelectedId(orderedExamples[selectedIndex + 1].id)
+            setLastFocusSource('click')
+          }
           break
         case 'ArrowLeft': {
           e.preventDefault()
