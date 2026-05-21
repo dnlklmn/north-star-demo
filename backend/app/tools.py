@@ -438,7 +438,20 @@ def _is_billing_error(err: Exception) -> bool:
     return any(n in msg for n in needles)
 
 
-def _call_llm(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
+async def _call_llm(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
+    """Async-safe wrapper. The Anthropic SDK is sync, so we have to run
+    the blocking call on a worker thread or the event loop freezes for
+    the duration of every LLM call — which kills concurrency across
+    endpoints (e.g. scorers gen stalls dataset synth that's running in
+    parallel). All async call sites should `await` this.
+
+    Implementation lives in `_call_llm_sync`; this function is just the
+    `asyncio.to_thread` shim. Keep both signatures aligned.
+    """
+    return await asyncio.to_thread(_call_llm_sync, prompt, max_tokens)
+
+
+def _call_llm_sync(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
     """Call Claude and return (response_text, call_metadata)."""
     model = get_model()
     creativity = get_creativity()
@@ -740,7 +753,7 @@ async def call_discovery_turn(state: SessionState, user_message: str | None) -> 
     """
     await _refresh_settings()
     prompt = build_discovery_turn_prompt(state, user_message)
-    text, meta = _call_llm(prompt, max_tokens=2048)
+    text, meta = await _call_llm(prompt, max_tokens=2048)
 
     # Parse extraction block
     extraction = None
@@ -820,7 +833,7 @@ async def call_generate_draft(state: SessionState) -> tuple[Charter, list[dict]]
     """Generate a charter draft. Returns (parsed Charter, call metadata list)."""
     await _refresh_settings()
     prompt = build_generate_draft_prompt(state, creativity=get_creativity())
-    text, meta = _call_llm(prompt, max_tokens=4096)
+    text, meta = await _call_llm(prompt, max_tokens=4096)
     charter_data = _extract_json(text)
 
     # Charter-specific scorer payload. The generic _call_llm bubble already
@@ -894,7 +907,7 @@ async def call_validate_charter(state: SessionState) -> tuple[Validation, list[d
     """Validate the current charter. Returns (parsed Validation, call metadata list)."""
     await _refresh_settings()
     prompt = build_validate_charter_prompt(state)
-    text, meta = _call_llm(prompt, max_tokens=2048)
+    text, meta = await _call_llm(prompt, max_tokens=2048)
     val_data = _extract_json(text)
 
     validation = Validation(
@@ -921,7 +934,7 @@ async def call_conversational_turn(state: SessionState, user_message: str) -> tu
     """Send a conversational turn. Returns (raw text, call metadata list)."""
     await _refresh_settings()
     prompt = build_conversational_turn_prompt(state, user_message)
-    text, meta = _call_llm(prompt, max_tokens=2048)
+    text, meta = await _call_llm(prompt, max_tokens=2048)
     return text, [meta]
 
 
@@ -930,7 +943,7 @@ async def call_generate_suggestions(state: SessionState) -> tuple[tuple[list[Sug
     """Generate suggestions for weak/empty sections. Returns ((suggestions, stories), call metadata list)."""
     await _refresh_settings()
     prompt = build_generate_suggestions_prompt(state)
-    text, meta = _call_llm(prompt, max_tokens=1024)
+    text, meta = await _call_llm(prompt, max_tokens=1024)
     data = _extract_json(text)
 
     # Defensive: some providers/models occasionally emit entries missing
@@ -960,7 +973,7 @@ async def call_suggest_goals(goals: list[str]) -> tuple[list[str], list[dict]]:
     from .prompt import build_suggest_goals_prompt
     await _refresh_settings()
     prompt = build_suggest_goals_prompt(goals)
-    text, meta = _call_llm(prompt, max_tokens=512)
+    text, meta = await _call_llm(prompt, max_tokens=512)
     data = _extract_json(text)
     suggestions = data.get("suggestions", [])
     # Scorer payload: existing goals as input, suggestions as output.
@@ -979,7 +992,7 @@ async def call_evaluate_goals(goals: list[str]) -> tuple[list[dict], list[dict]]
     from .prompt import build_evaluate_goals_prompt
     await _refresh_settings()
     prompt = build_evaluate_goals_prompt(goals)
-    text, meta = _call_llm(prompt, max_tokens=512)
+    text, meta = await _call_llm(prompt, max_tokens=512)
     data = _extract_json(text)
     feedback = data.get("feedback", [])
     # Scorer payload: goals as input, per-goal feedback (issue + suggestion) as output.
@@ -1002,7 +1015,7 @@ async def call_generate_skill_from_goals(
     from .prompt import build_generate_skill_from_goals_prompt
     await _refresh_settings()
     prompt = build_generate_skill_from_goals_prompt(goals, stories, project_name)
-    text, meta = _call_llm(prompt, max_tokens=2048)
+    text, meta = await _call_llm(prompt, max_tokens=2048)
     body = text.strip()
     # Strip accidental code fences if the model wrapped output despite the
     # explicit instruction not to.
@@ -1038,7 +1051,7 @@ async def call_suggest_scorer_ideas(
     from .prompt import build_suggest_scorer_ideas_prompt
     await _refresh_settings()
     prompt = build_suggest_scorer_ideas_prompt(charter, existing_scorers)
-    text, meta = _call_llm(prompt, max_tokens=512)
+    text, meta = await _call_llm(prompt, max_tokens=512)
     data = _extract_json(text)
     suggestions: list[dict] = []
     for s in data.get("suggestions", []):
@@ -1082,7 +1095,7 @@ async def call_suggest_skill(
     from .prompt import build_suggest_skill_prompt
     await _refresh_settings()
     prompt = build_suggest_skill_prompt(goals, stories, current_body)
-    text, meta = _call_llm(prompt, max_tokens=768)
+    text, meta = await _call_llm(prompt, max_tokens=768)
     data = _extract_json(text)
     suggestions: list[dict] = []
     for s in data.get("suggestions", []):
@@ -1120,7 +1133,7 @@ async def call_suggest_stories(goals: list[str], stories: list[dict]) -> tuple[l
     from .prompt import build_suggest_stories_prompt
     await _refresh_settings()
     prompt = build_suggest_stories_prompt(goals, stories)
-    text, meta = _call_llm(prompt, max_tokens=512)
+    text, meta = await _call_llm(prompt, max_tokens=512)
     data = _extract_json(text)
     suggestions = data.get("suggestions", [])
     # Scorer payload: goals + existing stories as input, suggested stories as output.
@@ -1234,7 +1247,7 @@ async def call_synthesize_examples(
 
     if falls_back:
         prompt = build_synthesize_examples_prompt(charter, feature_areas, coverage_criteria, count)
-        text, meta = _call_llm(prompt, max_tokens=8192)
+        text, meta = await _call_llm(prompt, max_tokens=8192)
         data = _extract_json(text)
         examples = data.get("examples", [])
         # Single call: fire the hook once at the end so callers can still
@@ -1306,7 +1319,7 @@ async def call_review_examples(charter: dict, examples: list[dict]) -> tuple[lis
     """Auto-review examples against charter. Returns (reviews, call metadata list)."""
     await _refresh_settings()
     prompt = build_review_examples_prompt(charter, examples)
-    text, meta = _call_llm(prompt, max_tokens=4096)
+    text, meta = await _call_llm(prompt, max_tokens=4096)
     data = _extract_json(text)
     return data.get("reviews", []), [meta]
 
@@ -1324,7 +1337,7 @@ async def call_retag_examples_against_charter(
     """
     await _refresh_settings()
     prompt = build_retag_examples_against_charter_prompt(charter, examples)
-    text, meta = _call_llm(prompt, max_tokens=4096)
+    text, meta = await _call_llm(prompt, max_tokens=4096)
     data = _extract_json(text)
     return data.get("retags", []), [meta]
 
@@ -1339,7 +1352,7 @@ async def call_dataset_chat(
     """Chat turn in dataset phase. Returns (response text, call metadata list)."""
     await _refresh_settings()
     prompt = build_dataset_chat_prompt(charter, dataset_stats, user_message, conversation_history)
-    text, meta = _call_llm(prompt, max_tokens=2048)
+    text, meta = await _call_llm(prompt, max_tokens=2048)
     return text, [meta]
 
 
@@ -1354,7 +1367,7 @@ async def call_gap_analysis(charter: dict, dataset_stats: dict, examples: list[d
     """
     await _refresh_settings()
     prompt = build_gap_analysis_prompt(charter, dataset_stats, examples)
-    text, meta = _call_llm(prompt, max_tokens=2048)
+    text, meta = await _call_llm(prompt, max_tokens=2048)
     data = _extract_json(text)
     # Override whatever matrix the LLM produced with the deterministic count.
     data["coverage_matrix"] = _build_coverage_matrix(charter, examples)
@@ -1377,7 +1390,7 @@ async def call_generate_scorers(
     """
     await _refresh_settings()
     prompt = build_generate_scorers_prompt(charter, agent_contract=agent_contract)
-    text, meta = _call_llm(prompt, max_tokens=8192)
+    text, meta = await _call_llm(prompt, max_tokens=8192)
     data = _extract_json(text)
     return data.get("scorers", []), [meta]
 
@@ -1389,7 +1402,7 @@ async def call_revise_examples(charter: dict, examples_with_verdicts: list[dict]
     """Suggest revisions for examples that failed review. Returns (revisions, call metadata list)."""
     await _refresh_settings()
     prompt = build_revise_examples_prompt(charter, examples_with_verdicts)
-    text, meta = _call_llm(prompt, max_tokens=8192)
+    text, meta = await _call_llm(prompt, max_tokens=8192)
     data = _extract_json(text)
     return data.get("revisions", []), [meta]
 
@@ -1401,7 +1414,7 @@ async def call_detect_schema(content: str, content_type: str = "auto") -> tuple[
     """Detect schema from pasted content. Returns (schema data, call metadata list)."""
     await _refresh_settings()
     prompt = build_detect_schema_prompt(content, content_type)
-    text, meta = _call_llm(prompt, max_tokens=2048)
+    text, meta = await _call_llm(prompt, max_tokens=2048)
     data = _extract_json(text)
     return data, [meta]
 
@@ -1411,7 +1424,7 @@ async def call_infer_schema(examples: list[dict], charter: dict) -> tuple[dict, 
     """Infer schema from existing examples. Returns (inferred schema, call metadata list)."""
     await _refresh_settings()
     prompt = build_infer_schema_prompt(examples, charter)
-    text, meta = _call_llm(prompt, max_tokens=2048)
+    text, meta = await _call_llm(prompt, max_tokens=2048)
     data = _extract_json(text)
     return data, [meta]
 
@@ -1421,7 +1434,7 @@ async def call_import_from_url(content: str, url: str, detected_type: str) -> tu
     """Extract schema from URL content. Returns (schema data, call metadata list)."""
     await _refresh_settings()
     prompt = build_import_url_prompt(content, url, detected_type)
-    text, meta = _call_llm(prompt, max_tokens=2048)
+    text, meta = await _call_llm(prompt, max_tokens=2048)
     data = _extract_json(text)
     return data, [meta]
 
@@ -1445,7 +1458,7 @@ async def call_suggest_improvements(
     from .prompt import build_suggest_improvements_prompt
     await _refresh_settings()
     prompt = build_suggest_improvements_prompt(skill_body, eval_run, charter, clusters)
-    text, meta = _call_llm(prompt, max_tokens=4096)
+    text, meta = await _call_llm(prompt, max_tokens=4096)
     data = _extract_json(text)
     return data, [meta]
 
@@ -1465,7 +1478,7 @@ async def call_cluster_notes(
     from .prompt import build_cluster_notes_prompt
     await _refresh_settings()
     prompt = build_cluster_notes_prompt(notes, prior_labels)
-    text, meta = _call_llm(prompt, max_tokens=2048)
+    text, meta = await _call_llm(prompt, max_tokens=2048)
     data = _extract_json(text)
     return data, [meta]
 
@@ -1485,7 +1498,7 @@ async def call_skill_seed(
     from .prompt import build_skill_seed_prompt
     await _refresh_settings()
     prompt = build_skill_seed_prompt(skill_body, skill_name, skill_description)
-    text, meta = _call_llm(prompt, max_tokens=4096)
+    text, meta = await _call_llm(prompt, max_tokens=4096)
     data = _extract_json(text)
     # Scorer payload: SKILL.md content (with name/description header) as
     # input, the parsed seed bundle (goals/users/stories/task) as output.
