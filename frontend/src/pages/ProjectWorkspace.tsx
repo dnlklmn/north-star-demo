@@ -2122,8 +2122,18 @@ export default function ProjectWorkspace() {
     try {
       const res = await generateScorers(sessionId);
       setScorers(res.scorers);
+      // Only pull the scorers + lineage stamp out of the refreshed state.
+      // We MUST NOT replace `state` wholesale here: the charter-changed
+      // effect keys off `state.charter` by reference, so setState(s.state)
+      // produces a new charter reference and stales the dataset even when
+      // nothing actually changed — which reads as "the dataset disappeared"
+      // in the UI right after scorers gen completes.
       const s = await getSession(sessionId);
-      setState(s.state as SessionState);
+      setState((prev) => ({
+        ...prev,
+        scorers: s.state.scorers,
+        generated_at_skill_version: s.state.generated_at_skill_version,
+      }));
     } catch (err) {
       console.error("Shortcut: generate scorers failed", err);
       throw err;
