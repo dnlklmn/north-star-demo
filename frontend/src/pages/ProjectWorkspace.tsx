@@ -2195,21 +2195,26 @@ export default function ProjectWorkspace() {
     [sessionId, scorers.length, scorersGenerating, hasCharter, runGenerateScorers],
   );
 
-  // Auto-generate scorers when the user lands on the Scorers tab with a
-  // populated charter and no scorers yet. Without this the user had to
-  // click "Generate scorers" themselves even though every precondition
-  // was met — which read as "scorers don't get generated when I start
-  // from a charter". Guarded so the auto-trigger fires at most once per
-  // session — if the generation fails or the user clears scorers
-  // afterwards, the empty-state CTA still lets them retrigger manually.
+  // Auto-generate scorers when either:
+  //   (a) dataset generation just kicked off — fire scorers in parallel
+  //       so the two long-running jobs overlap instead of serialising;
+  //   (b) the user lands on the Scorers tab with a filled charter and
+  //       no scorers — same shape as the previous auto-trigger.
+  // Once per session, guarded by `scorersGenerating` so an in-flight
+  // run doesn't double-fire. The "(a)" branch was missing before, so
+  // any path that started only the dataset (Charter footer's
+  // "Generate dataset" item, Polaris generate-dataset, etc.) left
+  // scorers stranded until the user visited the Scorers tab — at
+  // which point they ran sequentially after the dataset finished.
   const autoGenScorersRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (!sessionId) return;
-    if (activeTab !== "scorers") return;
     if (scorers.length > 0) return;
     if (!hasCharter) return;
     if (scorersGenerating) return;
     if (autoGenScorersRef.current.has(sessionId)) return;
+    const triggered = generatingDataset || activeTab === "scorers";
+    if (!triggered) return;
     autoGenScorersRef.current.add(sessionId);
     void handleGenerateScorers({ skipConfirm: true });
   }, [
@@ -2218,6 +2223,7 @@ export default function ProjectWorkspace() {
     scorers.length,
     hasCharter,
     scorersGenerating,
+    generatingDataset,
     handleGenerateScorers,
   ]);
 
