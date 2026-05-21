@@ -2195,6 +2195,32 @@ export default function ProjectWorkspace() {
     [sessionId, scorers.length, scorersGenerating, hasCharter, runGenerateScorers],
   );
 
+  // Auto-generate scorers when the user lands on the Scorers tab with a
+  // populated charter and no scorers yet. Without this the user had to
+  // click "Generate scorers" themselves even though every precondition
+  // was met — which read as "scorers don't get generated when I start
+  // from a charter". Guarded so the auto-trigger fires at most once per
+  // session — if the generation fails or the user clears scorers
+  // afterwards, the empty-state CTA still lets them retrigger manually.
+  const autoGenScorersRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!sessionId) return;
+    if (activeTab !== "scorers") return;
+    if (scorers.length > 0) return;
+    if (!hasCharter) return;
+    if (scorersGenerating) return;
+    if (autoGenScorersRef.current.has(sessionId)) return;
+    autoGenScorersRef.current.add(sessionId);
+    void handleGenerateScorers({ skipConfirm: true });
+  }, [
+    sessionId,
+    activeTab,
+    scorers.length,
+    hasCharter,
+    scorersGenerating,
+    handleGenerateScorers,
+  ]);
+
   // Parent listens for Polaris-triggered draft requests via a stable
   // listener (bound once at mount). The ref pattern keeps the latest
   // handler in scope without re-binding the event listener on every
@@ -2666,7 +2692,9 @@ export default function ProjectWorkspace() {
         // total LLM cost at MAX_ATTEMPTS so an adversarial / impossible
         // cell can't loop forever — leftover gaps surface in the
         // sidebar where the user can decide whether to retry or accept.
-        const MAX_ATTEMPTS = 3;
+        // Cap is 2 (1 initial + 1 retry): a third pass rarely catches
+        // cells the second pass missed and doubles perceived latency.
+        const MAX_ATTEMPTS = 2;
         let remaining = targets;
         for (
           let attempt = 1;
