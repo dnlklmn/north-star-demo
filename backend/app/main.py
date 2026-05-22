@@ -1413,6 +1413,78 @@ def _export_generated_scorers(state: SessionState, scorers: list[dict]) -> int:
 UNMAPPED_FEATURE_AREA = "(unmapped)"
 
 
+def _normalize_synthesized_coverage_tags(generated: list[dict], charter: dict) -> tuple[int, int]:
+    """Snap each synthesized row's `coverage_tags` to canonical charter
+    coverage criteria using the same fuzzy resolver as the coverage matrix.
+
+    Why: the matrix in `_build_coverage_matrix` already fuzzy-matches tags at
+    read time, but downstream consumers (filters, exports, eval gating, the
+    sidebar's "Row covers" list) compare raw strings. Without snapping at
+    write time, a row whose LLM paraphrased a criterion ("FAQ-style
+    responses" vs charter's "FAQ responses") shows the LLM's wording
+    everywhere except the coverage matrix — inconsistent and confusing.
+
+    Per-tag behavior:
+      1. exact match against a charter criterion → keep as-is.
+      2. fuzzy resolve (>=12-char shared normalized prefix) → snap to the
+         canonical form.
+      3. otherwise → leave the tag alone. We don't drop unknowns: the LLM
+         occasionally adds useful descriptors the charter hasn't named yet,
+         and the matrix will simply not credit them — same outcome as before
+         this snap existed.
+
+    Returns (tags_snapped, tags_left_alone). Both are useful for warning
+    logs: lots of snaps means the LLM is paraphrasing the criteria; lots of
+    "left alone" means it's inventing categories not in the charter.
+    """
+    from .prompt import _resolve_charter_string
+
+    coverage = (charter.get("coverage") or {}).get("criteria") or []
+    if not coverage:
+        return 0, 0
+    canonical_lookup = {c.casefold().strip(): c for c in coverage if isinstance(c, str)}
+    snapped_total = 0
+    unmapped_total = 0
+    for ex in generated:
+        if not isinstance(ex, dict):
+            continue
+        tags = ex.get("coverage_tags")
+        if not isinstance(tags, list):
+            continue
+        new_tags: list[str] = []
+        for tag in tags:
+            if not isinstance(tag, str) or not tag.strip():
+                continue
+            if tag in coverage:
+                new_tags.append(tag)
+                continue
+            # Cheap exact-after-casefold check first; fuzzy resolver is the
+            # fallback for paraphrases.
+            exact = canonical_lookup.get(tag.casefold().strip())
+            if exact is not None:
+                new_tags.append(exact)
+                snapped_total += 1
+                continue
+            fuzzy = _resolve_charter_string(tag, coverage)
+            if fuzzy is not None:
+                new_tags.append(fuzzy)
+                snapped_total += 1
+                continue
+            new_tags.append(tag)
+            unmapped_total += 1
+        # Dedupe while preserving order — fuzzy snap can collapse two LLM
+        # paraphrases of the same criterion onto the same canonical string.
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for t in new_tags:
+            if t in seen:
+                continue
+            seen.add(t)
+            deduped.append(t)
+        ex["coverage_tags"] = deduped
+    return snapped_total, unmapped_total
+
+
 def _normalize_synthesized_feature_areas(generated: list[dict], charter: dict) -> int:
     """Snap each synthesized row's `feature_area` to a known alignment entry,
     or to ``UNMAPPED_FEATURE_AREA`` when it doesn't match any.
@@ -1906,6 +1978,11 @@ async def _retag_dataset_after_charter(session_id: str, charter: dict) -> None:
         for i in range(0, len(examples), batch_size):
             batch = examples[i:i + batch_size]
             retags, call_meta = await call_retag_examples_against_charter(charter, batch)
+            # Apply the same canonical-snap passes as synth so the retag
+            # writes consistent charter strings even when the LLM
+            # paraphrased.
+            _normalize_synthesized_feature_areas(retags, charter)
+            _normalize_synthesized_coverage_tags(retags, charter)
             for r in retags:
                 eid = r.get("example_id")
                 if not eid:
@@ -2529,6 +2606,9 @@ async def import_examples(
             "label_reason": ex.get("label_reason"),
             "should_trigger": ex.get("should_trigger"),
             "is_adversarial": ex.get("is_adversarial"),
+            "scenario_type": ex.get("scenario_type"),
+            "difficulty": ex.get("difficulty"),
+            "tier": ex.get("tier", "eval"),
         })
 
     created = await db.bulk_create_examples(dataset_id, normalized)
@@ -2609,8 +2689,24 @@ async def synthesize_examples(
                 "synthesize: %d/%d rows in this cell had out-of-range feature_area, snapped to %r",
                 unmapped, len(cell_examples), UNMAPPED_FEATURE_AREA,
             )
+        # Also snap paraphrased coverage_tags back to their canonical charter
+        # strings so the coverage matrix credits them and downstream
+        # consumers see consistent tag values.
+        tag_snapped, tag_unmapped = _normalize_synthesized_coverage_tags(cell_examples, charter)
+        if tag_snapped or tag_unmapped:
+            logger.info(
+                "synthesize: cell coverage_tag snap — %d paraphrases canonicalized, "
+                "%d tags left as-is (not in charter)",
+                tag_snapped, tag_unmapped,
+            )
         for ex in cell_examples:
             ex["source"] = "synthetic"
+            # Keep the legacy is_adversarial column in sync with the new
+            # scenario_type taxonomy so downstream code that hasn't migrated
+            # off is_adversarial yet (safety scorers, exports, etc.) still
+            # sees adversarial rows correctly.
+            if ex.get("scenario_type") == "adversarial" and ex.get("is_adversarial") is None:
+                ex["is_adversarial"] = True
         try:
             inserted = await db.bulk_create_examples(dataset_id, cell_examples)
         except Exception as err:
@@ -2722,6 +2818,9 @@ async def add_example(
         label_reason=req.label_reason,
         should_trigger=req.should_trigger,
         is_adversarial=req.is_adversarial,
+        scenario_type=req.scenario_type,
+        difficulty=req.difficulty,
+        tier=req.tier,
     )
     await db.update_dataset_stats(dataset_id)
     return example
@@ -2785,7 +2884,9 @@ async def auto_review_examples(
         batch_for_review = [
             {"id": ex["id"], "feature_area": ex["feature_area"],
              "input": ex["input"], "expected_output": ex["expected_output"],
-             "label": ex["label"], "should_trigger": ex.get("should_trigger")}
+             "label": ex["label"], "should_trigger": ex.get("should_trigger"),
+             "scenario_type": ex.get("scenario_type")
+                 or ("adversarial" if ex.get("is_adversarial") else None)}
             for ex in batch
         ]
         reviews, call_meta = await call_review_examples(charter, batch_for_review)
@@ -2951,6 +3052,8 @@ async def retag_examples_against_charter(
     for i in range(0, len(examples), batch_size):
         batch = examples[i:i + batch_size]
         retags, call_meta = await call_retag_examples_against_charter(charter, batch)
+        _normalize_synthesized_feature_areas(retags, charter)
+        _normalize_synthesized_coverage_tags(retags, charter)
         for r in retags:
             eid = r.get("example_id")
             if not eid:
@@ -3146,6 +3249,76 @@ async def analyze_gaps(dataset_id: str):
     }
 
 
+@app.get("/datasets/{dataset_id}/judge-agreement")
+async def judge_agreement(dataset_id: str):
+    """Cohen's kappa + raw agreement between the judge's suggested_label and
+    the reviewer's final label, over rows the human has actually reviewed.
+
+    Returns ``not_enough_data: True`` (with the running counts) when fewer
+    than 10 reviewed rows carry a judge suggestion — kappa is noisy below
+    that. Frontend renders the metric with a warning color when agreement
+    drops below 80% or kappa falls under 0.6 with >=20 rows.
+    """
+    dataset = await db.get_dataset(dataset_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    examples = await db.get_examples(dataset_id)
+    pairs: list[tuple[str, str]] = []
+    for ex in examples:
+        # "Reviewed" = the human took an action other than leaving it pending.
+        # Approved, rejected, and needs_edit all carry a settled label.
+        if ex.get("review_status") == "pending":
+            continue
+        verdict = ex.get("judge_verdict") or {}
+        # Triggered-mode rows surface the model's suggestion under
+        # execution_verdict instead of at the top level. Both paths land
+        # in the same comparison.
+        suggested = verdict.get("suggested_label")
+        if suggested is None:
+            exec_v = verdict.get("execution_verdict") or {}
+            suggested = exec_v.get("suggested_label")
+        label = ex.get("label")
+        if suggested in ("good", "bad") and label in ("good", "bad"):
+            pairs.append((str(suggested), str(label)))
+
+    reviewed_count = len(pairs)
+    agreement_count = sum(1 for s, lab in pairs if s == lab)
+    agreement_rate = (agreement_count / reviewed_count) if reviewed_count else 0.0
+
+    # Cohen's kappa over the 2x2 confusion matrix. Tiny by hand:
+    #   po = observed agreement (agreement_rate)
+    #   pe = expected agreement by chance, from each rater's marginal
+    #   kappa = (po - pe) / (1 - pe)
+    #
+    # `pe` is always computable. It only reaches 1.0 — the one value that
+    # makes the formula undefined — when BOTH raters are unanimous on the
+    # SAME label; in that case they agree on every row, so kappa is 1.0 by
+    # convention. Every other case (including "one rater unanimous, the
+    # other not") has a well-defined kappa, so compute it directly rather
+    # than discarding it.
+    kappa: float | None = None
+    if reviewed_count >= 2:
+        n = reviewed_count
+        s_good = sum(1 for s, _ in pairs if s == "good")
+        l_good = sum(1 for _, lab in pairs if lab == "good")
+        pe = (s_good / n) * (l_good / n) + ((n - s_good) / n) * ((n - l_good) / n)
+        if pe >= 1.0:
+            # Both raters unanimous + same side → perfect agreement.
+            kappa = 1.0 if agreement_rate == 1.0 else None
+        else:
+            kappa = (agreement_rate - pe) / (1.0 - pe)
+
+    return {
+        "reviewed_count": reviewed_count,
+        "agreement_count": agreement_count,
+        "agreement_rate": agreement_rate,
+        "kappa": kappa,
+        "not_enough_data": reviewed_count < 10,
+    }
+
+
+
 @app.post("/datasets/{dataset_id}/enrich")
 async def enrich_dataset(
     dataset_id: str,
@@ -3176,6 +3349,13 @@ async def enrich_dataset(
         logger.warning(
             "enrich (%s): %d/%d rows had out-of-range feature_area, snapped to %r",
             req.gap_type, unmapped, len(generated), UNMAPPED_FEATURE_AREA,
+        )
+    tag_snapped, tag_unmapped = _normalize_synthesized_coverage_tags(generated, charter)
+    if tag_snapped or tag_unmapped:
+        logger.info(
+            "enrich (%s): coverage_tag snap — %d paraphrases canonicalized, "
+            "%d tags left as-is (not in charter)",
+            req.gap_type, tag_snapped, tag_unmapped,
         )
 
     for ex in generated:

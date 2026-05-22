@@ -438,7 +438,32 @@ def _is_billing_error(err: Exception) -> bool:
     return any(n in msg for n in needles)
 
 
-def _call_llm(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
+def _first_text(content: list | None) -> str:
+    """Return the text of the first text-bearing block in a Message's
+    content, or "". Plain (no-tool) completions always put text at [0],
+    but guarding against a non-text block keeps the three call helpers
+    from raising AttributeError if that ever stops being true."""
+    for block in content or []:
+        text = getattr(block, "text", None)
+        if isinstance(text, str):
+            return text
+    return ""
+
+
+async def _call_llm(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
+    """Async-safe wrapper. The Anthropic SDK is sync, so we have to run
+    the blocking call on a worker thread or the event loop freezes for
+    the duration of every LLM call — which kills concurrency across
+    endpoints (e.g. scorers gen stalls dataset synth that's running in
+    parallel). All async call sites should `await` this.
+
+    Implementation lives in `_call_llm_sync`; this function is just the
+    `asyncio.to_thread` shim. Keep both signatures aligned.
+    """
+    return await asyncio.to_thread(_call_llm_sync, prompt, max_tokens)
+
+
+def _call_llm_sync(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
     """Call Claude and return (response_text, call_metadata)."""
     model = get_model()
     creativity = get_creativity()
@@ -475,7 +500,7 @@ def _call_llm(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
         raise
     elapsed_ms = int((time.time() - start) * 1000)
     logger.info(f"_call_llm: OK in {elapsed_ms}ms, output_tokens={response.usage.output_tokens}")
-    text = response.content[0].text if response.content else ""
+    text = _first_text(response.content)
     _bubble_io_to_parent_span(prompt, text)
     metadata = {
         "model": model,
@@ -483,6 +508,65 @@ def _call_llm(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
         "raw_response": text,
         "input_tokens": response.usage.input_tokens,
         "output_tokens": response.usage.output_tokens,
+        "latency_ms": elapsed_ms,
+        "temperature": temperature,
+    }
+    return text, metadata
+
+
+async def _call_llm_streaming(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
+    """Async-safe streaming variant of `_call_llm`. Use for calls that need
+    a high `max_tokens` (>~8k): the SDK refuses a *non-streaming* request
+    whose `max_tokens` could exceed a 10-minute timeout, so the only way to
+    ask for a large completion is to stream it. Same return shape as
+    `_call_llm`."""
+    return await asyncio.to_thread(_call_llm_streaming_sync, prompt, max_tokens)
+
+
+def _call_llm_streaming_sync(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
+    """Streaming Claude call. Accumulates the streamed text and returns the
+    same (text, metadata) tuple as `_call_llm_sync`. Streaming sidesteps the
+    SDK's non-streaming 10-minute-timeout guard, so this is the path for
+    large-output calls (e.g. the single-shot dataset synth fallback)."""
+    model = get_model()
+    temperature = get_creativity()
+    resolved_model = _resolve_model(model)
+    logger.info(
+        f"_call_llm_streaming: model={model}, resolved={resolved_model}, "
+        f"provider={_current_provider()}, max_tokens={max_tokens}, "
+        f"prompt_len={len(prompt)}"
+    )
+    start = time.time()
+    try:
+        with get_client().messages.stream(
+            model=resolved_model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            messages=[{"role": "user", "content": prompt}],
+        ) as stream:
+            final = stream.get_final_message()
+    except Exception as e:
+        logger.error(f"_call_llm_streaming FAILED: {type(e).__name__}: {e}")
+        if _is_billing_error(e):
+            raise LLMBillingError(str(e), provider=_current_provider()) from e
+        if _is_model_error(e):
+            raise LLMModelError(str(e), provider=_current_provider()) from e
+        if _is_auth_error(e):
+            raise LLMAuthError(str(e), provider=_current_provider()) from e
+        raise
+    elapsed_ms = int((time.time() - start) * 1000)
+    logger.info(
+        f"_call_llm_streaming: OK in {elapsed_ms}ms, "
+        f"output_tokens={final.usage.output_tokens}"
+    )
+    text = _first_text(final.content)
+    _bubble_io_to_parent_span(prompt, text)
+    metadata = {
+        "model": model,
+        "prompt": prompt,
+        "raw_response": text,
+        "input_tokens": final.usage.input_tokens,
+        "output_tokens": final.usage.output_tokens,
         "latency_ms": elapsed_ms,
         "temperature": temperature,
     }
@@ -550,7 +634,7 @@ def _call_llm_cached(prefix: str, suffix: str, max_tokens: int = 4096) -> tuple[
         f"input={usage.input_tokens}, output={usage.output_tokens}, "
         f"cache_create={cache_creation}, cache_read={cache_read}"
     )
-    text = response.content[0].text if response.content else ""
+    text = _first_text(response.content)
     _bubble_io_to_parent_span(prefix + suffix, text)
     metadata = {
         "model": model,
@@ -740,7 +824,7 @@ async def call_discovery_turn(state: SessionState, user_message: str | None) -> 
     """
     await _refresh_settings()
     prompt = build_discovery_turn_prompt(state, user_message)
-    text, meta = _call_llm(prompt, max_tokens=2048)
+    text, meta = await _call_llm(prompt, max_tokens=2048)
 
     # Parse extraction block
     extraction = None
@@ -820,7 +904,7 @@ async def call_generate_draft(state: SessionState) -> tuple[Charter, list[dict]]
     """Generate a charter draft. Returns (parsed Charter, call metadata list)."""
     await _refresh_settings()
     prompt = build_generate_draft_prompt(state, creativity=get_creativity())
-    text, meta = _call_llm(prompt, max_tokens=4096)
+    text, meta = await _call_llm(prompt, max_tokens=4096)
     charter_data = _extract_json(text)
 
     # Charter-specific scorer payload. The generic _call_llm bubble already
@@ -894,7 +978,7 @@ async def call_validate_charter(state: SessionState) -> tuple[Validation, list[d
     """Validate the current charter. Returns (parsed Validation, call metadata list)."""
     await _refresh_settings()
     prompt = build_validate_charter_prompt(state)
-    text, meta = _call_llm(prompt, max_tokens=2048)
+    text, meta = await _call_llm(prompt, max_tokens=2048)
     val_data = _extract_json(text)
 
     validation = Validation(
@@ -921,7 +1005,7 @@ async def call_conversational_turn(state: SessionState, user_message: str) -> tu
     """Send a conversational turn. Returns (raw text, call metadata list)."""
     await _refresh_settings()
     prompt = build_conversational_turn_prompt(state, user_message)
-    text, meta = _call_llm(prompt, max_tokens=2048)
+    text, meta = await _call_llm(prompt, max_tokens=2048)
     return text, [meta]
 
 
@@ -930,7 +1014,7 @@ async def call_generate_suggestions(state: SessionState) -> tuple[tuple[list[Sug
     """Generate suggestions for weak/empty sections. Returns ((suggestions, stories), call metadata list)."""
     await _refresh_settings()
     prompt = build_generate_suggestions_prompt(state)
-    text, meta = _call_llm(prompt, max_tokens=1024)
+    text, meta = await _call_llm(prompt, max_tokens=1024)
     data = _extract_json(text)
 
     # Defensive: some providers/models occasionally emit entries missing
@@ -960,7 +1044,7 @@ async def call_suggest_goals(goals: list[str]) -> tuple[list[str], list[dict]]:
     from .prompt import build_suggest_goals_prompt
     await _refresh_settings()
     prompt = build_suggest_goals_prompt(goals)
-    text, meta = _call_llm(prompt, max_tokens=512)
+    text, meta = await _call_llm(prompt, max_tokens=512)
     data = _extract_json(text)
     suggestions = data.get("suggestions", [])
     # Scorer payload: existing goals as input, suggestions as output.
@@ -979,7 +1063,7 @@ async def call_evaluate_goals(goals: list[str]) -> tuple[list[dict], list[dict]]
     from .prompt import build_evaluate_goals_prompt
     await _refresh_settings()
     prompt = build_evaluate_goals_prompt(goals)
-    text, meta = _call_llm(prompt, max_tokens=512)
+    text, meta = await _call_llm(prompt, max_tokens=512)
     data = _extract_json(text)
     feedback = data.get("feedback", [])
     # Scorer payload: goals as input, per-goal feedback (issue + suggestion) as output.
@@ -1002,7 +1086,7 @@ async def call_generate_skill_from_goals(
     from .prompt import build_generate_skill_from_goals_prompt
     await _refresh_settings()
     prompt = build_generate_skill_from_goals_prompt(goals, stories, project_name)
-    text, meta = _call_llm(prompt, max_tokens=2048)
+    text, meta = await _call_llm(prompt, max_tokens=2048)
     body = text.strip()
     # Strip accidental code fences if the model wrapped output despite the
     # explicit instruction not to.
@@ -1038,7 +1122,7 @@ async def call_suggest_scorer_ideas(
     from .prompt import build_suggest_scorer_ideas_prompt
     await _refresh_settings()
     prompt = build_suggest_scorer_ideas_prompt(charter, existing_scorers)
-    text, meta = _call_llm(prompt, max_tokens=512)
+    text, meta = await _call_llm(prompt, max_tokens=512)
     data = _extract_json(text)
     suggestions: list[dict] = []
     for s in data.get("suggestions", []):
@@ -1082,7 +1166,7 @@ async def call_suggest_skill(
     from .prompt import build_suggest_skill_prompt
     await _refresh_settings()
     prompt = build_suggest_skill_prompt(goals, stories, current_body)
-    text, meta = _call_llm(prompt, max_tokens=768)
+    text, meta = await _call_llm(prompt, max_tokens=768)
     data = _extract_json(text)
     suggestions: list[dict] = []
     for s in data.get("suggestions", []):
@@ -1120,7 +1204,7 @@ async def call_suggest_stories(goals: list[str], stories: list[dict]) -> tuple[l
     from .prompt import build_suggest_stories_prompt
     await _refresh_settings()
     prompt = build_suggest_stories_prompt(goals, stories)
-    text, meta = _call_llm(prompt, max_tokens=512)
+    text, meta = await _call_llm(prompt, max_tokens=512)
     data = _extract_json(text)
     suggestions = data.get("suggestions", [])
     # Scorer payload: goals + existing stories as input, suggested stories as output.
@@ -1234,9 +1318,24 @@ async def call_synthesize_examples(
 
     if falls_back:
         prompt = build_synthesize_examples_prompt(charter, feature_areas, coverage_criteria, count)
-        text, meta = _call_llm(prompt, max_tokens=8192)
+        # 8192 was too low — a full-grid charter (positive grid + off-target
+        # + safety rows) routinely blew past it and the response truncated
+        # mid-JSON, yielding zero examples. The single-call fallback has to
+        # emit the entire dataset in one shot, so give it real headroom
+        # (32k). That much output can't go through a non-streaming request
+        # — the SDK rejects it with a 10-minute-timeout guard — so this
+        # path streams. `_extract_json` still salvages the tail if a
+        # pathologically large charter clips even 32k.
+        text, meta = await _call_llm_streaming(prompt, max_tokens=32000)
         data = _extract_json(text)
         examples = data.get("examples", [])
+        if not examples:
+            logger.warning(
+                "call_synthesize_examples: fallback single-call produced 0 "
+                "examples (response len=%d chars) — likely a parse failure "
+                "or an empty LLM result",
+                len(text),
+            )
         # Single call: fire the hook once at the end so callers can still
         # persist + emit a "done" progress event uniformly.
         if on_cell is not None and examples:
@@ -1306,7 +1405,7 @@ async def call_review_examples(charter: dict, examples: list[dict]) -> tuple[lis
     """Auto-review examples against charter. Returns (reviews, call metadata list)."""
     await _refresh_settings()
     prompt = build_review_examples_prompt(charter, examples)
-    text, meta = _call_llm(prompt, max_tokens=4096)
+    text, meta = await _call_llm(prompt, max_tokens=4096)
     data = _extract_json(text)
     return data.get("reviews", []), [meta]
 
@@ -1324,7 +1423,7 @@ async def call_retag_examples_against_charter(
     """
     await _refresh_settings()
     prompt = build_retag_examples_against_charter_prompt(charter, examples)
-    text, meta = _call_llm(prompt, max_tokens=4096)
+    text, meta = await _call_llm(prompt, max_tokens=4096)
     data = _extract_json(text)
     return data.get("retags", []), [meta]
 
@@ -1339,7 +1438,7 @@ async def call_dataset_chat(
     """Chat turn in dataset phase. Returns (response text, call metadata list)."""
     await _refresh_settings()
     prompt = build_dataset_chat_prompt(charter, dataset_stats, user_message, conversation_history)
-    text, meta = _call_llm(prompt, max_tokens=2048)
+    text, meta = await _call_llm(prompt, max_tokens=2048)
     return text, [meta]
 
 
@@ -1354,7 +1453,7 @@ async def call_gap_analysis(charter: dict, dataset_stats: dict, examples: list[d
     """
     await _refresh_settings()
     prompt = build_gap_analysis_prompt(charter, dataset_stats, examples)
-    text, meta = _call_llm(prompt, max_tokens=2048)
+    text, meta = await _call_llm(prompt, max_tokens=2048)
     data = _extract_json(text)
     # Override whatever matrix the LLM produced with the deterministic count.
     data["coverage_matrix"] = _build_coverage_matrix(charter, examples)
@@ -1377,7 +1476,7 @@ async def call_generate_scorers(
     """
     await _refresh_settings()
     prompt = build_generate_scorers_prompt(charter, agent_contract=agent_contract)
-    text, meta = _call_llm(prompt, max_tokens=8192)
+    text, meta = await _call_llm(prompt, max_tokens=8192)
     data = _extract_json(text)
     return data.get("scorers", []), [meta]
 
@@ -1389,7 +1488,7 @@ async def call_revise_examples(charter: dict, examples_with_verdicts: list[dict]
     """Suggest revisions for examples that failed review. Returns (revisions, call metadata list)."""
     await _refresh_settings()
     prompt = build_revise_examples_prompt(charter, examples_with_verdicts)
-    text, meta = _call_llm(prompt, max_tokens=8192)
+    text, meta = await _call_llm(prompt, max_tokens=8192)
     data = _extract_json(text)
     return data.get("revisions", []), [meta]
 
@@ -1401,7 +1500,7 @@ async def call_detect_schema(content: str, content_type: str = "auto") -> tuple[
     """Detect schema from pasted content. Returns (schema data, call metadata list)."""
     await _refresh_settings()
     prompt = build_detect_schema_prompt(content, content_type)
-    text, meta = _call_llm(prompt, max_tokens=2048)
+    text, meta = await _call_llm(prompt, max_tokens=2048)
     data = _extract_json(text)
     return data, [meta]
 
@@ -1411,7 +1510,7 @@ async def call_infer_schema(examples: list[dict], charter: dict) -> tuple[dict, 
     """Infer schema from existing examples. Returns (inferred schema, call metadata list)."""
     await _refresh_settings()
     prompt = build_infer_schema_prompt(examples, charter)
-    text, meta = _call_llm(prompt, max_tokens=2048)
+    text, meta = await _call_llm(prompt, max_tokens=2048)
     data = _extract_json(text)
     return data, [meta]
 
@@ -1421,7 +1520,7 @@ async def call_import_from_url(content: str, url: str, detected_type: str) -> tu
     """Extract schema from URL content. Returns (schema data, call metadata list)."""
     await _refresh_settings()
     prompt = build_import_url_prompt(content, url, detected_type)
-    text, meta = _call_llm(prompt, max_tokens=2048)
+    text, meta = await _call_llm(prompt, max_tokens=2048)
     data = _extract_json(text)
     return data, [meta]
 
@@ -1445,7 +1544,7 @@ async def call_suggest_improvements(
     from .prompt import build_suggest_improvements_prompt
     await _refresh_settings()
     prompt = build_suggest_improvements_prompt(skill_body, eval_run, charter, clusters)
-    text, meta = _call_llm(prompt, max_tokens=4096)
+    text, meta = await _call_llm(prompt, max_tokens=4096)
     data = _extract_json(text)
     return data, [meta]
 
@@ -1465,7 +1564,7 @@ async def call_cluster_notes(
     from .prompt import build_cluster_notes_prompt
     await _refresh_settings()
     prompt = build_cluster_notes_prompt(notes, prior_labels)
-    text, meta = _call_llm(prompt, max_tokens=2048)
+    text, meta = await _call_llm(prompt, max_tokens=2048)
     data = _extract_json(text)
     return data, [meta]
 
@@ -1485,7 +1584,7 @@ async def call_skill_seed(
     from .prompt import build_skill_seed_prompt
     await _refresh_settings()
     prompt = build_skill_seed_prompt(skill_body, skill_name, skill_description)
-    text, meta = _call_llm(prompt, max_tokens=4096)
+    text, meta = await _call_llm(prompt, max_tokens=4096)
     data = _extract_json(text)
     # Scorer payload: SKILL.md content (with name/description header) as
     # input, the parsed seed bundle (goals/users/stories/task) as output.
@@ -1619,8 +1718,77 @@ def _parse_validation_status(s: str) -> ValidationStatus:
     return mapping.get(s, ValidationStatus.untested)
 
 
+def _salvage_truncated_json_array(text: str) -> dict:
+    """Best-effort recovery from a truncated ``{"<key>": [ {...}, {...}, ...``
+    response. The LLM hit the output-token cap mid-array, so the JSON won't
+    parse — but every *complete* object before the cut-off is still valid.
+
+    Walks the first ``"<key>": [`` array, tracking brace depth and string
+    state, and collects each top-level object that closed cleanly. Returns
+    ``{key: [recovered objects]}`` or ``{}`` if nothing is recoverable.
+
+    This is a safety net, not a substitute for not truncating — a truncated
+    response still loses the tail. Callers should size max_tokens so this
+    path is rare.
+    """
+    # Salvage the FIRST `"key": [` array in the response. Every payload
+    # this runs on — synth ("examples"), review ("reviews"), scorers
+    # ("scorers") — is a flat `{"<key>": [ ... ]}` with the array first,
+    # so "first array" == "the array we want". If a future prompt nests
+    # an array ahead of the real payload, this would target the wrong
+    # key and need a key hint passed in.
+    m = re.search(r'"(\w+)"\s*:\s*\[', text)
+    if not m:
+        return {}
+    key = m.group(1)
+    objs: list[dict] = []
+    depth = 0
+    in_str = False
+    escape = False
+    obj_start = -1
+    for i in range(m.end(), len(text)):
+        c = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            if depth == 0:
+                obj_start = i
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0 and obj_start >= 0:
+                try:
+                    objs.append(json.loads(text[obj_start:i + 1]))
+                except json.JSONDecodeError:
+                    pass  # partial object — skip it
+                obj_start = -1
+        elif c == "]" and depth == 0:
+            break  # array closed cleanly — nothing was truncated
+    if not objs:
+        return {}
+    logger.warning(
+        "Recovered %d complete %r objects from a truncated LLM response",
+        len(objs), key,
+    )
+    return {key: objs}
+
+
 def _extract_json(text: str) -> dict:
-    """Extract JSON from LLM response text, handling markdown code blocks."""
+    """Extract JSON from LLM response text, handling markdown code blocks.
+
+    On a clean parse failure — most often a response truncated at the
+    output-token cap — falls back to salvaging whatever complete objects
+    the leading array contains, so a clipped synth still yields rows
+    instead of an empty dataset.
+    """
     text = text.strip()
     if text.startswith("```"):
         lines = text.split("\n")
@@ -1628,10 +1796,15 @@ def _extract_json(text: str) -> dict:
         text = "\n".join(lines)
     start = text.find("{")
     end = text.rfind("}") + 1
-    if start >= 0 and end > start:
-        text = text[start:end]
+    trimmed = text[start:end] if (start >= 0 and end > start) else text
     try:
-        return json.loads(text)
+        return json.loads(trimmed)
     except json.JSONDecodeError as e:
+        # Salvage from the *untrimmed* text — rfind("}") on a truncated
+        # response lands on some inner object's brace, so `trimmed` is
+        # itself malformed. The salvage walker handles the raw stream.
+        salvaged = _salvage_truncated_json_array(text)
+        if salvaged:
+            return salvaged
         logger.error(f"Failed to parse LLM JSON response: {e}\nText: {text[:500]}")
         return {}

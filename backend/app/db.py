@@ -175,6 +175,24 @@ async def _create_tables() -> None:
         await conn.execute("""
             ALTER TABLE examples ALTER COLUMN expected_output DROP NOT NULL;
         """)
+        # Migration: scenario_type folds is_adversarial into a richer categorical
+        # (happy / edge / adversarial / degenerate) populated at synth time.
+        # NULL on legacy rows; the review prompt and Dataset QA UI treat NULL as
+        # "happy". We keep is_adversarial for legacy read-back but new writes
+        # use scenario_type exclusively.
+        await conn.execute("""
+            ALTER TABLE examples ADD COLUMN IF NOT EXISTS scenario_type TEXT;
+        """)
+        await conn.execute("""
+            ALTER TABLE examples ADD COLUMN IF NOT EXISTS difficulty TEXT;
+        """)
+        # tier marks how rows flow through the rest of the pipeline. "eval" is
+        # the default — auto-review + eval runs treat these as the working set.
+        # "golden" rows are hand-promoted and held to a higher bar; "discovery"
+        # rows are scratch-pad scenarios that haven't been vetted yet.
+        await conn.execute("""
+            ALTER TABLE examples ADD COLUMN IF NOT EXISTS tier TEXT NOT NULL DEFAULT 'eval';
+        """)
 
         # eval_runs: persisted Braintrust execution-eval runs. Previously lived
         # in an in-memory dict, so runs were lost on server restart. Now each
@@ -782,13 +800,16 @@ async def create_dataset_version(dataset_id: str, charter_snapshot: dict) -> dic
             await conn.execute(
                 """
                 INSERT INTO examples (id, dataset_id, feature_area, input, expected_output,
-                    coverage_tags, source, label, label_reason, review_status, reviewer_notes, judge_verdict)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    coverage_tags, source, label, label_reason, review_status, reviewer_notes, judge_verdict,
+                    should_trigger, is_adversarial, scenario_type, difficulty, tier)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
                 """,
                 str(uuid.uuid4()), new_id, ex["feature_area"], ex["input"], ex["expected_output"],
                 json.dumps(ex.get("coverage_tags", [])), ex["source"], ex["label"],
                 ex.get("label_reason"), ex["review_status"], ex.get("reviewer_notes"),
                 json.dumps(ex.get("judge_verdict")) if ex.get("judge_verdict") else None,
+                ex.get("should_trigger"), ex.get("is_adversarial"),
+                ex.get("scenario_type"), ex.get("difficulty"), ex.get("tier", "eval"),
             )
 
         return _parse_dataset_row(row)
@@ -908,6 +929,9 @@ async def create_example(
     label_reason: str | None = None,
     should_trigger: bool | None = None,
     is_adversarial: bool | None = None,
+    scenario_type: str | None = None,
+    difficulty: str | None = None,
+    tier: str = "eval",
 ) -> dict:
     pool = await get_pool()
     example_id = str(uuid.uuid4())
@@ -915,13 +939,15 @@ async def create_example(
         row = await conn.fetchrow(
             """
             INSERT INTO examples (id, dataset_id, feature_area, input, expected_output,
-                coverage_tags, source, label, label_reason, should_trigger, is_adversarial)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                coverage_tags, source, label, label_reason, should_trigger, is_adversarial,
+                scenario_type, difficulty, tier)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             RETURNING *
             """,
             example_id, dataset_id, feature_area, input_text, expected_output,
             json.dumps(coverage_tags or []), source, label, label_reason,
             should_trigger, is_adversarial,
+            scenario_type, difficulty, tier,
         )
         result = _parse_example_row(row)
     await _broadcast_dataset_change(dataset_id)
@@ -937,8 +963,8 @@ async def bulk_create_examples(dataset_id: str, examples: list[dict]) -> list[di
                 """
                 INSERT INTO examples (id, dataset_id, feature_area, input, expected_output,
                     coverage_tags, source, label, label_reason, review_status,
-                    should_trigger, is_adversarial)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    should_trigger, is_adversarial, scenario_type, difficulty, tier)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 RETURNING *
                 """,
                 str(uuid.uuid4()), dataset_id, ex["feature_area"], ex["input"],
@@ -948,6 +974,9 @@ async def bulk_create_examples(dataset_id: str, examples: list[dict]) -> list[di
                 ex.get("review_status", "pending"),
                 ex.get("should_trigger"),
                 ex.get("is_adversarial"),
+                ex.get("scenario_type"),
+                ex.get("difficulty"),
+                ex.get("tier", "eval"),
             )
             results.append(_parse_example_row(row))
     if results:
@@ -994,7 +1023,8 @@ async def update_example(example_id: str, fields: dict) -> dict:
     pool = await get_pool()
     allowed = {"feature_area", "input", "expected_output", "coverage_tags", "label",
                "label_reason", "review_status", "reviewer_notes", "judge_verdict",
-               "revision_suggestion", "should_trigger", "is_adversarial"}
+               "revision_suggestion", "should_trigger", "is_adversarial",
+               "scenario_type", "difficulty", "tier"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         raise ValueError("No valid fields to update")
@@ -1123,8 +1153,8 @@ async def replace_examples_for_dataset(
                     """
                     INSERT INTO examples (id, dataset_id, feature_area, input, expected_output,
                         coverage_tags, source, label, label_reason, review_status,
-                        should_trigger, is_adversarial)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                        should_trigger, is_adversarial, scenario_type, difficulty, tier)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                     """,
                     str(uuid.uuid4()), dataset_id, ex["feature_area"], ex["input"],
                     ex.get("expected_output", "") or "",
@@ -1133,6 +1163,9 @@ async def replace_examples_for_dataset(
                     ex.get("review_status", "pending"),
                     ex.get("should_trigger"),
                     ex.get("is_adversarial"),
+                    ex.get("scenario_type"),
+                    ex.get("difficulty"),
+                    ex.get("tier", "eval"),
                 )
             return removed
 

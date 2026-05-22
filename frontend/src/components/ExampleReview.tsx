@@ -1,28 +1,21 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { ChevronDown, Check, X, RefreshCw, Pencil, Trash2, Loader2 } from 'lucide-react'
-import type { Example, Charter } from '../types'
+import { ChevronDown, Check, X, RefreshCw, Pencil, Trash2, Loader2, MoreHorizontal } from 'lucide-react'
+import type { Example, Charter, GapAnalysis, JudgeAgreement } from '../types'
 import DeleteModal from './examples/DeleteModal'
 import GenerateModal from './examples/GenerateModal'
+import CharterSidebar from './CharterSidebar'
 
-type CellId = 'scenario' | 'input' | 'output' | 'labels' | 'status'
-type ActionId = 'approve' | 'reject' | 'relabel' | 'edit' | 'delete'
-
-const CELL_ORDER: CellId[] = ['scenario', 'input', 'output', 'labels', 'status']
-
-// What action set is contextually relevant when each cell is focused.
-// Status owns approve/reject, labels owns relabel, input/output own edit,
-// scenario owns delete (the row-level destructive action).
-const ACTIONS_BY_CELL: Record<CellId, ActionId[]> = {
-  scenario: ['delete'],
-  input: ['edit'],
-  output: ['edit'],
-  labels: ['relabel'],
-  status: ['approve', 'reject'],
-}
+type CellId = 'input' | 'output' | 'labels' | 'status'
+const CELL_ORDER: CellId[] = ['input', 'output', 'labels', 'status']
 
 interface ExampleReviewProps {
   examples: Example[]
   charter: Charter
+  /** Charter at the time the dataset was created. The sidebar uses this for
+   *  the alignment lookup because rows' feature_area strings are normalized
+   *  against the snapshot at synth time — checking the live charter would
+   *  miss matches whenever the user edited the charter post-synth. */
+  charterSnapshot?: Charter | null
   loading: boolean
   /** Distinguishes "generating new examples" (long-running, blocking) from
    *  smaller utility loads like Auto-review or Suggest revisions. When true,
@@ -44,14 +37,31 @@ interface ExampleReviewProps {
   onSynthesize: (count?: number) => void
   onAutoReview: () => void
   onExport: () => void
+  /** Opens the full Coverage Map matrix in a modal. The matrix lives in a
+   *  modal/subpage so the row workspace stays focused on per-row review;
+   *  the sidebar carries the at-a-glance signal (radar + score). */
   onShowCoverageMap: () => void
+  /** Cached gap analysis. Drives the compact coverage summary in the
+   *  sidebar (radar + score + "Improve coverage" CTA). */
+  gaps?: GapAnalysis | null
+  /** Judge-human label agreement, rendered next to the stats counts. */
+  agreement?: JudgeAgreement | null
+  /** Bulk "fix every empty cell" — surfaced from the sidebar's compact
+   *  coverage summary. The matrix's per-cell "+" buttons live in the modal. */
+  onRequestFillGaps?: () => void
+  /** Navigate to the Charter tab's alignment section. Surfaced by the
+   *  sidebar's "Add alignment criteria" CTA when the focused row's
+   *  feature_area has no matching alignment entry. */
+  onAddAlignmentCriteria?: () => void
+  /** Generate more examples scoped to a single feature_area. Surfaced as
+   *  a small "+ Add" affordance on each group separator so reviewers can
+   *  request more rows for a specific area without going through the
+   *  toolbar Generate button. */
+  onAddForFeatureArea?: (featureArea: string) => void
   onNavigateToScorers?: () => void
   onHeaderClick?: () => void
   isFocused?: boolean
   coverageGaps?: { uncoveredCount: number; totalScenarios: number } | null
-  /** 0–1 dataset coverage score, used for the dot on the "Coverage map"
-   *  button. Null when no matrix has been computed yet. */
-  coverageScore?: number | null
   onSuggestRevision?: (exampleId: string) => void
   onSuggestRevisions?: () => void
   onAcceptRevision?: (exampleId: string) => void
@@ -86,6 +96,7 @@ const UNMAPPED_FEATURE_AREA = '(unmapped)'
 export default function ExampleReview({
   examples,
   charter,
+  charterSnapshot,
   loading,
   generating = false,
   generatingTotal,
@@ -96,11 +107,15 @@ export default function ExampleReview({
   onAutoReview,
   onExport,
   onShowCoverageMap,
+  gaps,
+  agreement: _agreement,
+  onRequestFillGaps,
+  onAddAlignmentCriteria,
+  onAddForFeatureArea,
   onNavigateToScorers: _onNavigateToScorers,
   onHeaderClick: _onHeaderClick,
   isFocused,
   coverageGaps,
-  coverageScore,
   onSuggestRevision,
   onSuggestRevisions,
   onAcceptRevision,
@@ -140,6 +155,20 @@ export default function ExampleReview({
     setFilterStatus('')
   }
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  // Row in view (topmost visible). Updates as the user scrolls so the
+  // sidebar's charter criteria track what the eye is on, without
+  // hijacking the click-selected row. Falls back to selectedId.
+  const [scrollFocusedId, setScrollFocusedId] = useState<string | null>(null)
+  // Which input last changed the focused row. Explicit selection (click or
+  // arrow-key nav) wins over scroll: once the user has actively picked a
+  // row, scrolling away doesn't move the sidebar off it. Scroll only drives
+  // the sidebar before the user has interacted (default) or never if they
+  // have. The 'click' tag covers both pointer clicks and keyboard
+  // navigation — both are explicit user picks.
+  const [lastFocusSource, setLastFocusSource] = useState<'click' | 'scroll'>(
+    'scroll',
+  )
+  const listScrollRef = useRef<HTMLDivElement | null>(null)
   const [focusedCell, setFocusedCell] = useState<CellId>('status')
 
   // Polaris nav: when the agent runs `nav_example`, ProjectWorkspace switches
@@ -176,16 +205,17 @@ export default function ExampleReview({
   }, [])
   // Edit state carries both row id and which cell is being edited so only
   // that one cell becomes a textarea. The other cells stay read-only.
-  const [editing, setEditing] = useState<{ id: string; cell: 'input' | 'output' } | null>(null)
+  const [editing, setEditing] = useState<{ id: string; cell: 'input' | 'output' | 'labels' } | null>(null)
   const editingId = editing?.id ?? null
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
   const [showGenerateModal, setShowGenerateModal] = useState(false)
 
-  // Edit defaults to whichever of input/output is focused. If the focused
-  // cell isn't one of those, fall back to input — the action button is in
-  // 'outline' state for non-edit cells, but still works.
+  // Edit targets the focused cell when it's an editable one (input /
+  // output / labels). Falls back to input otherwise — that's the most
+  // common edit target.
   const beginEdit = useCallback((exampleId: string) => {
-    const cell = focusedCell === 'output' ? 'output' : 'input'
+    const cell: 'input' | 'output' | 'labels' =
+      focusedCell === 'output' || focusedCell === 'labels' ? focusedCell : 'input'
     setEditing({ id: exampleId, cell })
   }, [focusedCell])
 
@@ -297,6 +327,46 @@ export default function ExampleReview({
 
   const selectedIndex = orderedExamples.findIndex(e => e.id === selectedId)
   const selectedExample = orderedExamples.find(e => e.id === selectedId)
+  // Sidebar's focused row: click wins. After an explicit click, the sidebar
+  // pins to the selected row and stays there even as the user scrolls
+  // through nearby rows. A subsequent click on a different row moves the
+  // pin; scroll alone never overrides a pin.
+  const focusedExample = useMemo(() => {
+    if (lastFocusSource === 'click') return selectedExample
+    return orderedExamples.find(e => e.id === scrollFocusedId) ?? selectedExample
+  }, [lastFocusSource, orderedExamples, scrollFocusedId, selectedExample])
+
+  // Watch which rows are intersecting the list viewport; the topmost
+  // intersecting one becomes the sidebar's focused row. Re-bound whenever
+  // the rendered set changes (filter / synth landing new rows).
+  useEffect(() => {
+    const root = listScrollRef.current
+    if (!root) return
+    const rowEls = Array.from(
+      root.querySelectorAll<HTMLElement>("[data-row-id]"),
+    )
+    if (rowEls.length === 0) return
+
+    const visibleIds = new Set<string>()
+    const observer = new IntersectionObserver(
+      entries => {
+        for (const entry of entries) {
+          const id = entry.target.getAttribute("data-row-id")
+          if (!id) continue
+          if (entry.isIntersecting) visibleIds.add(id)
+          else visibleIds.delete(id)
+        }
+        // Pick the topmost visible row by walking orderedExamples and
+        // grabbing the first match. Walking in render order is cheaper
+        // than reading bounding rects per entry.
+        const topmost = orderedExamples.find(e => visibleIds.has(e.id))
+        if (topmost) setScrollFocusedId(topmost.id)
+      },
+      { root, threshold: 0 },
+    )
+    rowEls.forEach(el => observer.observe(el))
+    return () => observer.disconnect()
+  }, [orderedExamples])
 
   const examplesWithIssues = examples.filter(
     ex => ex.judge_verdict?.issues && ex.judge_verdict.issues.length > 0 && !ex.revision_suggestion,
@@ -322,13 +392,20 @@ export default function ExampleReview({
         case 'ArrowUp':
         case 'k':
           e.preventDefault()
-          if (selectedIndex > 0) setSelectedId(orderedExamples[selectedIndex - 1].id)
+          if (selectedIndex > 0) {
+            setSelectedId(orderedExamples[selectedIndex - 1].id)
+            // Keyboard nav counts as an explicit selection — pin the
+            // sidebar to it just like a click would.
+            setLastFocusSource('click')
+          }
           break
         case 'ArrowDown':
         case 'j':
           e.preventDefault()
-          if (selectedIndex < orderedExamples.length - 1)
+          if (selectedIndex < orderedExamples.length - 1) {
             setSelectedId(orderedExamples[selectedIndex + 1].id)
+            setLastFocusSource('click')
+          }
           break
         case 'ArrowLeft': {
           e.preventDefault()
@@ -351,6 +428,7 @@ export default function ExampleReview({
           break
         case 'e':
         case 'E':
+        case 'Enter':
           if (selectedExample) {
             e.preventDefault()
             beginEdit(selectedExample.id)
@@ -419,11 +497,29 @@ export default function ExampleReview({
     pending: examples.filter(e => e.review_status === 'pending').length,
     approved: examples.filter(e => e.review_status === 'approved').length,
     rejected: examples.filter(e => e.review_status === 'rejected').length,
+    needsEdit: examples.filter(e => e.review_status === 'needs_edit').length,
+    good: examples.filter(e => e.label === 'good').length,
+    bad: examples.filter(e => e.label === 'bad').length,
+    unlabeled: examples.filter(e => e.label === 'unlabeled').length,
     // Rows tagged "new" in coverage_tags arrived via the prompt-eval
     // auto-refresh (turns landed since the last visit). Surface the count
     // in the header so the user notices fresh evidence without digging.
     newSinceRefresh: examples.filter(e => (e.coverage_tags || []).includes('new')).length,
   }
+  // Per-feature_area row counts. Computed across `examples` (not the
+  // filtered set) so the dropdown numbers are stable while the user
+  // narrows down — otherwise picking a status would shrink the area
+  // counts back to what's currently visible, which makes the dropdown
+  // unhelpful for navigation.
+  const areaCounts = useMemo(() => {
+    const m: Record<string, number> = {}
+    for (const ex of examples) {
+      const fa = ex.feature_area || ''
+      m[fa] = (m[fa] ?? 0) + 1
+    }
+    return m
+  }, [examples])
+  const unmappedCount = areaCounts[UNMAPPED_FEATURE_AREA] ?? 0
 
   const actOnSelected = (fn: (ex: Example) => void) => {
     if (selectedExample) fn(selectedExample)
@@ -493,86 +589,88 @@ export default function ExampleReview({
         </div>
       )}
 
-      {/* Page body — title + filters + grouped table */}
+      {/* Page body + right rail. The rail is a sibling of the body (not
+          nested inside its padding) so its left border runs the full
+          dataset workspace height — matching the rail layout on Scorers /
+          Evaluate. */}
+      <div className="flex-1 min-h-0 flex overflow-hidden">
       <div
-        className={`flex-1 min-h-0 flex flex-col gap-6 p-6 overflow-hidden ${
+        className={`flex-1 min-w-0 flex flex-col gap-6 pt-6 pr-6 pb-0 overflow-hidden ${
           generating ? "pointer-events-none select-none" : ""
         }`}
       >
-        {/* Title */}
-        <h1 className="text-xl font-semibold text-fg-contrast leading-none">Dataset</h1>
-
-        {/* Stats + dataset-level utilities (Coverage map / Export / Auto-review /
-            Suggest revisions / Generate). Sits directly under the title — these
-            are about the dataset as a whole. Filters and per-row actions live
-            in a second toolbar below. */}
-        <div className="flex items-center justify-between gap-2 flex-wrap">
-          <div className="text-xs text-fg-dim">
-            {stats.total} total · {stats.pending} pending · {stats.approved} approved
-            {stats.newSinceRefresh > 0 && (
-              <>
-                {' · '}
-                <span className="text-accent font-medium">{stats.newSinceRefresh} new</span>
-              </>
-            )}
+        {/* Title row with dataset-level actions inline on the right.
+            Title + subtitle styling mirrors CharterPanel (via PanelLayout)
+            so the page headers feel consistent across tabs. */}
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <h2 className="text-2xl font-medium text-fg-contrast">Dataset</h2>
+            <p className="text-base text-fg-dim mt-1">
+              The test cases your eval will run against — review for quality, not model performance.
+            </p>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={onShowCoverageMap}
-              className="flex items-center gap-1.5 px-2 py-1 text-xs text-fg-dim hover:text-fg-contrast border border-border-hint transition-colors"
-            >
-              {coverageScore != null && <CoverageDot score={coverageScore} />}
-              Coverage map
-            </button>
-            <button
-              onClick={onExport}
-              disabled={stats.approved === 0}
-              className="px-2 py-1 text-xs text-fg-dim hover:text-fg-contrast border border-border-hint transition-colors disabled:opacity-40"
-            >
-              Export
-            </button>
-            {canEdit && (
-              <button
-                onClick={onAutoReview}
-                disabled={loading || stats.pending === 0}
-                className="px-2 py-1 text-xs border border-border-hint hover:bg-fill-neutral transition-colors disabled:opacity-50"
-              >
-                Auto-review
-              </button>
-            )}
-            {canEdit && onRetagAgainstCharter && (
-              <button
-                onClick={onRetagAgainstCharter}
-                disabled={loading || retagLoading || stats.total === 0}
-                className="px-2 py-1 text-xs border border-border-hint hover:bg-fill-neutral transition-colors disabled:opacity-50"
-                title="Re-tag every row's feature_area and coverage_tags against the current charter. Useful after generating or editing the charter so the Coverage Map matrix lines up."
-              >
-                {retagLoading ? 'Retagging…' : 'Retag against charter'}
-              </button>
-            )}
-            {canEdit && onSuggestRevisions && (
-              <button
-                onClick={onSuggestRevisions}
-                disabled={loading || revisionsLoading || examplesWithIssues === 0}
-                className="px-2 py-1 text-xs border border-border-hint hover:bg-fill-neutral transition-colors disabled:opacity-50"
-                title="Suggest fixes for examples auto-review flagged with issues. Doesn't change the good/bad label — just refines the input or expected_output to better match the scenario."
-              >
-                {revisionsLoading
-                  ? 'Suggesting...'
-                  : `Fix flagged${examplesWithIssues > 0 ? ` (${examplesWithIssues})` : ''}`}
-              </button>
-            )}
+          <div className="flex items-center gap-2 flex-wrap">
+            <OverflowMenu
+              items={[
+                {
+                  label: 'Export JSON',
+                  hint: 'Download approved rows as a JSON file.',
+                  onClick: onExport,
+                },
+                ...(canEdit
+                  ? [{
+                      label: 'Auto-review',
+                      hint: 'Run the LLM judge on pending rows to suggest good/bad and flag issues.',
+                      onClick: onAutoReview,
+                      disabled: loading || stats.pending === 0,
+                    }]
+                  : []),
+                ...(canEdit && onRetagAgainstCharter
+                  ? [{
+                      label: retagLoading ? 'Retagging…' : 'Retag against charter',
+                      hint: "Re-tag every row's feature_area and coverage_tags against the current charter. Useful after generating or editing the charter so the Coverage Map matrix lines up.",
+                      onClick: onRetagAgainstCharter,
+                      disabled: loading || retagLoading || stats.total === 0,
+                    }]
+                  : []),
+                ...(canEdit && onSuggestRevisions
+                  ? [{
+                      label: revisionsLoading
+                        ? 'Suggesting…'
+                        : `Fix flagged${examplesWithIssues > 0 ? ` (${examplesWithIssues})` : ''}`,
+                      hint: "Suggest fixes for rows the judge flagged with issues (only enabled after auto-review marks at least one row's judge_verdict.issues). Doesn't change the good/bad label — just refines the input or expected_output.",
+                      onClick: onSuggestRevisions,
+                      disabled: loading || revisionsLoading || examplesWithIssues === 0,
+                    }]
+                  : []),
+              ]}
+            />
             {canEdit && (
               <button
                 onClick={() => setShowGenerateModal(true)}
                 disabled={loading}
-                className="px-2.5 py-1 text-xs bg-fill-primary text-bg-default hover:bg-fill-primary-hover transition-colors disabled:opacity-50"
+                className="px-2.5 py-1 text-xs border border-border-hint hover:bg-fill-neutral transition-colors disabled:opacity-50 inline-flex items-center gap-1.5"
               >
-                {loading ? 'Generating...' : 'Generate'}
+                {loading && <Loader2 className="w-3 h-3 animate-spin" />}
+                {loading ? 'Generating…' : 'Generate more'}
               </button>
             )}
           </div>
         </div>
+
+        {/* JudgeAgreementBadge is intentionally hidden for now — the
+            metric is computed and the endpoint still serves it, but with
+            small reviewed counts it's noise more than signal. Re-enable
+            when there's a story for how reviewers should act on it.
+            "New since refresh" is still worth surfacing for prompt-eval
+            workflows. */}
+        {stats.newSinceRefresh > 0 && (
+          <div className="flex items-center gap-3 flex-wrap text-xs text-fg-dim -mt-3">
+            <span className="text-accent font-medium">
+              {stats.newSinceRefresh} new since refresh
+            </span>
+          </div>
+        )}
 
         {/* Filters + per-row actions — sits closer to the table since it
             scopes to which rows are shown and what to do with the selected
@@ -582,56 +680,73 @@ export default function ExampleReview({
             <FilterSelect
               value={filterArea}
               onChange={setFilterArea}
-              placeholder="All areas"
+              placeholder={`All areas (${stats.total})`}
               options={[
-                ...featureAreas.map(a => ({ value: a, label: a })),
+                ...featureAreas.map(a => ({
+                  value: a,
+                  label: `${a} (${areaCounts[a] ?? 0})`,
+                })),
                 // Surface the synthetic "(unmapped)" option only when there
                 // are rows that match it — listing it on a clean dataset
                 // would just be noise.
                 ...(hasUnmappedRows
-                  ? [{ value: UNMAPPED_FEATURE_AREA, label: 'Unmapped (no alignment)' }]
+                  ? [{
+                      value: UNMAPPED_FEATURE_AREA,
+                      label: `Unmapped — no alignment (${unmappedCount})`,
+                    }]
                   : []),
               ]}
             />
             <FilterSelect
               value={filterLabel}
               onChange={setFilterLabel}
-              placeholder="All labels"
+              placeholder={`All labels (${stats.total})`}
               options={[
-                { value: 'good', label: 'Good' },
-                { value: 'bad', label: 'Bad' },
-                { value: 'unlabeled', label: 'Unlabeled' },
+                { value: 'good', label: `Good (${stats.good})` },
+                { value: 'bad', label: `Bad (${stats.bad})` },
+                { value: 'unlabeled', label: `Unlabeled (${stats.unlabeled})` },
               ]}
             />
             <FilterSelect
               value={filterStatus}
               onChange={setFilterStatus}
-              placeholder="All status"
+              placeholder={`All status (${stats.total})`}
               options={[
-                { value: 'pending', label: 'Pending' },
-                { value: 'approved', label: 'Approved' },
-                { value: 'rejected', label: 'Rejected' },
-                { value: 'needs_edit', label: 'Needs edit' },
+                { value: 'pending', label: `Pending (${stats.pending})` },
+                { value: 'approved', label: `Approved (${stats.approved})` },
+                { value: 'rejected', label: `Rejected (${stats.rejected})` },
+                { value: 'needs_edit', label: `Needs edit (${stats.needsEdit})` },
               ]}
             />
           </div>
 
           {canEdit && (
+            // Variants are static per action — they don't flip based on
+            // which cell is focused. Approve / Reject are the primary
+            // decisions (neutral, filled); Delete / Edit / Relabel are
+            // secondary (outline). Keeps the action cluster visually
+            // stable as the user navigates rows.
             <div className="flex items-center gap-2 flex-wrap">
               <ActionButton
-                icon={<Check className="w-4 h-4" />}
-                shortcut="A"
-                label="pprove"
-                variant={ACTIONS_BY_CELL[focusedCell].includes('approve') ? 'neutral' : 'outline'}
-                onClick={() => actOnSelected(ex => onUpdateExample(ex.id, { review_status: 'approved' }))}
+                icon={<Trash2 className="w-4 h-4" />}
+                shortcut="D"
+                label="elete"
+                iconOnly
+                ariaLabel="Delete (D)"
+                title="Delete (D)"
+                variant="outline"
+                onClick={() => actOnSelected(ex => setDeleteConfirmId(ex.id))}
                 disabled={!selectedExample}
               />
               <ActionButton
-                icon={<X className="w-4 h-4" />}
-                shortcut="R"
-                label="eject"
-                variant={ACTIONS_BY_CELL[focusedCell].includes('reject') ? 'neutral' : 'outline'}
-                onClick={() => actOnSelected(ex => onUpdateExample(ex.id, { review_status: 'rejected' }))}
+                icon={<Pencil className="w-4 h-4" />}
+                shortcut="E"
+                label="dit"
+                iconOnly
+                ariaLabel="Edit (E)"
+                title="Edit (E)"
+                variant="outline"
+                onClick={() => actOnSelected(ex => beginEdit(ex.id))}
                 disabled={!selectedExample}
               />
               <ActionButton
@@ -639,7 +754,7 @@ export default function ExampleReview({
                 prefix="Re"
                 shortcut="l"
                 label="abel"
-                variant={ACTIONS_BY_CELL[focusedCell].includes('relabel') ? 'neutral' : 'outline'}
+                variant="outline"
                 onClick={() =>
                   actOnSelected(ex =>
                     onUpdateExample(ex.id, { label: ex.label === 'good' ? 'bad' : 'good' }),
@@ -648,27 +763,28 @@ export default function ExampleReview({
                 disabled={!selectedExample}
               />
               <ActionButton
-                icon={<Pencil className="w-4 h-4" />}
-                shortcut="E"
-                label="dit"
-                variant={ACTIONS_BY_CELL[focusedCell].includes('edit') ? 'neutral' : 'outline'}
-                onClick={() => actOnSelected(ex => beginEdit(ex.id))}
+                icon={<X className="w-4 h-4" />}
+                shortcut="R"
+                label="eject"
+                variant="neutral"
+                onClick={() => actOnSelected(ex => onUpdateExample(ex.id, { review_status: 'rejected' }))}
                 disabled={!selectedExample}
               />
               <ActionButton
-                icon={<Trash2 className="w-4 h-4" />}
-                shortcut="D"
-                label="elete"
-                variant={ACTIONS_BY_CELL[focusedCell].includes('delete') ? 'neutral' : 'outline'}
-                onClick={() => actOnSelected(ex => setDeleteConfirmId(ex.id))}
+                icon={<Check className="w-4 h-4" />}
+                shortcut="A"
+                label="pprove"
+                variant="neutral"
+                onClick={() => actOnSelected(ex => onUpdateExample(ex.id, { review_status: 'approved' }))}
                 disabled={!selectedExample}
               />
             </div>
           )}
         </div>
 
-        {/* Grouped list */}
-        <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-0">
+        {/* Grouped list. The right rail is rendered as a sibling of this
+            page body so it spans the full dataset workspace height. */}
+        <div ref={listScrollRef} className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-0">
           {filtered.length === 0 && filterStatus === 'pending' && stats.total > 0 ? (
             <div className="flex-1 flex flex-col items-center justify-center">
               <div className="text-center max-w-sm">
@@ -698,7 +814,7 @@ export default function ExampleReview({
                     disabled={stats.approved === 0}
                     className="w-full py-2.5 px-4 bg-fill-primary text-bg-default text-sm font-medium hover:bg-fill-primary-hover transition-colors disabled:opacity-50"
                   >
-                    Export dataset ({stats.approved} examples)
+                    Export JSON ({stats.approved} approved)
                   </button>
                 </div>
               </div>
@@ -716,7 +832,14 @@ export default function ExampleReview({
                 {groups.map(([groupName, items], gi) => (
                   <div key={groupName} className="flex flex-col">
                     {gi > 0 && <div className="h-4" />}
-                    <GroupHeader name={groupName} />
+                    <GroupHeader
+                      name={groupName}
+                      onAdd={
+                        canEdit && onAddForFeatureArea && groupName !== '(unmapped)' && groupName !== '(off-target)'
+                          ? () => onAddForFeatureArea(groupName)
+                          : undefined
+                      }
+                    />
                     {items.map(ex => (
                       <ExampleRow
                         key={ex.id}
@@ -724,10 +847,14 @@ export default function ExampleReview({
                         isSelected={selectedId === ex.id}
                         editingCell={editing?.id === ex.id ? editing.cell : null}
                         focusedCell={focusedCell}
-                        onSelect={() => setSelectedId(ex.id)}
+                        onSelect={() => {
+                          setSelectedId(ex.id)
+                          setLastFocusSource('click')
+                        }}
                         onCellSelect={cell => {
                           setSelectedId(ex.id)
                           setFocusedCell(cell)
+                          setLastFocusSource('click')
                         }}
                         onUpdate={fields => onUpdateExample(ex.id, fields)}
                         onCancelEdit={() => setEditing(null)}
@@ -743,6 +870,18 @@ export default function ExampleReview({
             </>
           )}
         </div>
+      </div>
+      <CharterSidebar
+        charter={charter}
+        charterSnapshot={charterSnapshot}
+        focusedFeatureArea={focusedExample?.feature_area}
+        focusedCoverageTags={focusedExample?.coverage_tags ?? []}
+        gaps={gaps}
+        onOpenCoverageMatrix={onShowCoverageMap}
+        onRequestFillGaps={onRequestFillGaps}
+        fillingGaps={loading}
+        onAddAlignmentCriteria={onAddAlignmentCriteria}
+      />
       </div>
 
       {deleteConfirmId && (
@@ -779,12 +918,16 @@ function FilterSelect({
 }) {
   // Native <select> styled to look like the Figma ButtonMed:
   // dark surface, hint border, mono label, chevron on the right.
+  // Capped at 200px so the filter cluster doesn't crowd the per-row
+  // action buttons on the right — long option labels still expand in
+  // the native dropdown popup when open.
   return (
-    <div className="relative">
+    <div className="relative w-[180px]">
       <select
         value={value}
         onChange={e => onChange(e.target.value)}
-        className="appearance-none h-10 pl-3 pr-9 text-sm font-mono font-semibold text-fg-contrast bg-transparent border border-border-hint hover:bg-fill-neutral transition-colors cursor-pointer focus:outline-none focus:border-border-primary"
+        title={options.find(o => o.value === value)?.label || placeholder}
+        className="w-full appearance-none h-10 pl-3 pr-9 text-sm font-mono font-semibold text-fg-contrast bg-transparent border border-border-hint hover:bg-fill-neutral transition-colors cursor-pointer focus:outline-none focus:border-border-primary truncate"
       >
         <option value="">{placeholder}</option>
         {options.map(o => (
@@ -806,6 +949,9 @@ function ActionButton({
   onClick,
   disabled,
   variant = 'neutral',
+  iconOnly = false,
+  ariaLabel,
+  title,
 }: {
   icon?: React.ReactNode
   prefix?: string
@@ -814,6 +960,11 @@ function ActionButton({
   onClick: () => void
   disabled?: boolean
   variant?: 'neutral' | 'outline'
+  /** Hide the label text and render the icon only. The keyboard shortcut
+   *  still works; the label travels into aria-label / title for a11y. */
+  iconOnly?: boolean
+  ariaLabel?: string
+  title?: string
 }) {
   // 'neutral' = filled — used for actions relevant to the focused cell.
   // 'outline' = transparent w/ border — actions still available but
@@ -822,18 +973,23 @@ function ActionButton({
     variant === 'neutral'
       ? 'bg-fill-neutral text-fg-contrast hover:bg-fill-neutral-hover'
       : 'bg-transparent text-fg-contrast border border-border-hint hover:bg-fill-neutral'
+  const paddingCls = iconOnly ? 'h-10 w-10 justify-center' : 'h-10 px-2'
   return (
     <button
       onClick={onClick}
       disabled={disabled}
-      className={`h-10 px-2 flex items-center gap-2 text-sm font-mono font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${variantCls}`}
+      aria-label={ariaLabel ?? (iconOnly ? `${prefix ?? ''}${shortcut}${label}` : undefined)}
+      title={title ?? (iconOnly ? `${prefix ?? ''}${shortcut}${label} (${shortcut.toUpperCase()})` : undefined)}
+      className={`${paddingCls} flex items-center gap-2 text-sm font-mono font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${variantCls}`}
     >
       {icon}
-      <span className="leading-none">
-        {prefix}
-        <span className="underline">{shortcut}</span>
-        {label}
-      </span>
+      {!iconOnly && (
+        <span className="leading-none">
+          {prefix}
+          <span className="underline">{shortcut}</span>
+          {label}
+        </span>
+      )}
     </button>
   )
 }
@@ -841,21 +997,35 @@ function ActionButton({
 /* ── Table parts ────────────────────────────────────────────────── */
 
 function ColumnHeaderRow() {
+  // Sticky at the top of the scroll area so column labels stay anchored
+  // as the user scrolls through rows. GroupHeader sits below this (its
+  // `top` accounts for this row's height).
   return (
-    <div className="flex items-end gap-4 px-4 py-2 text-sm text-fg-contrast">
-      <div className="flex-1 basis-0">Scenario</div>
+    <div className="sticky top-0 z-20 bg-bg-default flex items-end gap-2 p-2 text-[10px] uppercase tracking-wide text-fg-dim">
       <div className="flex-1 basis-0">Input</div>
-      <div className="flex-1 basis-0">Output</div>
+      <div className="flex-1 basis-0">Expected output</div>
       <div className="w-[200px] flex-shrink-0">Labels</div>
       <div className="w-[100px] flex-shrink-0">Status</div>
     </div>
   )
 }
 
-function GroupHeader({ name }: { name: string }) {
+function GroupHeader({ name, onAdd }: { name: string; onAdd?: () => void }) {
+  // Sticky so the section label stays pinned while scrolling. Criteria for
+  // the focused row live in the right sidebar — keeping the header to the
+  // section name only avoids duplicating that info on every separator.
   return (
-    <div className="px-4 py-2 bg-gray-200">
+    <div className="sticky top-[28px] z-10 py-2 px-4 bg-gray-200 flex items-center justify-between gap-2">
       <span className="text-sm font-semibold text-white font-sans">{name}</span>
+      {onAdd && (
+        <button
+          onClick={onAdd}
+          className="text-xs font-medium text-white/80 hover:text-white px-2 py-0.5 border border-white/30 hover:border-white/60 transition-colors"
+          title={`Generate more examples for ${name}`}
+        >
+          + Add
+        </button>
+      )}
     </div>
   )
 }
@@ -879,7 +1049,7 @@ function ExampleRow({
   example: Example
   isSelected: boolean
   /** Which single cell is being edited on this row. Null means read-only. */
-  editingCell: 'input' | 'output' | null
+  editingCell: 'input' | 'output' | 'labels' | null
   focusedCell: CellId
   onSelect: () => void
   onCellSelect: (cell: CellId) => void
@@ -890,21 +1060,44 @@ function ExampleRow({
   onSuggestRevision?: (exampleId: string) => void
   onStartEdit: () => void
 }) {
-  // Light-grey wash on the focused cell, with a 2px transparent gap on all
-  // sides (achieved via padding + bg-clip-content). Padding stays applied
-  // to every cell so non-focused → focused doesn't shift content.
+  // Cell focus wash with a 2px transparent gap (padding + bg-clip-content).
+  // We use bg-fill-neutral-hover so the highlight is visible against every
+  // row state — default (gray-150), hover (also fill-neutral-hover, which
+  // blends but the row's hover bg already cues "active"), and selected
+  // (bg-default, where the highlight stands out clearly).
   const cellCls = (cell: CellId) =>
-    isSelected && focusedCell === cell ? 'bg-gray-150 bg-clip-content' : ''
+    isSelected && focusedCell === cell
+      ? 'bg-fill-neutral-hover bg-clip-content'
+      : ''
   const [editInput, setEditInput] = useState(example.input)
   const [editOutput, setEditOutput] = useState(example.expected_output)
+  // Labels cell renders the row's label + source as comma-separated
+  // text. The edit buffer holds the same shape; on save we split on
+  // commas and apply the first token as the label (validated against
+  // the enum), the second as the source.
+  const labelsDisplay = `${example.label}, ${example.source}`
+  const [editLabels, setEditLabels] = useState(labelsDisplay)
   // Track the source values we hydrated edit state from. When the parent
   // updates the underlying example, reset the edit buffers. Derived during
   // render to avoid a setState-in-effect cascade.
-  const [prevSource, setPrevSource] = useState({ input: example.input, output: example.expected_output })
-  if (prevSource.input !== example.input || prevSource.output !== example.expected_output) {
-    setPrevSource({ input: example.input, output: example.expected_output })
+  const [prevSource, setPrevSource] = useState({
+    input: example.input,
+    output: example.expected_output,
+    labels: labelsDisplay,
+  })
+  if (
+    prevSource.input !== example.input ||
+    prevSource.output !== example.expected_output ||
+    prevSource.labels !== labelsDisplay
+  ) {
+    setPrevSource({
+      input: example.input,
+      output: example.expected_output,
+      labels: labelsDisplay,
+    })
     setEditInput(example.input)
     setEditOutput(example.expected_output)
+    setEditLabels(labelsDisplay)
   }
   const [showRevision, setShowRevision] = useState(false)
   const rowRef = useRef<HTMLDivElement>(null)
@@ -924,6 +1117,16 @@ function ExampleRow({
     } as Partial<Example>
     if (editingCell === 'input') update.input = editInput
     else if (editingCell === 'output') update.expected_output = editOutput
+    else if (editingCell === 'labels') {
+      // Split on commas, lowercase, validate against the known enums.
+      // Tokens that don't validate are dropped so a typo in "manuel"
+      // doesn't silently overwrite the source.
+      const tokens = editLabels.split(',').map(t => t.trim().toLowerCase())
+      const labelTok = tokens.find(t => t === 'good' || t === 'bad' || t === 'unlabeled')
+      const sourceTok = tokens.find(t => t === 'manual' || t === 'synthetic' || t === 'imported')
+      if (labelTok) update.label = labelTok as Example['label']
+      if (sourceTok) update.source = sourceTok as Example['source']
+    }
     onUpdate(update)
     onCancelEdit()
   }
@@ -939,31 +1142,24 @@ function ExampleRow({
   const hasIssues = example.judge_verdict?.issues && example.judge_verdict.issues.length > 0
   const hasRevision = !!example.revision_suggestion
 
-  // Scenario column: prefer first coverage tag, fall back to feature_area
-  const scenarioText = example.coverage_tags[0] || example.feature_area
-
   return (
     <>
       <div
         ref={rowRef}
+        data-row-id={example.id}
         onClick={onSelect}
         className={[
-          'flex items-stretch gap-4 px-4 py-4 cursor-pointer transition-colors max-h-[480px]',
+          // 8px padding on every side of the row so cells get consistent
+          // breathing room. Cell inner padding (p-2) is the same value
+          // so the focused-cell highlight has the same visual weight as
+          // the row padding. Column header and group header use the
+          // same p-2 so column edges line up across the three layers.
+          'flex items-stretch gap-2 p-2 cursor-pointer transition-colors max-h-[480px]',
           isSelected
             ? 'bg-bg-default outline outline-2 outline-border-primary -outline-offset-2'
             : 'bg-gray-150 hover:bg-fill-neutral-hover',
         ].join(' ')}
       >
-        {/* Scenario */}
-        <div
-          onClick={e => { e.stopPropagation(); onCellSelect('scenario') }}
-          className={`flex-1 basis-0 self-stretch p-px overflow-hidden ${cellCls('scenario')}`}
-        >
-          <div className="h-full p-2 flex flex-col gap-1 overflow-y-auto">
-            <div className="text-sm text-fg-contrast leading-[1.5]">{scenarioText}</div>
-          </div>
-        </div>
-
         {/* Input */}
         <div
           onClick={e => { e.stopPropagation(); onCellSelect('input') }}
@@ -1006,16 +1202,27 @@ function ExampleRow({
           </div>
         </div>
 
-        {/* Labels */}
+        {/* Labels — plain comma-separated text "label, source". Edits
+            inline via Enter or the Edit action; on save we parse and
+            validate each token against the known enums. */}
         <div
           onClick={e => { e.stopPropagation(); onCellSelect('labels') }}
           className={`w-[200px] flex-shrink-0 self-stretch p-px ${cellCls('labels')}`}
         >
-          <div className="h-full p-2 flex flex-col gap-2">
-            <div className="flex items-start gap-1 flex-wrap">
-              <Chip>{example.label === 'good' ? 'Good' : example.label === 'bad' ? 'Bad' : 'Unlabeled'}</Chip>
-              <Chip>{example.source.charAt(0).toUpperCase() + example.source.slice(1)}</Chip>
-            </div>
+          <div className="h-full p-2 flex flex-col gap-1">
+            {editingCell === 'labels' ? (
+              <EditCell
+                value={editLabels}
+                onChange={setEditLabels}
+                onSave={handleSaveEdit}
+                onCancel={onCancelEdit}
+                singleLine
+              />
+            ) : (
+              <div className="text-sm text-fg-contrast leading-[1.5] break-words">
+                {labelsDisplay}
+              </div>
+            )}
           </div>
         </div>
 
@@ -1024,7 +1231,7 @@ function ExampleRow({
           onClick={e => { e.stopPropagation(); onCellSelect('status') }}
           className={`w-[100px] flex-shrink-0 self-stretch p-px ${cellCls('status')}`}
         >
-          <div className="h-full p-2 flex flex-col gap-2">
+          <div className="h-full p-2 flex flex-col gap-1">
             <div className="flex items-center gap-1.5">
               <StatusDot status={example.review_status} />
               <span className="text-sm text-fg-contrast capitalize">
@@ -1114,11 +1321,76 @@ function ExampleRow({
   )
 }
 
-function Chip({ children }: { children: React.ReactNode }) {
+interface OverflowMenuItem {
+  label: string
+  /** One-line tooltip shown on hover of the menu row — same copy that
+   *  used to live in each button's `title`. */
+  hint?: string
+  onClick?: () => void
+  disabled?: boolean
+}
+
+function OverflowMenu({ items }: { items: OverflowMenuItem[] }) {
+  const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  // Dismiss on outside click and Escape — the dropdown is uncontrolled
+  // and doesn't trap focus, so these two are the minimum needed for it
+  // to feel like a real menu.
+  useEffect(() => {
+    if (!open) return
+    const onPointer = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    window.addEventListener('mousedown', onPointer)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('mousedown', onPointer)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  if (items.length === 0) return null
+
   return (
-    <span className="px-2 py-1 bg-gray-150 text-sm text-fg-contrast">
-      {children}
-    </span>
+    <div ref={rootRef} className="relative">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="h-7 w-7 inline-flex items-center justify-center text-fg-dim hover:text-fg-contrast border border-border-hint hover:bg-fill-neutral transition-colors"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="More actions"
+        title="More actions"
+      >
+        <MoreHorizontal className="w-4 h-4" />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 top-full mt-1 z-40 min-w-[220px] bg-bg-default border border-border-hint shadow-lg flex flex-col"
+        >
+          {items.map(item => (
+            <button
+              key={item.label}
+              role="menuitem"
+              disabled={item.disabled}
+              title={item.hint}
+              onClick={() => {
+                if (item.disabled) return
+                item.onClick?.()
+                setOpen(false)
+              }}
+              className="text-left px-3 py-2 text-xs text-fg-contrast hover:bg-fill-neutral transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -1127,43 +1399,58 @@ function EditCell({
   onChange,
   onSave,
   onCancel,
+  singleLine = false,
 }: {
   value: string
   onChange: (v: string) => void
   onSave: () => void
   onCancel: () => void
+  /** Renders a single-line <input> instead of a textarea. Used for the
+   *  labels cell where the value is a short "label, source" string. */
+  singleLine?: boolean
 }) {
-  const ref = useRef<HTMLTextAreaElement>(null)
+  const ref = useRef<HTMLTextAreaElement | HTMLInputElement>(null)
   // Mount-time focus + cursor at end of text. Selecting via setSelectionRange
   // after focus works across browsers; just calling .focus() leaves the cursor
   // at position 0 in some implementations.
   useEffect(() => {
-    const ta = ref.current
-    if (!ta) return
-    ta.focus()
-    const len = ta.value.length
-    ta.setSelectionRange(len, len)
+    const el = ref.current
+    if (!el) return
+    el.focus()
+    const len = el.value.length
+    el.setSelectionRange(len, len)
   }, [])
+  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement | HTMLInputElement>) => {
+    // Enter saves; in the textarea case Shift+Enter inserts a newline.
+    // Esc cancels. Mirrors the inline-edit pattern in the rest of the app.
+    if (e.key === 'Enter' && (singleLine || !e.shiftKey)) {
+      e.preventDefault()
+      onSave()
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      onCancel()
+    }
+  }
   return (
     <div className="flex flex-col gap-1" onClick={e => e.stopPropagation()}>
-      <textarea
-        ref={ref}
-        value={value}
-        onChange={e => onChange(e.target.value)}
-        onKeyDown={e => {
-          // Enter saves, Shift+Enter inserts a newline. Esc cancels. Mirrors
-          // the inline-edit pattern in the rest of the app.
-          if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault()
-            onSave()
-          } else if (e.key === 'Escape') {
-            e.preventDefault()
-            onCancel()
-          }
-        }}
-        className="w-full p-2 text-sm bg-bg-default border border-border-hint resize-none text-fg-contrast leading-[1.5]"
-        rows={4}
-      />
+      {singleLine ? (
+        <input
+          ref={ref as React.RefObject<HTMLInputElement>}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          onKeyDown={onKeyDown}
+          className="w-full p-2 text-sm bg-bg-default border border-border-hint text-fg-contrast leading-[1.5]"
+        />
+      ) : (
+        <textarea
+          ref={ref as React.RefObject<HTMLTextAreaElement>}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          onKeyDown={onKeyDown}
+          className="w-full p-2 text-sm bg-bg-default border border-border-hint resize-none text-fg-contrast leading-[1.5]"
+          rows={4}
+        />
+      )}
       <div className="flex gap-1 justify-end">
         <button
           onClick={onCancel}
@@ -1180,13 +1467,6 @@ function EditCell({
       </div>
     </div>
   )
-}
-
-function CoverageDot({ score }: { score: number }) {
-  // Same three-tier scheme as the CoverageMap header dot, the charter
-  // dimension chips, etc. Keeps the visual language consistent.
-  const cls = score >= 0.8 ? 'bg-success' : score >= 0.4 ? 'bg-warning' : 'bg-danger'
-  return <span className={`inline-block w-2 h-2 rounded-full ${cls}`} />
 }
 
 function StatusDot({ status }: { status: Example['review_status'] }) {

@@ -30,6 +30,7 @@ import type {
   Dataset,
   Example,
   GapAnalysis,
+  JudgeAgreement,
   ScorerDef,
   AlignmentEntry,
   TaskDefinition,
@@ -54,6 +55,7 @@ import {
   refreshDatasetFromTurns,
   retagExamplesAgainstCharter,
   getGapAnalysis,
+  getJudgeAgreement,
   exportDataset,
   datasetChat,
   updateSessionName,
@@ -84,9 +86,8 @@ import ScorersPanel from "../components/ScorersPanel";
 import EvaluatePanel from "../components/EvaluatePanel";
 import SkillPanel from "../components/SkillPanel";
 import ExampleReview from "../components/ExampleReview";
-import CoverageMap from "../components/CoverageMap";
-import { computeCoverageScore } from "../components/coverage";
 import GenerateModal from "../components/examples/GenerateModal";
+import CoverageMap from "../components/CoverageMap";
 import SettingsPanel from "../components/SettingsPanel";
 import ShareModal from "../components/ShareModal";
 import { useProjectEvents, type SynthProgressEvent } from "../hooks/useProjectEvents";
@@ -285,6 +286,10 @@ export default function ProjectWorkspace() {
   const [revisionsLoading, setRevisionsLoading] = useState(false);
   const [retagLoading, setRetagLoading] = useState(false);
   const [gapAnalysis, setGapAnalysis] = useState<GapAnalysis | null>(null);
+  const [judgeAgreement, setJudgeAgreement] = useState<JudgeAgreement | null>(null);
+  // Full coverage matrix lives in a modal — the dataset workspace surfaces
+  // the compact radar+score in the right sidebar and opens the matrix only
+  // on demand so the row list keeps maximum width.
   const [showCoverageMap, setShowCoverageMap] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
@@ -361,7 +366,10 @@ export default function ProjectWorkspace() {
     }
     notePolarisActivity(`opened ${activeTab} tab`);
   }, [activeTab]);
-  useRegisterPolarisNav("coverage_map", () => setShowCoverageMap(true));
+  useRegisterPolarisNav("coverage_map", () => {
+    setActiveTab("dataset");
+    setShowCoverageMap(true);
+  });
   useRegisterPolarisNav("settings", () => setShowSettings(true));
   useRegisterPolarisNav("share", () => setShowShareModal(true));
   useRegisterPolarisNav("example", (props) => {
@@ -457,10 +465,6 @@ export default function ProjectWorkspace() {
     );
   });
 
-  // Coverage map status comes from the gap analysis. Compute once per
-  // gapAnalysis change so the dataset toolbar dot stays in sync.
-  const coverageScore = computeCoverageScore(gapAnalysis);
-
   // Coverage-driven generate modal. The dataset toolbar still has its own
   // local Generate flow inside ExampleReview; this one is reserved for
   // requests originating from the CoverageMap (single cell + bulk fix).
@@ -471,7 +475,8 @@ export default function ProjectWorkspace() {
         featureArea: string;
         currentCount: number;
       }
-    | { kind: "fill"; emptyCells: Array<{ criterion: string; featureArea: string }> };
+    | { kind: "fill"; emptyCells: Array<{ criterion: string; featureArea: string }> }
+    | { kind: "area"; featureArea: string };
   const [coverageGenerateRequest, setCoverageGenerateRequest] =
     useState<CoverageGenerateRequest | null>(null);
 
@@ -1991,6 +1996,31 @@ export default function ProjectWorkspace() {
     };
   }, [dataset?.id, datasetExampleCount]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Judge-human agreement — re-fetch whenever review counts change so the
+  // header metric tracks reviews landing in real time. Same dataset-empty
+  // gate as gap analysis.
+  const reviewedCount = (dataset?.examples || []).filter(
+    e => e.review_status !== "pending",
+  ).length;
+  useEffect(() => {
+    if (!dataset || datasetExampleCount === 0) {
+      setJudgeAgreement(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const agreement = await getJudgeAgreement(dataset.id);
+        if (!cancelled) setJudgeAgreement(agreement);
+      } catch (err) {
+        console.error("Failed to fetch judge agreement:", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [dataset?.id, datasetExampleCount, reviewedCount]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleAcceptSuggestion = useCallback(
     async (suggestion: Suggestion) => {
       if (!sessionId) return;
@@ -2092,8 +2122,22 @@ export default function ProjectWorkspace() {
     try {
       const res = await generateScorers(sessionId);
       setScorers(res.scorers);
+      // Merge the refreshed session state but KEEP the previous `charter`
+      // object reference. The charter-changed effect keys off
+      // `state.charter` by identity — a wholesale setState(s.state)
+      // produces a fresh charter reference and stales the dataset even
+      // though scorers gen never touches the charter (it read as "the
+      // dataset disappeared" right after scorers finished). Spreading
+      // s.state still picks up everything the backend actually changed
+      // (scorers, lineage stamp, turn metadata); only the charter ref is
+      // pinned. Safe because the generate-scorers endpoint does not edit
+      // the charter — if that ever changes, drop the override.
       const s = await getSession(sessionId);
-      setState(s.state as SessionState);
+      setState((prev) => ({
+        ...prev,
+        ...(s.state as SessionState),
+        charter: prev.charter,
+      }));
     } catch (err) {
       console.error("Shortcut: generate scorers failed", err);
       throw err;
@@ -2164,6 +2208,38 @@ export default function ProjectWorkspace() {
     },
     [sessionId, scorers.length, scorersGenerating, hasCharter, runGenerateScorers],
   );
+
+  // Auto-generate scorers when either:
+  //   (a) dataset generation just kicked off — fire scorers in parallel
+  //       so the two long-running jobs overlap instead of serialising;
+  //   (b) the user lands on the Scorers tab with a filled charter and
+  //       no scorers — same shape as the previous auto-trigger.
+  // Once per session, guarded by `scorersGenerating` so an in-flight
+  // run doesn't double-fire. The "(a)" branch was missing before, so
+  // any path that started only the dataset (Charter footer's
+  // "Generate dataset" item, Polaris generate-dataset, etc.) left
+  // scorers stranded until the user visited the Scorers tab — at
+  // which point they ran sequentially after the dataset finished.
+  const autoGenScorersRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!sessionId) return;
+    if (scorers.length > 0) return;
+    if (!hasCharter) return;
+    if (scorersGenerating) return;
+    if (autoGenScorersRef.current.has(sessionId)) return;
+    const triggered = generatingDataset || activeTab === "scorers";
+    if (!triggered) return;
+    autoGenScorersRef.current.add(sessionId);
+    void handleGenerateScorers({ skipConfirm: true });
+  }, [
+    sessionId,
+    activeTab,
+    scorers.length,
+    hasCharter,
+    scorersGenerating,
+    generatingDataset,
+    handleGenerateScorers,
+  ]);
 
   // Parent listens for Polaris-triggered draft requests via a stable
   // listener (bound once at mount). The ref pattern keeps the latest
@@ -2553,8 +2629,9 @@ export default function ProjectWorkspace() {
 
   const handleShowCoverageMap = useCallback(async () => {
     if (!dataset) return;
-    // Refresh in case it's stale, but open the modal immediately — the
-    // useEffect above keeps it warm so most opens are zero-latency.
+    // Open the matrix modal immediately, then refresh gaps in the
+    // background — the useEffect below keeps it warm so most opens are
+    // already up-to-date.
     setShowCoverageMap(true);
     try {
       const gaps = await getGapAnalysis(dataset.id);
@@ -2609,21 +2686,84 @@ export default function ProjectWorkspace() {
       setCoverageGenerateRequest(null);
       setLoading(true);
       try {
+        // Build the initial target set. "cell" and "area" requests imply
+        // their own scope; "fill" passes through the empty cells the
+        // sidebar collected from the matrix.
+        let targets: Array<{ criterion: string; featureArea: string }>;
         if (req.kind === "cell") {
+          targets = [{ criterion: req.criterion, featureArea: req.featureArea }];
+        } else if (req.kind === "area") {
+          // Area scope = the focused feature_area × every charter
+          // coverage criterion. We need the full list of criteria to
+          // form the per-cell targets that drive the retry loop, so
+          // expand here.
+          const allCriteria = state.charter.coverage?.criteria ?? [];
+          targets = allCriteria.length > 0
+            ? allCriteria.map(c => ({ criterion: c, featureArea: req.featureArea }))
+            : // No charter criteria yet — fall back to a single open-ended
+              // synth scoped to the area, with no per-cell breakdown.
+              [{ criterion: "", featureArea: req.featureArea }];
+        } else {
+          targets = req.emptyCells;
+        }
+
+        // Retry-until-resolved: after each synth pass, refetch the
+        // matrix and rescope to cells that are STILL empty. Caps the
+        // total LLM cost at MAX_ATTEMPTS so an adversarial / impossible
+        // cell can't loop forever — leftover gaps surface in the
+        // sidebar where the user can decide whether to retry or accept.
+        // Cap is 2 (1 initial + 1 retry): a third pass rarely catches
+        // cells the second pass missed and doubles perceived latency.
+        const MAX_ATTEMPTS = 2;
+        let remaining = targets;
+        for (
+          let attempt = 1;
+          attempt <= MAX_ATTEMPTS && remaining.length > 0;
+          attempt++
+        ) {
+          const criteria = Array.from(
+            new Set(remaining.map(c => c.criterion).filter(c => c.length > 0)),
+          );
+          const areas = Array.from(new Set(remaining.map(c => c.featureArea)));
           await synthesizeExamples(dataset.id, {
-            feature_areas: [req.featureArea],
-            coverage_criteria: [req.criterion],
+            feature_areas: areas,
+            // Only pass coverage_criteria when we have specific targets;
+            // an empty list means "use the full charter list" on the
+            // backend, which is the right fallback for the no-criteria
+            // area case.
+            ...(criteria.length > 0 ? { coverage_criteria: criteria } : {}),
             count_per_scenario: count,
           });
-        } else {
-          const missingCriteria = Array.from(new Set(req.emptyCells.map(c => c.criterion)));
-          const missingAreas = Array.from(new Set(req.emptyCells.map(c => c.featureArea)));
-          await synthesizeExamples(dataset.id, {
-            feature_areas: missingAreas,
-            coverage_criteria: missingCriteria,
-            count_per_scenario: count,
+          // Refetch the matrix and prune cells that the new rows
+          // covered.
+          let nextGaps: GapAnalysis | null = null;
+          try {
+            nextGaps = await getGapAnalysis(dataset.id);
+            setGapAnalysis(nextGaps);
+          } catch (err) {
+            console.error("Failed to refresh gaps after fix-coverage attempt:", err);
+            break;
+          }
+          const matrix = nextGaps.coverage_matrix || {};
+          remaining = remaining.filter(c => {
+            // Cells without a real criterion (the area-fallback case, used
+            // only when the charter has no coverage criteria) are "resolved"
+            // when any row exists in this area. Note: if the area already
+            // had rows before this synth, the total is non-zero regardless
+            // of whether this pass produced anything — so the retry is
+            // effectively single-shot for that branch. Intentional: there's
+            // no per-cell signal to retry against without charter criteria.
+            if (!c.criterion) {
+              const total = Object.values(matrix).reduce(
+                (acc, row) => acc + ((row || {})[c.featureArea] ?? 0),
+                0,
+              );
+              return total === 0;
+            }
+            return ((matrix[c.criterion] || {})[c.featureArea] ?? 0) === 0;
           });
         }
+
         const fullDs = await getDataset(dataset.session_id);
         setDataset(fullDs);
       } catch (err) {
@@ -2632,7 +2772,7 @@ export default function ProjectWorkspace() {
         setLoading(false);
       }
     },
-    [dataset, coverageGenerateRequest],
+    [dataset, coverageGenerateRequest, state.charter],
   );
 
   const handleExport = useCallback(async () => {
@@ -3154,10 +3294,28 @@ export default function ProjectWorkspace() {
                     onAutoReview={handleAutoReview}
                     onExport={handleExport}
                     onShowCoverageMap={handleShowCoverageMap}
+                    gaps={gapAnalysis}
+                    agreement={judgeAgreement}
+                    charterSnapshot={dataset.charter_snapshot}
+                    onRequestFillGaps={handleRequestFillGaps}
+                    onAddForFeatureArea={(featureArea) => {
+                      setCoverageGenerateRequest({ kind: "area", featureArea });
+                    }}
+                    onAddAlignmentCriteria={() => {
+                      // Switch to the charter tab, focus alignment, kick
+                      // off a fresh suggestion fetch so the user lands on
+                      // a panel that's already loading proposals.
+                      setActiveTab("charter");
+                      void handleSuggest();
+                      window.setTimeout(() => {
+                        window.dispatchEvent(
+                          new CustomEvent("northstar:focus-alignment"),
+                        );
+                      }, 120);
+                    }}
                     onNavigateToScorers={() => setActiveTab("scorers")}
                     onHeaderClick={() => {}}
                     isFocused={true}
-                    coverageScore={coverageScore}
                     onSuggestRevision={handleSuggestRevision}
                     onSuggestRevisions={handleBulkSuggestRevisions}
                     onAcceptRevision={handleAcceptRevision}
@@ -3375,7 +3533,9 @@ export default function ProjectWorkspace() {
 
       </div>
 
-      {/* Coverage map overlay */}
+      {/* Coverage matrix modal — opened on demand from the sidebar's
+          "View full matrix" button, the toolbar "Coverage map" button, or
+          a Polaris navigation. */}
       {showCoverageMap && gapAnalysis && (
         <CoverageMap
           gaps={gapAnalysis}
@@ -3421,7 +3581,8 @@ type CoverageGenerateRequestExt =
       featureArea: string;
       currentCount: number;
     }
-  | { kind: "fill"; emptyCells: Array<{ criterion: string; featureArea: string }> };
+  | { kind: "fill"; emptyCells: Array<{ criterion: string; featureArea: string }> }
+  | { kind: "area"; featureArea: string };
 
 function buildCoverageGenerateModalProps(req: CoverageGenerateRequestExt): {
   suggestedCount: number;
@@ -3438,6 +3599,16 @@ function buildCoverageGenerateModalProps(req: CoverageGenerateRequestExt): {
     return {
       suggestedCount,
       suggestionReason: reason,
+      totalScenarios: 1,
+    };
+  }
+  if (req.kind === "area") {
+    // Per-feature_area: synth fans out across every charter coverage
+    // criterion for this area. Show 2 as the suggested count; copy
+    // explains the scope so the user can adjust.
+    return {
+      suggestedCount: 2,
+      suggestionReason: `Generate examples for every coverage criterion within "${req.featureArea}".`,
       totalScenarios: 1,
     };
   }
