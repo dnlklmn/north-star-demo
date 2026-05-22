@@ -1247,9 +1247,23 @@ async def call_synthesize_examples(
 
     if falls_back:
         prompt = build_synthesize_examples_prompt(charter, feature_areas, coverage_criteria, count)
-        text, meta = await _call_llm(prompt, max_tokens=8192)
+        # 8192 was too low — a full-grid charter (positive grid + off-target
+        # + safety rows) routinely blew past it and the response truncated
+        # mid-JSON, yielding zero examples. The single-call fallback has to
+        # emit the entire dataset in one shot, so give it real headroom.
+        # Sonnet/Opus 4.x support up to 64k output tokens; 32k is plenty
+        # for any realistic charter and `_extract_json` salvages the tail
+        # if a pathologically large one still clips.
+        text, meta = await _call_llm(prompt, max_tokens=32000)
         data = _extract_json(text)
         examples = data.get("examples", [])
+        if not examples:
+            logger.warning(
+                "call_synthesize_examples: fallback single-call produced 0 "
+                "examples (response len=%d chars) — likely a parse failure "
+                "or an empty LLM result",
+                len(text),
+            )
         # Single call: fire the hook once at the end so callers can still
         # persist + emit a "done" progress event uniformly.
         if on_cell is not None and examples:
@@ -1632,8 +1646,72 @@ def _parse_validation_status(s: str) -> ValidationStatus:
     return mapping.get(s, ValidationStatus.untested)
 
 
+def _salvage_truncated_json_array(text: str) -> dict:
+    """Best-effort recovery from a truncated ``{"<key>": [ {...}, {...}, ...``
+    response. The LLM hit the output-token cap mid-array, so the JSON won't
+    parse — but every *complete* object before the cut-off is still valid.
+
+    Walks the first ``"<key>": [`` array, tracking brace depth and string
+    state, and collects each top-level object that closed cleanly. Returns
+    ``{key: [recovered objects]}`` or ``{}`` if nothing is recoverable.
+
+    This is a safety net, not a substitute for not truncating — a truncated
+    response still loses the tail. Callers should size max_tokens so this
+    path is rare.
+    """
+    # Find the first `"key": [` — that's the array we try to salvage.
+    m = re.search(r'"(\w+)"\s*:\s*\[', text)
+    if not m:
+        return {}
+    key = m.group(1)
+    objs: list[dict] = []
+    depth = 0
+    in_str = False
+    escape = False
+    obj_start = -1
+    for i in range(m.end(), len(text)):
+        c = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            if depth == 0:
+                obj_start = i
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0 and obj_start >= 0:
+                try:
+                    objs.append(json.loads(text[obj_start:i + 1]))
+                except json.JSONDecodeError:
+                    pass  # partial object — skip it
+                obj_start = -1
+        elif c == "]" and depth == 0:
+            break  # array closed cleanly — nothing was truncated
+    if not objs:
+        return {}
+    logger.warning(
+        "Recovered %d complete %r objects from a truncated LLM response",
+        len(objs), key,
+    )
+    return {key: objs}
+
+
 def _extract_json(text: str) -> dict:
-    """Extract JSON from LLM response text, handling markdown code blocks."""
+    """Extract JSON from LLM response text, handling markdown code blocks.
+
+    On a clean parse failure — most often a response truncated at the
+    output-token cap — falls back to salvaging whatever complete objects
+    the leading array contains, so a clipped synth still yields rows
+    instead of an empty dataset.
+    """
     text = text.strip()
     if text.startswith("```"):
         lines = text.split("\n")
@@ -1641,10 +1719,15 @@ def _extract_json(text: str) -> dict:
         text = "\n".join(lines)
     start = text.find("{")
     end = text.rfind("}") + 1
-    if start >= 0 and end > start:
-        text = text[start:end]
+    trimmed = text[start:end] if (start >= 0 and end > start) else text
     try:
-        return json.loads(text)
+        return json.loads(trimmed)
     except json.JSONDecodeError as e:
+        # Salvage from the *untrimmed* text — rfind("}") on a truncated
+        # response lands on some inner object's brace, so `trimmed` is
+        # itself malformed. The salvage walker handles the raw stream.
+        salvaged = _salvage_truncated_json_array(text)
+        if salvaged:
+            return salvaged
         logger.error(f"Failed to parse LLM JSON response: {e}\nText: {text[:500]}")
         return {}
