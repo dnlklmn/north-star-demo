@@ -3287,30 +3287,26 @@ async def judge_agreement(dataset_id: str):
     agreement_rate = (agreement_count / reviewed_count) if reviewed_count else 0.0
 
     # Cohen's kappa over the 2x2 confusion matrix. Tiny by hand:
-    #   po = observed agreement
-    #   pe = expected agreement by chance, computed from each rater's marginal
+    #   po = observed agreement (agreement_rate)
+    #   pe = expected agreement by chance, from each rater's marginal
+    #   kappa = (po - pe) / (1 - pe)
     #
-    # Edge case: when exactly one rater is unanimous (e.g. judge always picks
-    # "good" but the human picks both), the marginals make kappa undefined
-    # under the textbook formula — by convention we surface that as None.
-    # When both raters are unanimous and agree, agreement_rate==1 and kappa==1.
+    # `pe` is always computable. It only reaches 1.0 — the one value that
+    # makes the formula undefined — when BOTH raters are unanimous on the
+    # SAME label; in that case they agree on every row, so kappa is 1.0 by
+    # convention. Every other case (including "one rater unanimous, the
+    # other not") has a well-defined kappa, so compute it directly rather
+    # than discarding it.
     kappa: float | None = None
     if reviewed_count >= 2:
         n = reviewed_count
         s_good = sum(1 for s, _ in pairs if s == "good")
         l_good = sum(1 for _, lab in pairs if lab == "good")
-        s_unanimous = s_good in (0, n)
-        l_unanimous = l_good in (0, n)
-        if s_unanimous and l_unanimous:
-            kappa = 1.0 if agreement_rate == 1.0 else 0.0
-        elif s_unanimous != l_unanimous:
-            # Exactly one rater is unanimous — kappa is undefined under the
-            # textbook formula. Surface as None and let the frontend hide it.
-            kappa = None
+        pe = (s_good / n) * (l_good / n) + ((n - s_good) / n) * ((n - l_good) / n)
+        if pe >= 1.0:
+            # Both raters unanimous + same side → perfect agreement.
+            kappa = 1.0 if agreement_rate == 1.0 else None
         else:
-            pe_good = (s_good / n) * (l_good / n)
-            pe_bad = ((n - s_good) / n) * ((n - l_good) / n)
-            pe = pe_good + pe_bad
             kappa = (agreement_rate - pe) / (1.0 - pe)
 
     return {

@@ -438,6 +438,18 @@ def _is_billing_error(err: Exception) -> bool:
     return any(n in msg for n in needles)
 
 
+def _first_text(content: list | None) -> str:
+    """Return the text of the first text-bearing block in a Message's
+    content, or "". Plain (no-tool) completions always put text at [0],
+    but guarding against a non-text block keeps the three call helpers
+    from raising AttributeError if that ever stops being true."""
+    for block in content or []:
+        text = getattr(block, "text", None)
+        if isinstance(text, str):
+            return text
+    return ""
+
+
 async def _call_llm(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
     """Async-safe wrapper. The Anthropic SDK is sync, so we have to run
     the blocking call on a worker thread or the event loop freezes for
@@ -488,7 +500,7 @@ def _call_llm_sync(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
         raise
     elapsed_ms = int((time.time() - start) * 1000)
     logger.info(f"_call_llm: OK in {elapsed_ms}ms, output_tokens={response.usage.output_tokens}")
-    text = response.content[0].text if response.content else ""
+    text = _first_text(response.content)
     _bubble_io_to_parent_span(prompt, text)
     metadata = {
         "model": model,
@@ -547,7 +559,7 @@ def _call_llm_streaming_sync(prompt: str, max_tokens: int = 4096) -> tuple[str, 
         f"_call_llm_streaming: OK in {elapsed_ms}ms, "
         f"output_tokens={final.usage.output_tokens}"
     )
-    text = final.content[0].text if final.content else ""
+    text = _first_text(final.content)
     _bubble_io_to_parent_span(prompt, text)
     metadata = {
         "model": model,
@@ -622,7 +634,7 @@ def _call_llm_cached(prefix: str, suffix: str, max_tokens: int = 4096) -> tuple[
         f"input={usage.input_tokens}, output={usage.output_tokens}, "
         f"cache_create={cache_creation}, cache_read={cache_read}"
     )
-    text = response.content[0].text if response.content else ""
+    text = _first_text(response.content)
     _bubble_io_to_parent_span(prefix + suffix, text)
     metadata = {
         "model": model,
@@ -1719,7 +1731,12 @@ def _salvage_truncated_json_array(text: str) -> dict:
     response still loses the tail. Callers should size max_tokens so this
     path is rare.
     """
-    # Find the first `"key": [` — that's the array we try to salvage.
+    # Salvage the FIRST `"key": [` array in the response. Every payload
+    # this runs on — synth ("examples"), review ("reviews"), scorers
+    # ("scorers") — is a flat `{"<key>": [ ... ]}` with the array first,
+    # so "first array" == "the array we want". If a future prompt nests
+    # an array ahead of the real payload, this would target the wrong
+    # key and need a key hint passed in.
     m = re.search(r'"(\w+)"\s*:\s*\[', text)
     if not m:
         return {}

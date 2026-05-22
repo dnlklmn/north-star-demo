@@ -2122,17 +2122,21 @@ export default function ProjectWorkspace() {
     try {
       const res = await generateScorers(sessionId);
       setScorers(res.scorers);
-      // Only pull the scorers + lineage stamp out of the refreshed state.
-      // We MUST NOT replace `state` wholesale here: the charter-changed
-      // effect keys off `state.charter` by reference, so setState(s.state)
-      // produces a new charter reference and stales the dataset even when
-      // nothing actually changed — which reads as "the dataset disappeared"
-      // in the UI right after scorers gen completes.
+      // Merge the refreshed session state but KEEP the previous `charter`
+      // object reference. The charter-changed effect keys off
+      // `state.charter` by identity — a wholesale setState(s.state)
+      // produces a fresh charter reference and stales the dataset even
+      // though scorers gen never touches the charter (it read as "the
+      // dataset disappeared" right after scorers finished). Spreading
+      // s.state still picks up everything the backend actually changed
+      // (scorers, lineage stamp, turn metadata); only the charter ref is
+      // pinned. Safe because the generate-scorers endpoint does not edit
+      // the charter — if that ever changes, drop the override.
       const s = await getSession(sessionId);
       setState((prev) => ({
         ...prev,
-        scorers: s.state.scorers,
-        generated_at_skill_version: s.state.generated_at_skill_version,
+        ...(s.state as SessionState),
+        charter: prev.charter,
       }));
     } catch (err) {
       console.error("Shortcut: generate scorers failed", err);
@@ -2742,9 +2746,13 @@ export default function ProjectWorkspace() {
           }
           const matrix = nextGaps.coverage_matrix || {};
           remaining = remaining.filter(c => {
-            // Cells without a real criterion (the area-fallback case)
-            // are resolved when any row landed in this area — check the
-            // matrix's row totals for this area.
+            // Cells without a real criterion (the area-fallback case, used
+            // only when the charter has no coverage criteria) are "resolved"
+            // when any row exists in this area. Note: if the area already
+            // had rows before this synth, the total is non-zero regardless
+            // of whether this pass produced anything — so the retry is
+            // effectively single-shot for that branch. Intentional: there's
+            // no per-cell signal to retry against without charter criteria.
             if (!c.criterion) {
               const total = Object.values(matrix).reduce(
                 (acc, row) => acc + ((row || {})[c.featureArea] ?? 0),
