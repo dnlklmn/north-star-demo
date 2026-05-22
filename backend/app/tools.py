@@ -502,6 +502,65 @@ def _call_llm_sync(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
     return text, metadata
 
 
+async def _call_llm_streaming(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
+    """Async-safe streaming variant of `_call_llm`. Use for calls that need
+    a high `max_tokens` (>~8k): the SDK refuses a *non-streaming* request
+    whose `max_tokens` could exceed a 10-minute timeout, so the only way to
+    ask for a large completion is to stream it. Same return shape as
+    `_call_llm`."""
+    return await asyncio.to_thread(_call_llm_streaming_sync, prompt, max_tokens)
+
+
+def _call_llm_streaming_sync(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
+    """Streaming Claude call. Accumulates the streamed text and returns the
+    same (text, metadata) tuple as `_call_llm_sync`. Streaming sidesteps the
+    SDK's non-streaming 10-minute-timeout guard, so this is the path for
+    large-output calls (e.g. the single-shot dataset synth fallback)."""
+    model = get_model()
+    temperature = get_creativity()
+    resolved_model = _resolve_model(model)
+    logger.info(
+        f"_call_llm_streaming: model={model}, resolved={resolved_model}, "
+        f"provider={_current_provider()}, max_tokens={max_tokens}, "
+        f"prompt_len={len(prompt)}"
+    )
+    start = time.time()
+    try:
+        with get_client().messages.stream(
+            model=resolved_model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            messages=[{"role": "user", "content": prompt}],
+        ) as stream:
+            final = stream.get_final_message()
+    except Exception as e:
+        logger.error(f"_call_llm_streaming FAILED: {type(e).__name__}: {e}")
+        if _is_billing_error(e):
+            raise LLMBillingError(str(e), provider=_current_provider()) from e
+        if _is_model_error(e):
+            raise LLMModelError(str(e), provider=_current_provider()) from e
+        if _is_auth_error(e):
+            raise LLMAuthError(str(e), provider=_current_provider()) from e
+        raise
+    elapsed_ms = int((time.time() - start) * 1000)
+    logger.info(
+        f"_call_llm_streaming: OK in {elapsed_ms}ms, "
+        f"output_tokens={final.usage.output_tokens}"
+    )
+    text = final.content[0].text if final.content else ""
+    _bubble_io_to_parent_span(prompt, text)
+    metadata = {
+        "model": model,
+        "prompt": prompt,
+        "raw_response": text,
+        "input_tokens": final.usage.input_tokens,
+        "output_tokens": final.usage.output_tokens,
+        "latency_ms": elapsed_ms,
+        "temperature": temperature,
+    }
+    return text, metadata
+
+
 def _call_llm_cached(prefix: str, suffix: str, max_tokens: int = 4096) -> tuple[str, dict]:
     """Call Claude with a cacheable prefix block + per-call suffix.
 
@@ -1250,11 +1309,12 @@ async def call_synthesize_examples(
         # 8192 was too low — a full-grid charter (positive grid + off-target
         # + safety rows) routinely blew past it and the response truncated
         # mid-JSON, yielding zero examples. The single-call fallback has to
-        # emit the entire dataset in one shot, so give it real headroom.
-        # Sonnet/Opus 4.x support up to 64k output tokens; 32k is plenty
-        # for any realistic charter and `_extract_json` salvages the tail
-        # if a pathologically large one still clips.
-        text, meta = await _call_llm(prompt, max_tokens=32000)
+        # emit the entire dataset in one shot, so give it real headroom
+        # (32k). That much output can't go through a non-streaming request
+        # — the SDK rejects it with a 10-minute-timeout guard — so this
+        # path streams. `_extract_json` still salvages the tail if a
+        # pathologically large charter clips even 32k.
+        text, meta = await _call_llm_streaming(prompt, max_tokens=32000)
         data = _extract_json(text)
         examples = data.get("examples", [])
         if not examples:
