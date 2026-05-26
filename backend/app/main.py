@@ -41,6 +41,8 @@ from .models import (
     AgentStatus,
     CreateDatasetRequest,
     CreateExampleRequest,
+    CreateSessionFromSampleRequest,
+    CreateSessionFromSampleResponse,
     CreateSessionRequest,
     CreateSessionResponse,
     CreateShareTokenRequest,
@@ -49,6 +51,7 @@ from .models import (
     DetectedField,
     DetectSchemaRequest,
     DetectSchemaResponse,
+    DiscoveryPhase,
     EnrichRequest,
     EvalMode,
     EvalRunSummary,
@@ -74,6 +77,7 @@ from .models import (
     RefreshDatasetResponse,
     RestoreSkillVersionRequest,
     RunEvalRequest,
+    SampleInfo,
     SendMessageRequest,
     SendMessageResponse,
     SessionState,
@@ -137,6 +141,11 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Validate sample fixtures at boot so a malformed sample stops the server
+    # coming up rather than producing a 500 on the user's first click.
+    from .samples import validate_all as validate_samples
+    validate_samples()
+
     database_url = os.environ.get("DATABASE_URL", "postgresql://localhost:5432/northstar")
     await db.init_db(database_url)
     yield
@@ -324,6 +333,80 @@ async def _load_state(session_id: str) -> tuple[SessionState, list[dict]]:
 async def _save_state(session_id: str, state: SessionState, conversation: list[dict]) -> None:
     """Persist session state to DB."""
     await db.update_session(session_id, state.model_dump(), conversation)
+
+
+def _apply_seed_data(state: SessionState, data: dict) -> None:
+    """Populate task definition, extracted goals/users/stories from a seed
+    payload, and mirror them into the structured input fields the UI reads.
+
+    Shared by `/skill-seed` (LLM-extracted payload from `call_skill_seed`)
+    and `/samples/{id}/sessions` (hand-authored payload from a fixture).
+    Both consumers expect the same shape — task / goals / users /
+    positive_stories / off_target_stories — so the population + mirroring
+    logic lives here once. Dedup keeps the helper safe to call against a
+    state that already has some entries.
+
+    Callers that pre-populate `state.charter` from a fixture should omit
+    the `task` key from `data` — otherwise the seed's task description
+    overwrites the charter's slightly-different (and usually nicer) copy.
+    """
+    task_data = data.get("task") or {}
+    if task_data.get("input_description"):
+        state.charter.task.input_description = task_data["input_description"]
+    if task_data.get("output_description"):
+        state.charter.task.output_description = task_data["output_description"]
+    if task_data.get("sample_input"):
+        state.charter.task.sample_input = task_data["sample_input"]
+    if task_data.get("sample_output"):
+        state.charter.task.sample_output = task_data["sample_output"]
+
+    goals_lower = {g.lower() for g in state.extracted_goals}
+    for g in data.get("goals", []) or []:
+        if g and g.lower() not in goals_lower:
+            state.extracted_goals.append(g)
+            goals_lower.add(g.lower())
+
+    users_lower = {u.lower() for u in state.extracted_users}
+    for u in data.get("users", []) or []:
+        if u and u.lower() not in users_lower:
+            state.extracted_users.append(u)
+            users_lower.add(u.lower())
+
+    story_keys = {
+        (s.get("who", "").lower(), s.get("what", "").lower().strip()[:40])
+        for s in state.extracted_stories
+    }
+    for s in data.get("positive_stories", []) or []:
+        if s.get("who") and s.get("what"):
+            key = (s["who"].lower(), s["what"].lower().strip()[:40])
+            if key not in story_keys:
+                state.extracted_stories.append({**s, "kind": "positive"})
+                story_keys.add(key)
+    for s in data.get("off_target_stories", []) or []:
+        if s.get("who") and s.get("what"):
+            key = (s["who"].lower(), s["what"].lower().strip()[:40])
+            if key not in story_keys:
+                state.extracted_stories.append({**s, "kind": "off_target"})
+                story_keys.add(key)
+
+    # Mirror extracted state into the structured input fields the UI reads.
+    # Without this, the Goals / Users / Stories panels render empty after
+    # seeding even though we successfully pulled everything out.
+    state.input.goals = list(state.extracted_goals)
+    role_to_stories: dict[str, list[dict]] = {}
+    for s in state.extracted_stories:
+        who = s.get("who", "").strip()
+        if not who:
+            continue
+        role_to_stories.setdefault(who, []).append({
+            "what": s.get("what", ""),
+            "why": s.get("why", ""),
+            "kind": s.get("kind", "positive"),
+        })
+    state.input.story_groups = [
+        {"role": role, "stories": stories}
+        for role, stories in role_to_stories.items()
+    ]
 
 
 def _next_skill_version_number(state: SessionState) -> int:
@@ -821,65 +904,7 @@ async def seed_from_skill(
     # Stamp lineage so the UI knows these artifacts were generated against v1.
     _stamp_lineage(state, "goals", "users", "stories")
 
-    task_data = data.get("task") or {}
-    if task_data.get("input_description"):
-        state.charter.task.input_description = task_data["input_description"]
-    if task_data.get("output_description"):
-        state.charter.task.output_description = task_data["output_description"]
-    if task_data.get("sample_input"):
-        state.charter.task.sample_input = task_data["sample_input"]
-    if task_data.get("sample_output"):
-        state.charter.task.sample_output = task_data["sample_output"]
-
-    # Populate extracted state — dedup against any existing entries.
-    goals_lower = {g.lower() for g in state.extracted_goals}
-    for g in data.get("goals", []):
-        if g and g.lower() not in goals_lower:
-            state.extracted_goals.append(g)
-            goals_lower.add(g.lower())
-
-    users_lower = {u.lower() for u in state.extracted_users}
-    for u in data.get("users", []):
-        if u and u.lower() not in users_lower:
-            state.extracted_users.append(u)
-            users_lower.add(u.lower())
-
-    story_keys = {
-        (s.get("who", "").lower(), s.get("what", "").lower().strip()[:40])
-        for s in state.extracted_stories
-    }
-    for s in data.get("positive_stories", []) or []:
-        if s.get("who") and s.get("what"):
-            key = (s["who"].lower(), s["what"].lower().strip()[:40])
-            if key not in story_keys:
-                state.extracted_stories.append({**s, "kind": "positive"})
-                story_keys.add(key)
-    for s in data.get("off_target_stories", []) or []:
-        if s.get("who") and s.get("what"):
-            key = (s["who"].lower(), s["what"].lower().strip()[:40])
-            if key not in story_keys:
-                state.extracted_stories.append({**s, "kind": "off_target"})
-                story_keys.add(key)
-
-    # Mirror extracted state into the structured input fields the UI reads.
-    # Without this, the Goals/Users/Stories panels render empty after seeding
-    # even though skill-seed successfully pulled everything out of the SKILL.md.
-    state.input.goals = list(state.extracted_goals)
-    role_to_stories: dict[str, list[dict]] = {}
-    for s in state.extracted_stories:
-        who = s.get("who", "").strip()
-        if not who:
-            continue
-        bucket = role_to_stories.setdefault(who, [])
-        bucket.append({
-            "what": s.get("what", ""),
-            "why": s.get("why", ""),
-            "kind": s.get("kind", "positive"),
-        })
-    state.input.story_groups = [
-        {"role": role, "stories": stories}
-        for role, stories in role_to_stories.items()
-    ]
+    _apply_seed_data(state, data)
 
     await _save_state(session_id, state, conversation)
 
@@ -901,6 +926,149 @@ async def seed_from_skill(
     return SkillSeedResponse(
         state=state,
         message=data.get("summary") or "Seeded from SKILL.md. Review goals/users/stories and advance when ready.",
+    )
+
+
+# --- Sample skill projects ---
+
+@app.get("/samples", response_model=list[SampleInfo])
+async def list_samples_endpoint():
+    """List every registered sample project — tiles on the New Skill Eval modal.
+
+    Read-only, no auth: the list itself is fixture metadata, not user data.
+    """
+    from .samples import list_samples
+
+    return list_samples()
+
+
+@app.post(
+    "/samples/{sample_id}/sessions",
+    response_model=CreateSessionFromSampleResponse,
+)
+async def create_session_from_sample(
+    sample_id: str,
+    req: CreateSessionFromSampleRequest,
+):
+    """Instantiate a fully populated session from a sample fixture.
+
+    Lands the user on the populated workspace directly — no chat discovery,
+    no LLM call. Sample contributes skill body + extracted state + charter
+    + a starter dataset.
+
+    Mirrors the create-prompt-eval shape (review/triggered, lineage stamped,
+    SkillVersion v1 persisted) so the rest of the app — Skill panel, eval
+    runner, regenerate banners — treats sample-loaded sessions identically.
+    """
+    from .samples import load_sample as _load_sample
+
+    sample = _load_sample(sample_id)
+    if sample is None:
+        raise HTTPException(status_code=404, detail=f"Unknown sample: {sample_id}")
+
+    session_id = str(uuid.uuid4())
+    project_name = req.name or sample.name
+
+    # Build the state object in one pass. agent_status=review and
+    # discovery_phase=charter so the user lands on the populated workspace
+    # rather than the discovery conversation (defaults are drafting/goals
+    # and would drop them into a chat despite a complete charter).
+    state = SessionState(
+        session_id=session_id,
+        agent_status=AgentStatus.review,
+        eval_mode=EvalMode.triggered,
+        discovery_phase=DiscoveryPhase.charter,
+    )
+
+    # Charter first (carries task / coverage / balance / alignment / rot /
+    # safety from the fixture), then stamp skill_* onto the task definition.
+    state.charter = sample.charter.model_copy(deep=True)
+    state.charter.task.skill_name = sample.skill_name
+    state.charter.task.skill_description = sample.skill_description
+    state.charter.task.skill_body = sample.skill_body
+
+    # Snapshot the sample's body as v1 so version diffs work the same as
+    # for a regular skill eval. created_from="seed" matches what the
+    # /skill-seed endpoint records, so downstream consumers don't need to
+    # special-case sample-loaded sessions.
+    _append_skill_version(
+        state,
+        body=sample.skill_body,
+        created_from="seed",
+        notes=f"Loaded from sample: {sample.name}.",
+    )
+
+    # Apply the seed payload — populates task fields (idempotent with the
+    # charter set above), extracted_goals/users/stories, and mirrors them
+    # into input.goals / input.story_groups for the UI.
+    _apply_seed_data(state, sample.seed)
+
+    # Stamp lineage for every artifact the fixture pre-populates. Includes
+    # charter + dataset, unlike the /skill-seed flow which only stamps
+    # goals/users/stories (charter and dataset don't yet exist at seed time).
+    _stamp_lineage(state, "goals", "users", "stories", "charter", "dataset")
+
+    await db.create_session(session_id, state.model_dump(), name=project_name)
+
+    # Dataset — snapshot the charter at create time so re-renders after
+    # later charter edits show what the dataset was actually built against.
+    dataset = await db.create_dataset(
+        session_id=session_id,
+        name=f"{sample.name} — starter dataset",
+        charter_snapshot=state.charter.model_dump(),
+    )
+    dataset_id = dataset["id"]
+
+    # Bulk insert the fixture's example rows. Convert Pydantic Example
+    # models to plain dicts shaped for db.bulk_create_examples.
+    example_rows = [
+        {
+            "feature_area": ex.feature_area,
+            "input": ex.input,
+            "expected_output": ex.expected_output,
+            "coverage_tags": ex.coverage_tags,
+            "source": "sample",
+            "label": ex.label,
+            "label_reason": ex.label_reason,
+            "review_status": ex.review_status,
+            "should_trigger": ex.should_trigger,
+            "is_adversarial": ex.is_adversarial,
+        }
+        for ex in sample.examples
+    ]
+    if example_rows:
+        await db.bulk_create_examples(dataset_id, example_rows)
+    # Always compute stats — even an empty dataset wants its initial
+    # by-label counts persisted so the Dataset tab doesn't render blank.
+    await db.update_dataset_stats(dataset_id)
+
+    # Audit trail — same shape as skill_seed turns so prompt-eval can sample
+    # sample-loaded sessions later if we ever want to. No LLM calls were
+    # made, so llm_calls is empty.
+    await db.create_turn(
+        session_id=session_id,
+        turn_type="sample_loaded",
+        input_snapshot={
+            "sample_id": sample.id,
+            "skill_name": sample.skill_name,
+            "skill_description": sample.skill_description,
+            "skill_body": sample.skill_body,
+        },
+        llm_calls=[],
+        parsed_output={
+            "goals_count": len(state.extracted_goals),
+            "users_count": len(state.extracted_users),
+            "stories_count": len(state.extracted_stories),
+            "examples_count": len(example_rows),
+        },
+    )
+
+    return CreateSessionFromSampleResponse(
+        session_id=session_id,
+        sample_id=sample.id,
+        name=project_name,
+        dataset_id=dataset_id,
+        rows_total=len(example_rows),
     )
 
 

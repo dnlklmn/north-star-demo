@@ -379,6 +379,30 @@ class SetModeRequest(BaseModel):
     eval_mode: EvalMode
 
 
+class CreateSessionFromSampleRequest(BaseModel):
+    """Spin up a fully populated North Star project from a sample fixture.
+
+    The sample identifier comes from the URL path. `name` overrides the
+    default project name (the sample's display name).
+    """
+    name: Optional[str] = Field(default=None, max_length=200)
+
+
+class CreateSessionFromSampleResponse(BaseModel):
+    session_id: str
+    sample_id: str
+    name: str
+    dataset_id: str
+    rows_total: int
+
+
+class SampleInfo(BaseModel):
+    """Tile-shaped projection of a sample for the New Skill Eval modal."""
+    id: str
+    name: str
+    blurb: str
+
+
 class SkillSeedRequest(BaseModel):
     """Paste a SKILL.md (body) to auto-populate goals/users/stories + task def."""
     skill_body: str

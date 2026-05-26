@@ -326,6 +326,39 @@ export async function createSession(input: {
   return res.json()
 }
 
+export interface SampleInfo {
+  id: string
+  name: string
+  blurb: string
+}
+
+export interface CreateSessionFromSampleResponse {
+  session_id: string
+  sample_id: string
+  name: string
+  dataset_id: string
+  rows_total: number
+}
+
+export async function listSamples(): Promise<SampleInfo[]> {
+  const res = await apiFetch(`${BASE}/samples`)
+  if (!res.ok) throw new Error(`Failed to list samples: ${res.status}`)
+  return res.json()
+}
+
+export async function createSessionFromSample(
+  sampleId: string,
+  name?: string
+): Promise<CreateSessionFromSampleResponse> {
+  const res = await apiFetch(`${BASE}/samples/${sampleId}/sessions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+  if (!res.ok) throw new Error(`Failed to create session from sample: ${res.status}`)
+  return res.json()
+}
+
 export async function updateSessionName(
   sessionId: string,
   name: string
