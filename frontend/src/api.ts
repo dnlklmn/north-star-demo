@@ -121,6 +121,35 @@ export interface ShareForbiddenDetail {
 
 export const SHARE_FORBIDDEN_EVENT = 'northstar:share-forbidden'
 
+/**
+ * Global event fired when the backend rejects an LLM call because the caller
+ * (this IP) has hit the per-day quota — HTTP 429. Carries the limit + reset
+ * time from the response headers so the banner can render a useful message.
+ * Every API call site benefits automatically because the dispatch happens in
+ * `apiFetch`; individual callers still receive an Error to revert optimistic
+ * state if needed.
+ */
+export interface PlaygroundQuotaDetail {
+  message: string
+  /** Daily run cap, from X-Quota-Limit header. May be undefined if the header
+   *  is missing for any reason — the banner copes by showing only the message. */
+  limit?: number
+  /** Seconds until the quota window resets, from Retry-After header. */
+  retryAfterSeconds?: number
+}
+
+export const PLAYGROUND_QUOTA_EVENT = 'northstar:playground-quota'
+
+/**
+ * Global event fired when the backend rejects an LLM call because the daily
+ * spend cap is exhausted — HTTP 503. Same dispatch-from-apiFetch pattern.
+ */
+export interface PlaygroundSpendCapDetail {
+  message: string
+}
+
+export const PLAYGROUND_SPEND_CAP_EVENT = 'northstar:playground-spend-cap'
+
 async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
   // Cold-start auto-retry: GETs (and OPTIONS) are idempotent so a single
   // retry after a short wait absorbs a Render free-tier dyno wake-up
@@ -236,6 +265,43 @@ async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
     }
     throw new Error(message)
   }
+  if (res.status === 429) {
+    // Per-IP daily quota hit. Read the response detail + quota headers,
+    // broadcast a global event so the banner can show, and re-throw so the
+    // caller's catch path can still handle it.
+    let body: { detail?: string } = {}
+    try { body = await res.clone().json() } catch { /* not JSON */ }
+    const message = body.detail || 'Daily playground limit reached. Try again tomorrow.'
+    const limit = Number(res.headers.get('X-Quota-Limit')) || undefined
+    const retryAfter = Number(res.headers.get('Retry-After')) || undefined
+    try {
+      window.dispatchEvent(
+        new CustomEvent<PlaygroundQuotaDetail>(PLAYGROUND_QUOTA_EVENT, {
+          detail: { message, limit, retryAfterSeconds: retryAfter },
+        }),
+      )
+    } catch {
+      // SSR or other env without window — non-fatal.
+    }
+    throw new Error(message)
+  }
+  if (res.status === 503) {
+    // Backend hit its daily spend cap. Same global-event pattern as the
+    // billing banner so every call site uses uniform error UI.
+    let body: { detail?: string } = {}
+    try { body = await res.clone().json() } catch { /* not JSON */ }
+    const message = body.detail || 'Daily playground budget exceeded. Service will resume tomorrow.'
+    try {
+      window.dispatchEvent(
+        new CustomEvent<PlaygroundSpendCapDetail>(PLAYGROUND_SPEND_CAP_EVENT, {
+          detail: { message },
+        }),
+      )
+    } catch {
+      // SSR or other env without window — non-fatal.
+    }
+    throw new Error(message)
+  }
   return res
 }
 
@@ -244,6 +310,24 @@ async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
 export async function checkHealth(): Promise<{ status: string; has_default_api_key: boolean }> {
   const res = await apiFetch(`${BASE}/health`)
   if (!res.ok) return { status: 'error', has_default_api_key: false }
+  return res.json()
+}
+
+// --- Deployment config ---
+//
+// Read-only metadata the frontend pulls once on mount to learn which
+// surfaces to disable in this deployment (e.g. Polaris off in a public
+// playground) and what quota headroom the visitor has left.
+export interface DeploymentConfig {
+  polaris_enabled: boolean
+  daily_run_limit: number | null
+  runs_remaining: number | null
+  model: string
+}
+
+export async function getConfig(): Promise<DeploymentConfig> {
+  const res = await apiFetch(`${BASE}/config`)
+  if (!res.ok) throw new Error(`Failed to fetch config: ${res.status}`)
   return res.json()
 }
 
