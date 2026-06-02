@@ -54,3 +54,10 @@ build/
 # Eval agent-mode sandboxes (per-row scratch dirs created by eval_runner)
 backend/tmp/
 tmp/eval-runs/
+
+# Agent worktrees and stray local checkouts — must never be tracked as
+# gitlinks (a previous accident committed `collaborative` and
+# `.claude/worktrees/angry-shirley` as submodule-like entries, which broke
+# `git status` repo-wide).
+.claude/worktrees/
+/collaborative/
