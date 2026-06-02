@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { RotateCcw, Sparkles } from 'lucide-react'
 
 interface Props {
-  /** Name of this artifact — shown verbatim ("business goals", "charter", etc). */
+  /** Name of this artifact — shown verbatim ("business goals", "seed", etc). */
   artifact: string
   /** Active skill version number (latest). */
   activeVersion: number | null
@@ -44,7 +44,7 @@ function dismissalStorageKey(
 }
 
 /**
- * Shows at the top of Goals/Users/Stories/Charter/Dataset/Scorers panels.
+ * Shows at the top of Goals/Users/Stories/Seed/Dataset/Scorers panels.
  *
  * Two visual states:
  *   - IN SYNC: muted, informational. "Built from SKILL.md v{N}".

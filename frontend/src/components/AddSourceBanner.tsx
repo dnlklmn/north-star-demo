@@ -6,7 +6,7 @@ import {
   createPromptEvalSession,
   fetchSkillFromUrl,
   listPromptTargets,
-  seedFromSkill,
+  importFromSkill,
   setSessionMode,
   type PromptTargetInfo,
 } from '../api'
@@ -14,7 +14,7 @@ import { parseSkillFrontmatter } from '../utils/skillFrontmatter'
 
 interface Props {
   sessionId: string
-  onSeeded: () => void | Promise<void>
+  onImported: () => void | Promise<void>
   onPromptCreated: (newSessionId: string) => void
 }
 
@@ -29,7 +29,7 @@ type Mode = 'collapsed' | 'skill' | 'prompt'
  */
 export default function AddSourceBanner({
   sessionId,
-  onSeeded,
+  onImported,
   onPromptCreated,
 }: Props) {
   const [mode, setMode] = useState<Mode>('collapsed')
@@ -57,7 +57,7 @@ export default function AddSourceBanner({
     listPromptTargets()
       .then((list) => {
         setPromptTargets(list)
-        const preferred = list.find((t) => t.target === 'skill_seed') ?? list[0]
+        const preferred = list.find((t) => t.target === 'skill_import') ?? list[0]
         if (preferred) {
           setPromptTargetId(preferred.target)
           if (preferred.prompt_text) setPromptBody(preferred.prompt_text)
@@ -105,12 +105,12 @@ export default function AddSourceBanner({
       }
 
       await setSessionMode(sessionId, 'triggered')
-      await seedFromSkill(sessionId, {
+      await importFromSkill(sessionId, {
         skill_body: skillBody,
         skill_name: skillName,
         skill_description: skillDescription,
       })
-      await onSeeded()
+      await onImported()
       setMode('collapsed')
       setSkillInput('')
     } catch (err) {

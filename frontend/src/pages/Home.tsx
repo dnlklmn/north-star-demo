@@ -8,7 +8,7 @@ import {
   deleteSession,
   listSessions,
   setSessionMode,
-  seedFromSkill,
+  importFromSkill,
   fetchSkillFromUrl,
   updateSessionName,
 } from "../api";
@@ -47,7 +47,7 @@ function relativeTime(dateStr: string): string {
 
 function statusBadge(project: ProjectSummary): string | null {
   if (project.has_dataset) return null;
-  if (project.has_charter) return null;
+  if (project.has_seed) return null;
   return "Draft";
 }
 
@@ -65,6 +65,9 @@ export default function Home() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const [showSettings, setShowSettings] = useState(false);
+  // Selected project ids for bulk actions (delete). Checkboxes on each row
+  // drive this; a floating toolbar appears above the list when non-empty.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
 
   // Open Settings on demand from outside (LLMBillingBanner's "Change key"
   // button dispatches northstar:open-settings).
@@ -158,7 +161,7 @@ export default function Home() {
       let skillBody = input.trim();
       // Skill metadata pulled either from GitHub fetch response or, when the
       // user pastes raw markdown, from local frontmatter parsing. Without
-      // this, seedFromSkill received `{ skill_body }` only and the name +
+      // this, importFromSkill received `{ skill_body }` only and the name +
       // description fields stayed empty after Analyze.
       let skillName: string | undefined;
       let skillDescription: string | undefined;
@@ -186,10 +189,10 @@ export default function Home() {
       const sessionRes = await createSession({ name: "Untitled skill eval" });
       await setSessionMode(sessionRes.session_id, "triggered");
 
-      // Seed with skill content + metadata so charter.task.skill_name and
+      // Seed with skill content + metadata so seed.task.skill_name and
       // skill_description get populated server-side.
       if (skillBody) {
-        await seedFromSkill(sessionRes.session_id, {
+        await importFromSkill(sessionRes.session_id, {
           skill_body: skillBody,
           skill_name: skillName,
           skill_description: skillDescription,
@@ -218,7 +221,7 @@ export default function Home() {
       }
 
       setIsNewSkillModalOpen(false);
-      navigate(`/project/${sessionRes.session_id}?tab=goals`);
+      navigate(`/project/${sessionRes.session_id}?tab=skill`);
     } catch (err) {
       console.error("Failed to analyze skill:", err);
       alert(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`);
@@ -240,9 +243,55 @@ export default function Home() {
       // happens to reuse the id (extremely unlikely, but still) doesn't
       // get the dead row's data.
       evictSession(projectId);
+      setSelected((prev) => {
+        if (!prev.has(projectId)) return prev;
+        const next = new Set(prev);
+        next.delete(projectId);
+        return next;
+      });
     } catch (err) {
       console.error("Failed to delete project:", err);
     }
+  };
+
+  const toggleSelected = (projectId: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(projectId)) next.delete(projectId);
+      else next.add(projectId);
+      return next;
+    });
+  };
+
+  const handleBulkDelete = async () => {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    if (
+      !confirm(
+        `Delete ${ids.length} project${ids.length > 1 ? "s" : ""}? This cannot be undone.`,
+      )
+    )
+      return;
+    const results = await Promise.allSettled(
+      ids.map((id) => deleteSession(id)),
+    );
+    const deleted = new Set(
+      ids.filter((_, i) => results[i].status === "fulfilled"),
+    );
+    if (deleted.size > 0) {
+      setProjects((prev) => {
+        const next = prev.filter((p) => !deleted.has(p.id));
+        setCachedSessionsList(next);
+        return next;
+      });
+      deleted.forEach((id) => evictSession(id));
+    }
+    const failed = results.filter((r) => r.status === "rejected");
+    if (failed.length > 0) {
+      console.error("Failed to delete some projects:", failed);
+    }
+    // Keep only ids that failed to delete (if any) selected.
+    setSelected(new Set(ids.filter((id) => !deleted.has(id))));
   };
 
   return (
@@ -331,8 +380,36 @@ export default function Home() {
               </Button>
             </div>
           ) : (
-            <ul className="divide-y divide-border-hint">
-              {projects.map((project) => {
+            <div className="relative">
+              {/* Floating bulk-action bar — absolutely positioned so it
+                  overlays the padding above the list rather than pushing the
+                  rows down when a selection is made. */}
+              {selected.size > 0 && (
+                <div className="absolute bottom-full left-0 right-0 mb-2 flex items-center justify-between gap-3 px-3 py-2 bg-surface-raised border border-border shadow-lg z-20">
+                  <span className="text-sm text-fg-dim">
+                    {selected.size} selected
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setSelected(new Set())}
+                      className="px-2 py-1 text-sm text-fg-dim hover:text-fg-contrast"
+                    >
+                      Clear
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleBulkDelete}
+                      className="inline-flex items-center gap-1.5 px-2 py-1 text-sm font-medium text-danger hover:bg-danger/10"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              )}
+              <ul className="divide-y divide-border-hint">
+                {projects.map((project) => {
                 const badge = statusBadge(project);
                 return (
                   <li
@@ -341,9 +418,13 @@ export default function Home() {
                     className="group flex items-center justify-between h-11 px-2 -mx-2 cursor-pointer hover:bg-fill-neutral/30"
                   >
                     <div className="flex items-center gap-3 min-w-0">
-                      <span
-                        className="w-3 h-3 bg-fill-primary flex-shrink-0"
-                        aria-hidden
+                      <input
+                        type="checkbox"
+                        checked={selected.has(project.id)}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={() => toggleSelected(project.id)}
+                        className="w-3.5 h-3.5 accent-fill-primary cursor-pointer flex-shrink-0"
+                        aria-label={`Select ${project.name}`}
                       />
                       <span className="text-sm text-fg-contrast truncate">
                         {project.name}
@@ -378,7 +459,8 @@ export default function Home() {
                   </li>
                 );
               })}
-            </ul>
+              </ul>
+            </div>
           )}
         </div>
       </main>

@@ -40,7 +40,7 @@ export default function PanelLayout({
   children,
 }: Props) {
   // Width + resize handle come from a shared hook so the dataset
-  // workspace's sidebar tracks the same value — resize on Charter, see
+  // workspace's sidebar tracks the same value — resize on Seed, see
   // it apply on Dataset (and vice versa).
   const [rightWidth, startResize, isResizing] = useSidebarWidth();
   // When rightBottomExpanded is active, collapse Suggestions by default so

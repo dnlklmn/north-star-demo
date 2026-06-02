@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Plus, Pencil, Trash2, MessageSquare, ArrowRight } from "lucide-react";
-type Phase = "goals" | "users" | "stories" | "charter" | "dataset";
+type Phase = "goals" | "users" | "stories" | "seed" | "dataset";
 type ExtractedStory = { who: string; what: string; why: string };
 
 interface Props {
@@ -22,7 +22,7 @@ interface Props {
   advancing?: boolean;
 }
 
-const PHASE_ORDER = ["goals", "users", "stories", "charter", "dataset"];
+const PHASE_ORDER = ["goals", "users", "stories", "seed", "dataset"];
 
 function isPastPhase(section: string, currentPhase: string): boolean {
   return PHASE_ORDER.indexOf(section) < PHASE_ORDER.indexOf(currentPhase);
@@ -528,7 +528,7 @@ export default function DiscoveryScreen({
                 disabled={advancing}
                 className="mt-4 flex items-center gap-2 px-4 py-2 bg-success text-white text-sm font-medium hover:opacity-90 disabled:opacity-50 transition-opacity"
               >
-                {advancing ? "Generating..." : "Generate charter"}
+                {advancing ? "Generating..." : "Generate seed"}
                 <ArrowRight className="w-4 h-4" />
               </button>
             )}

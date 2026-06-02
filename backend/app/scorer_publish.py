@@ -148,7 +148,7 @@ def _to_mustache(prompt: str) -> str:
 # Braintrust UI maps each to a numeric score (1.0 / 0.5 / 0.0 by default,
 # tunable in the UI). We swap the generated scorers' "respond with ONLY a
 # float" tail for this rubric so the same Braintrust config that already
-# powers the hand-curated scorers (charter_quality, skill_seed_quality, etc.)
+# powers the hand-curated scorers (seed_quality, skill_import_quality, etc.)
 # works for the generated ones — no per-scorer custom parser needed.
 _CHOICE_RUBRIC = """## How to respond
 
@@ -188,7 +188,7 @@ def _normalize_response_tail(prompt: str) -> str:
     doesn't survive the move to Braintrust online scorers.
 
     Returning a structured choice (`pass` / `partial` / `fail`) lets the
-    same Braintrust UI config that already runs ``skill_seed_quality`` &
+    same Braintrust UI config that already runs ``skill_import_quality`` &
     friends parse our generated scorers too — no per-scorer setup needed.
 
     Idempotent: if the prompt already contains a choice rubric (because we
@@ -241,7 +241,7 @@ def scorer_to_online_md(
     ``code`` (matches what ``call_generate_scorers`` returns).
 
     ``turn_type`` is the Braintrust trace filter — for prompt-eval projects
-    this is the ``prompt_target`` (e.g. ``"skill_seed"``) so the scorer fires
+    this is the ``prompt_target`` (e.g. ``"skill_import"``) so the scorer fires
     on that prompt's traces and nothing else. Pass ``None`` to leave the
     filter blank — the user fills it in manually in the UI.
     """

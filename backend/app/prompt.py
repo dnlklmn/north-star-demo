@@ -1,13 +1,13 @@
-"""All prompts for the charter generation agent.
+"""All prompts for the seed generation agent.
 
 Each prompt is a function that takes state and returns a string.
 When you want to change what the agent says or how it reasons, edit here.
 
 Prompts:
 - build_discovery_turn_prompt(state, user_message) — discovery phase: elicit goals and stories
-- build_generate_draft_prompt(state) — generate charter JSON from user input
-- build_validate_charter_prompt(state) — validate charter against testability criteria
-- build_conversational_turn_prompt(state, user_message) — chat turn with optional charter updates
+- build_generate_draft_prompt(state) — generate seed JSON from user input
+- build_validate_seed_prompt(state) — validate seed against testability criteria
+- build_conversational_turn_prompt(state, user_message) — chat turn with optional seed updates
 - build_generate_suggestions_prompt(state) — suggest items for weak/empty sections
 """
 
@@ -136,7 +136,7 @@ PART 1 (required): Your conversational message.
 - 1-2 sentences acknowledging what you learned, then exactly ONE question.
 - CRITICAL: Ask exactly ONE question. Never two. Pick the single most important thing to learn next.
 - Do NOT embed the options in your message text. Just ask the question — the options will be shown as clickable buttons below your message.
-- Never use these words: charter, eval, criterion, dataset, LLM, prompt, model, framework, methodology, MECE, JTBD
+- Never use these words: seed, eval, criterion, dataset, LLM, prompt, model, framework, methodology, MECE, JTBD
 
 PART 2 (required): Extraction block.
 ```extraction
@@ -203,7 +203,7 @@ PART 1 (required): Your conversational message.
 - 1-2 sentences acknowledging what you learned, then exactly ONE question.
 - CRITICAL: Ask exactly ONE question. Never two. Pick the single most important thing to learn next.
 - Do NOT embed the options in your message text. Just ask the question — the options will be shown as clickable buttons below your message.
-- Never use these words: charter, eval, criterion, dataset, LLM, prompt, model, framework, methodology, MECE, JTBD
+- Never use these words: seed, eval, criterion, dataset, LLM, prompt, model, framework, methodology, MECE, JTBD
 
 PART 2 (required): Extraction block.
 ```extraction
@@ -258,7 +258,7 @@ def _build_stories_phase_prompt(goals_text: str, users_text: str, stories_text: 
     else:
         framework_hint = f"""You have {num_stories} stories ({positive_count} positive, {off_target_count} off-target). Check for completeness.
 - "Are there other things any of these users need to do, or other adjacent-looking requests we haven't covered?"
-- If stories feel complete, set ready_for_charter to true.
+- If stories feel complete, set ready_for_seed to true.
 - ONE question only."""
 
     triggered_block = ""
@@ -310,7 +310,7 @@ PART 1 (required): Your conversational message.
 - 1-2 sentences acknowledging what you learned, then exactly ONE question.
 - CRITICAL: Ask exactly ONE question. Never two. Pick the single most important thing to learn next.
 - Do NOT embed the options in your message text. Just ask the question — the options will be shown as clickable buttons below your message.
-- Never use these words: charter, eval, criterion, dataset, LLM, prompt, model, framework, methodology, MECE, JTBD
+- Never use these words: seed, eval, criterion, dataset, LLM, prompt, model, framework, methodology, MECE, JTBD
 
 PART 2 (required): Extraction block.
 ```extraction
@@ -318,7 +318,7 @@ PART 2 (required): Extraction block.
   "goals": [],
   "users": [],
   "stories": [{story_schema}],
-  "ready_for_charter": false,
+  "ready_for_seed": false,
   "suggested_stories": [{story_schema}]
 }}
 ```
@@ -328,7 +328,7 @@ PART 2 (required): Extraction block.
 - CRITICAL: Only extract NEW stories from this turn's message. Do NOT re-extract or refine stories that are already in the "User stories extracted so far" list above. If the user is elaborating on an existing story (e.g. adding detail to a story already extracted), do NOT create a new story — the existing one already covers it.
 - Stories follow: As a [who], I want to [what], so that [why]
 - The "who" MUST be one of the confirmed user types: {', '.join(users_list)}{kind_rule}
-- Set ready_for_charter to true when each user type has at least 1 story and you feel confident, OR the user says they want to move on
+- Set ready_for_seed to true when each user type has at least 1 story and you feel confident, OR the user says they want to move on
 - If a user manually added stories (shown above), acknowledge them briefly
 - IMPORTANT: suggested_stories are clickable options shown as buttons. Each should be a complete user story with who/what/why. Suggest stories for user types that don't have any yet. Do NOT repeat stories already extracted.
 - If there is not enough context yet to suggest meaningful stories, return an EMPTY suggested_stories array — do not guess."""
@@ -344,7 +344,7 @@ def build_generate_draft_prompt(state: SessionState, creativity: float = 0.2) ->
 - DO NOT invent, assume, or extrapolate. If the user said one thing, generate one criterion — not five.
 - If a section has no supporting input, leave its criteria array EMPTY []. This is expected and correct.
 - It is MUCH BETTER to have 1-2 specific criteria than 5 vague ones.
-- If the input is sparse, generate a sparse charter. The conversation will fill in the gaps."""
+- If the input is sparse, generate a sparse seed. The conversation will fill in the gaps."""
     elif creativity < 0.6:
         creativity_rules = """RULES:
 - Start with criteria DIRECTLY supported by the user's input.
@@ -381,7 +381,7 @@ def build_generate_draft_prompt(state: SessionState, creativity: float = 0.2) ->
             for s in positive_stories:
                 off_target_block += f'- As a {s.get("who", "?")}, I want to {s.get("what", "?")}, so that {s.get("why", "")}\n'
 
-        task_def = state.charter.task
+        task_def = state.seed.task
         if task_def.skill_name or task_def.skill_description:
             skill_meta = f"""
 ## Skill under evaluation
@@ -419,10 +419,10 @@ NOTE: this is static output-level safety. Runtime safety (did the skill actually
 
     # In skill (triggered) mode the user pasted a SKILL.md — that's the
     # canonical input. We've already extracted structured goals/users/stories
-    # from it via skill-seed, so a "conversation so far" transcript is noise.
+    # from it via skill-import, so a "conversation so far" transcript is noise.
     # Scratch (standard) mode keeps the original framing.
     if is_triggered:
-        input_section = f"""You are building a charter to EVALUATE a Claude Code skill. The skill's own SKILL.md is the source of truth — goals/users/stories were auto-extracted from it, and the user has reviewed them.
+        input_section = f"""You are building a seed to EVALUATE a Claude Code skill. The skill's own SKILL.md is the source of truth — goals/users/stories were auto-extracted from it, and the user has reviewed them.
 
 ## Source input
 {skill_meta.strip() if skill_meta else ""}
@@ -440,7 +440,7 @@ User stories: {state.input.user_stories or 'Not provided'}
 Conversation so far:
 {_format_conversation(state.input.conversation_history)}"""
 
-    return f"""Generate a charter based on the following input. Return ONLY valid JSON matching the schema.
+    return f"""Generate a seed based on the following input. Return ONLY valid JSON matching the schema.
 
 {input_section}
 
@@ -448,7 +448,7 @@ Return a JSON object with this exact structure:
 {{
   "task": {{
     "input_description": "what the app receives (e.g., 'business goals + user stories as freeform text')",
-    "output_description": "what the app produces (e.g., 'structured charter JSON with coverage, alignment sections')",
+    "output_description": "what the app produces (e.g., 'structured seed JSON with coverage, alignment sections')",
     "sample_input": "optional: a brief example of typical input",
     "sample_output": "optional: a brief example of typical output"
   }},
@@ -484,8 +484,8 @@ General quality rules:
 - Rot triggers must be tied to specific product events."""
 
 
-def build_validate_charter_prompt(state: SessionState) -> str:
-    charter_json = state.charter.model_dump()
+def build_validate_seed_prompt(state: SessionState) -> str:
+    seed_json = state.seed.model_dump()
     is_triggered = getattr(state, "eval_mode", None) and state.eval_mode.value == "triggered"
 
     triggered_rules = ""
@@ -498,8 +498,8 @@ def build_validate_charter_prompt(state: SessionState) -> str:
     # Skill mode: source of truth is the SKILL.md + extracted state, not an
     # "original input" from a conversation.
     if is_triggered:
-        skill_desc = state.charter.task.skill_description or "(none)"
-        skill_name = state.charter.task.skill_name or "(unnamed)"
+        skill_desc = state.seed.task.skill_description or "(none)"
+        skill_name = state.seed.task.skill_name or "(unnamed)"
         source_section = f"""Source: SKILL.md under evaluation
 - Name: {skill_name}
 - Description (routing signal): {skill_desc}
@@ -514,10 +514,10 @@ Extracted user roles + stories:
 Business goals: {state.input.business_goals or 'Not provided'}
 User stories: {state.input.user_stories or 'Not provided'}"""
 
-    return f"""Validate this charter against testability criteria. Be STRICT. Your job is to catch weak spots so they can be improved.
+    return f"""Validate this seed against testability criteria. Be STRICT. Your job is to catch weak spots so they can be improved.
 
-Charter to validate:
-{json.dumps(charter_json, indent=2)}
+Seed to validate:
+{json.dumps(seed_json, indent=2)}
 
 {source_section}
 Eval mode: {"triggered (skill/tool with routing decision)" if is_triggered else "standard"}
@@ -558,24 +558,24 @@ Return ONLY valid JSON:
 
 
 def build_conversational_turn_prompt(state: SessionState, user_message: str) -> str:
-    charter_json = state.charter.model_dump()
+    seed_json = state.seed.model_dump()
     validation_json = state.validation.model_dump()
     is_triggered = getattr(state, "eval_mode", None) and state.eval_mode.value == "triggered"
 
     # In skill mode the user already pasted a SKILL.md and reviewed the
     # extracted state — they know the eval vocabulary. In scratch mode we
-    # keep the "never say the word charter" framing because that flow still
+    # keep the "never say the word seed" framing because that flow still
     # leads a non-technical user through discovery.
     if is_triggered:
         message_rules = (
-            "- The user pasted a SKILL.md and knows what a charter/eval/scorer is. "
+            "- The user pasted a SKILL.md and knows what a seed/eval/scorer is. "
             "Speak in those terms — don't translate into product language."
         )
-        skill_desc = state.charter.task.skill_description or "(none)"
-        context_preamble = f"""You are helping the user refine the charter for evaluating their Claude Code skill.
+        skill_desc = state.seed.task.skill_description or "(none)"
+        context_preamble = f"""You are helping the user refine the seed for evaluating their Claude Code skill.
 
 Skill under evaluation:
-- Name: {state.charter.task.skill_name or "(unnamed)"}
+- Name: {state.seed.task.skill_name or "(unnamed)"}
 - Description: {skill_desc}
 
 Extracted goals + stories from SKILL.md:
@@ -584,7 +584,7 @@ Extracted goals + stories from SKILL.md:
 {state.input.user_stories or ''}"""
     else:
         message_rules = (
-            "- Never use technical words like: charter, eval, criterion, dataset, LLM, prompt, model\n"
+            "- Never use technical words like: seed, eval, criterion, dataset, LLM, prompt, model\n"
             "- Ask about their product and users, not about the document"
         )
         context_preamble = f"""You are helping a user define what good AI output looks like for their feature.
@@ -595,8 +595,8 @@ User stories: {state.input.user_stories or 'Not provided'}"""
 
     return f"""{context_preamble}
 
-Current charter:
-{json.dumps(charter_json, indent=2)}
+Current seed:
+{json.dumps(seed_json, indent=2)}
 
 Current validation status:
 {json.dumps(validation_json, indent=2)}
@@ -607,15 +607,15 @@ Conversation so far:
 The user just said: "{user_message}"
 
 Your job:
-1. If the user's message contains NEW INFORMATION that can improve a specific section of the charter, return a JSON block with the updated section. ONLY include sections that should change.
+1. If the user's message contains NEW INFORMATION that can improve a specific section of the seed, return a JSON block with the updated section. ONLY include sections that should change.
 2. Ask 1-2 follow-up questions to keep refining.
 3. If the user is asking to focus on a specific area (like "coverage" or "alignment"), ask questions about that area.
-4. ALWAYS include SUGGESTIONS — specific items the user could add to the charter with a single click. These should be concrete, actionable options based on the conversation so far.
+4. ALWAYS include SUGGESTIONS — specific items the user could add to the seed with a single click. These should be concrete, actionable options based on the conversation so far.
 
 Response format — your response has up to three parts, in this order:
 
-PART 1 (optional): If you have updates for the charter, start with:
-```charter-update
+PART 1 (optional): If you have updates for the seed, start with:
+```seed-update
 {{"coverage": {{"criteria": ["updated list"]}}, "alignment": [{{"feature_area": "...", "good": "...", "bad": "..."}}]}}
 ```
 
@@ -643,7 +643,7 @@ Rules for suggestions:
 - Include 0-2 user story suggestions when the conversation reveals new user types or use cases
 - Suggestions for coverage should be specific scenarios (e.g., "when a candidate has 10+ years experience but no degree")
 - Suggestions for alignment should have concrete good/bad descriptions
-- DE-DUP: every suggestion must be substantively different from every other suggestion AND from criteria already in the charter. Do not output the same idea with reworded phrasing. If you can only find 2 meaningfully distinct ones, return 2 — don't pad.
+- DE-DUP: every suggestion must be substantively different from every other suggestion AND from criteria already in the seed. Do not output the same idea with reworded phrasing. If you can only find 2 meaningfully distinct ones, return 2 — don't pad.
 
 Rules for your message:
 {message_rules}
@@ -667,14 +667,14 @@ Formatting rules for your conversational message (PART 2):
 
 
 def build_generate_suggestions_prompt(state: SessionState) -> str:
-    charter_json = state.charter.model_dump()
+    seed_json = state.seed.model_dump()
     validation_json = state.validation.model_dump()
     is_triggered = getattr(state, "eval_mode", None) and state.eval_mode.value == "triggered"
 
     if is_triggered:
         source = f"""Skill under evaluation:
-- Name: {state.charter.task.skill_name or "(unnamed)"}
-- Description: {state.charter.task.skill_description or "(none)"}
+- Name: {state.seed.task.skill_name or "(unnamed)"}
+- Description: {state.seed.task.skill_description or "(none)"}
 
 Extracted goals + stories from SKILL.md:
 {state.input.business_goals or '(none)'}
@@ -684,12 +684,12 @@ Extracted goals + stories from SKILL.md:
         source = f"""Business goals: {state.input.business_goals or 'Not provided'}
 User stories: {state.input.user_stories or 'Not provided'}"""
 
-    return f"""Based on this input and the current state of the charter, suggest specific items to add.
+    return f"""Based on this input and the current state of the seed, suggest specific items to add.
 
 {source}
 
-Current charter:
-{json.dumps(charter_json, indent=2)}
+Current seed:
+{json.dumps(seed_json, indent=2)}
 
 Validation status:
 {json.dumps(validation_json, indent=2)}
@@ -718,7 +718,7 @@ Rules:
 - Rot: specific product events that would change the rules
 - User stories: 0-2, only if the input reveals user types not yet captured
 - Think about what the user PROBABLY means but hasn't said explicitly yet
-- DE-DUP BEFORE RETURNING. Every suggestion must be substantively distinct from every other suggestion AND from criteria already in the charter. Do not restate the same idea with different wording. "70% fires / 30% doesn't" and "70% activates / 30% skips" are the SAME suggestion — pick one. If you can't find 3 meaningfully different suggestions for this charter state, return fewer."""
+- DE-DUP BEFORE RETURNING. Every suggestion must be substantively distinct from every other suggestion AND from criteria already in the seed. Do not restate the same idea with different wording. "70% fires / 30% doesn't" and "70% activates / 30% skips" are the SAME suggestion — pick one. If you can't find 3 meaningfully different suggestions for this seed state, return fewer."""
 
 
 def build_suggest_goals_prompt(goals: list[str]) -> str:
@@ -892,7 +892,7 @@ Begin the SKILL.md now:
 """
 
 
-def build_suggest_scorer_ideas_prompt(charter: dict, existing_scorers: list[dict]) -> str:
+def build_suggest_scorer_ideas_prompt(seed: dict, existing_scorers: list[dict]) -> str:
     """Prompt for suggesting NEW scorer ideas the user might want.
 
     Output is short pitches, not Python code — the user can later promote a
@@ -900,11 +900,11 @@ def build_suggest_scorer_ideas_prompt(charter: dict, existing_scorers: list[dict
     idea pairs with an optional ``type`` (coverage / alignment / balance /
     rot / safety) so the user can categorize at a glance.
     """
-    coverage = (charter.get("coverage") or {}).get("criteria") or []
-    balance = (charter.get("balance") or {}).get("criteria") or []
-    alignment = charter.get("alignment") or []
-    rot = (charter.get("rot") or {}).get("criteria") or []
-    safety = (charter.get("safety") or {}).get("criteria") or []
+    coverage = (seed.get("coverage") or {}).get("criteria") or []
+    balance = (seed.get("balance") or {}).get("criteria") or []
+    alignment = seed.get("alignment") or []
+    rot = (seed.get("rot") or {}).get("criteria") or []
+    safety = (seed.get("safety") or {}).get("criteria") or []
 
     coverage_text = "\n".join(f"- {c}" for c in coverage) or "(none)"
     balance_text = "\n".join(f"- {c}" for c in balance) or "(none)"
@@ -923,9 +923,9 @@ def build_suggest_scorer_ideas_prompt(charter: dict, existing_scorers: list[dict
         or "(none yet)"
     )
 
-    return f"""You are helping a product person who has generated a base set of LLM-as-judge scorers from their charter. They're now looking for additional scorer ideas they might have missed — angles that aren't covered by the existing set.
+    return f"""You are helping a product person who has generated a base set of LLM-as-judge scorers from their seed. They're now looking for additional scorer ideas they might have missed — angles that aren't covered by the existing set.
 
-Charter dimensions:
+Seed dimensions:
 Coverage:
 {coverage_text}
 
@@ -999,14 +999,14 @@ Rules:
 - At least some goals should pass without issues — don't nitpick everything"""
 
 
-SECTION_1_ROLE = """You are a charter builder. Your job is to help product and business people define what good AI output looks like for their specific feature — in terms they can evaluate themselves, without technical knowledge.
+SECTION_1_ROLE = """You are a seed builder. Your job is to help product and business people define what good AI output looks like for their specific feature — in terms they can evaluate themselves, without technical knowledge.
 
-The output is a charter: a structured set of criteria that guides dataset creation and evaluation. You should feel like a thoughtful conversation partner, not a form.
+The output is a seed: a structured set of criteria that guides dataset creation and evaluation. You should feel like a thoughtful conversation partner, not a form.
 
-You take whatever input is available — business goals, user stories, or raw conversation — and produce a validated charter through a structured loop. You generate first, then validate, then refine through questions."""
+You take whatever input is available — business goals, user stories, or raw conversation — and produce a validated seed through a structured loop. You generate first, then validate, then refine through questions."""
 
 
-SECTION_2_CHARTER_STRUCTURE = """## The document structure
+SECTION_2_SEED_STRUCTURE = """## The document structure
 
 The document you're building has four sections:
 
@@ -1053,7 +1053,7 @@ SECTION_4_CONVERSATION = """## Conversation rules
 - Explain why each question matters in plain language
 - Give progress signals after each turn: what is now covered, what still needs work
 - Never ask for information already provided in the session
-- Never use these words in conversation: charter, eval, criterion, dataset, dimension, LLM, prompt, embedding, token, model. Surface the concepts without the labels. Say "the document we're building" not "the charter". Say "a test case" not "an eval example". Say "what you're measuring" not "your eval criteria".
+- Never use these words in conversation: seed, eval, criterion, dataset, dimension, LLM, prompt, embedding, token, model. Surface the concepts without the labels. Say "the document we're building" not "the seed". Say "a test case" not "an eval example". Say "what you're measuring" not "your eval criteria".
 - If the user gives a vague answer, probe rather than accept: "you mentioned it should feel trustworthy — what would an untrustworthy response look like in practice?"
 - If the user says they don't know what something means, explain it in terms of their product — never in methodology terms
 - When all criteria pass, say so clearly and transition to review
@@ -1071,14 +1071,14 @@ SECTION_4_CONVERSATION = """## Conversation rules
 
 # --- Dataset phase prompts ---
 
-def build_synthesize_examples_prompt(charter: dict, feature_areas: list[str] | None = None, coverage_criteria: list[str] | None = None, count: int = 2) -> str:
-    task = charter.get("task", {})
-    coverage_data = charter.get("coverage", {})
+def build_synthesize_examples_prompt(seed: dict, feature_areas: list[str] | None = None, coverage_criteria: list[str] | None = None, count: int = 2) -> str:
+    task = seed.get("task", {})
+    coverage_data = seed.get("coverage", {})
     coverage = coverage_data.get("criteria", [])
     negative_coverage = coverage_data.get("negative_criteria", []) or []
-    balance = charter.get("balance", {}).get("criteria", [])
-    alignment = charter.get("alignment", [])
-    safety = charter.get("safety", {}).get("criteria", []) or []
+    balance = seed.get("balance", {}).get("criteria", [])
+    alignment = seed.get("alignment", [])
+    safety = seed.get("safety", {}).get("criteria", []) or []
 
     is_triggered = bool(negative_coverage) or bool(task.get("skill_description"))
     has_safety = bool(safety)
@@ -1165,10 +1165,10 @@ SAFETY ROWS (generate 1 adversarial row per safety criterion):
 - Use label="good" — a good response here is one that maintains safety, not one that matches the literal attack intent.
 - Only generate adversarial rows when safety criteria are present. Non-safety rows should leave scenario_type at "happy" / "edge" / "degenerate" as appropriate."""
 
-    return f"""Generate labeled examples for a dataset based on this charter.
+    return f"""Generate labeled examples for a dataset based on this seed.
 
 {task_section}
-## Charter context
+## Seed context
 
 ### Coverage criteria (input scenarios to represent):
 {json.dumps(target_coverage, indent=2)}
@@ -1190,7 +1190,7 @@ Each example must have:
 {json.dumps(target_areas, indent=2)}
 - **input**: a concrete, specific scenario matching the INPUT FORMAT above (not generic — include specifics)
 - **expected_output**: what the AI would actually produce, matching the OUTPUT FORMAT above
-- **coverage_tags**: list of strings, each EXACTLY one of these, verbatim — these are the coverage criteria from the charter, NOT the feature_area:
+- **coverage_tags**: list of strings, each EXACTLY one of these, verbatim — these are the coverage criteria from the seed, NOT the feature_area:
 {json.dumps(target_coverage, indent=2)}
 - **label**: "good" or "bad"
 - **label_reason**: one sentence explaining why this output is good or bad per the alignment definition
@@ -1222,14 +1222,14 @@ CRITICAL RULES:
 - Expected outputs must be realistic — what the AI would actually produce, not a summary of what it should do
 - Good outputs must match the alignment "good" definition exactly
 - Bad outputs must match the alignment "bad" definition exactly — they should be realistically bad, not cartoonishly wrong
-- Coverage tags must reference actual coverage criteria from the charter
+- Coverage tags must reference actual coverage criteria from the seed
 - Each example must be independently evaluable — all context needed is in the input{triggered_rules}{safety_rules}"""
 
 
-def build_synthesize_examples_cell_prefix(charter: dict) -> str:
+def build_synthesize_examples_cell_prefix(seed: dict) -> str:
     """Cacheable prefix shared across every per-cell synth call.
 
-    Contains the entire charter context, schema, and rules — everything that
+    Contains the entire seed context, schema, and rules — everything that
     stays byte-identical regardless of which (criterion × feature_area) cell
     is being generated. Pair with `build_synthesize_examples_cell_suffix` for
     a complete prompt.
@@ -1238,13 +1238,13 @@ def build_synthesize_examples_cell_prefix(charter: dict) -> str:
     fields (target_coverage, target_areas, count) here, or the cache hit
     rate drops to zero.
     """
-    task = charter.get("task", {})
-    coverage_data = charter.get("coverage", {})
+    task = seed.get("task", {})
+    coverage_data = seed.get("coverage", {})
     coverage = coverage_data.get("criteria", [])
-    balance = charter.get("balance", {}).get("criteria", [])
-    alignment = charter.get("alignment", [])
+    balance = seed.get("balance", {}).get("criteria", [])
+    alignment = seed.get("alignment", [])
 
-    # Per-cell fan-out is gated to charters without negatives/safety, so the
+    # Per-cell fan-out is gated to seeds without negatives/safety, so the
     # triggered/safety sections collapse to empty here. Keep the structure
     # parallel to build_synthesize_examples_prompt so future per-cell support
     # for those modes is a small diff.
@@ -1277,10 +1277,10 @@ Do NOT add extra context, metrics, dates, or details not present in the sample.
 IMPORTANT: Generated outputs must match this sample's structure and format.
 """
 
-    return f"""Generate labeled examples for a dataset based on this charter.
+    return f"""Generate labeled examples for a dataset based on this seed.
 
 {task_section}
-## Charter context
+## Seed context
 
 ### Coverage criteria (full list — the cell-specific scope is appended below):
 {json.dumps(coverage, indent=2)}
@@ -1317,7 +1317,7 @@ Return ONLY valid JSON:
 - Expected outputs must be realistic — what the AI would actually produce, not a summary of what it should do
 - Good outputs must match the alignment "good" definition exactly
 - Bad outputs must match the alignment "bad" definition exactly — they should be realistically bad, not cartoonishly wrong
-- Coverage tags must reference actual coverage criteria from the charter
+- Coverage tags must reference actual coverage criteria from the seed
 - Each example must be independently evaluable — all context needed is in the input
 - scenario_type: one of "happy" (typical, in-scope), "edge" (boundary, ambiguous), "adversarial" (safety probe), "degenerate" (malformed/empty input). Mix at least one "edge" per cell when count > 1.
 - difficulty: one of "trivial", "typical", "hard", "ambiguous" — self-assess against how subtle the right answer is."""
@@ -1329,7 +1329,7 @@ def build_synthesize_examples_cell_suffix(coverage_criterion: str, feature_area:
 
     The exact-string instructions matter: the gap analysis builds the
     coverage matrix by exact-matching `feature_area` and `coverage_tags`
-    against the charter, so any paraphrase by the LLM lands in a 0-count
+    against the seed, so any paraphrase by the LLM lands in a 0-count
     cell.
     """
     return f"""
@@ -1349,10 +1349,10 @@ Half should be label="good" and half label="bad" — for odd counts, prefer one 
 Do NOT generate examples for other criteria or feature areas; the rest of the grid is handled by separate calls."""
 
 
-def build_review_examples_prompt(charter: dict, examples: list[dict]) -> str:
-    task = charter.get("task", {})
-    alignment = charter.get("alignment", [])
-    coverage_data = charter.get("coverage", {})
+def build_review_examples_prompt(seed: dict, examples: list[dict]) -> str:
+    task = seed.get("task", {})
+    alignment = seed.get("alignment", [])
+    coverage_data = seed.get("coverage", {})
     coverage = coverage_data.get("criteria", [])
     negative_coverage = coverage_data.get("negative_criteria", []) or []
 
@@ -1409,12 +1409,12 @@ TRIGGERED MODE:
   - should_trigger=null/missing → fall back to standard-mode review: populate suggested_label/confidence/reasoning at the top level, leave trigger_verdict/execution_verdict null.
 - would_fire reasoning should reference the skill description specifically: does the routing signal pull this prompt in or push it away?"""
 
-    return f"""Review these dataset examples against the charter definitions.
+    return f"""Review these dataset examples against the seed definitions.
 
-{task_context}## Charter alignment definitions:
+{task_context}## Seed alignment definitions:
 {alignment_context}
 
-## Charter coverage criteria:
+## Seed coverage criteria:
 {json.dumps(coverage, indent=2)}
 {triggered_section}
 ## Examples to review:
@@ -1445,10 +1445,10 @@ Return ONLY valid JSON:
 Be conservative: if you're unsure whether an example matches the alignment definition, flag it as low confidence.{triggered_instructions}"""
 
 
-def build_dataset_chat_prompt(charter: dict, dataset_stats: dict, user_message: str, conversation_history: list[dict]) -> str:
-    task = charter.get("task", {})
-    alignment = charter.get("alignment", [])
-    coverage = charter.get("coverage", {}).get("criteria", [])
+def build_dataset_chat_prompt(seed: dict, dataset_stats: dict, user_message: str, conversation_history: list[dict]) -> str:
+    task = seed.get("task", {})
+    alignment = seed.get("alignment", [])
+    coverage = seed.get("coverage", {}).get("criteria", [])
 
     alignment_context = ""
     for a in alignment:
@@ -1463,9 +1463,9 @@ def build_dataset_chat_prompt(charter: dict, dataset_stats: dict, user_message: 
 
 """
 
-    return f"""You are helping a user build and curate a dataset for evaluating their AI feature. You helped them build the charter that defines quality — now you're helping them create examples that match it.
+    return f"""You are helping a user build and curate a dataset for evaluating their AI feature. You helped them build the seed that defines quality — now you're helping them create examples that match it.
 
-## Charter summary
+## Seed summary
 
 {task_context}### Feature areas:
 {alignment_context}
@@ -1486,7 +1486,7 @@ You can help with:
 - Explaining why the judge flagged an example
 - Identifying coverage gaps
 - Suggesting improvements to specific examples
-- Answering questions about the charter definitions
+- Answering questions about the seed definitions
 
 ## Available Actions
 You can execute actions in the app by including action blocks. Use these when the user asks you to DO something (not just explain).
@@ -1551,7 +1551,7 @@ Suggest actions when:
 - Proactively suggest helpful next actions based on the dataset state"""
 
 
-def _normalize_charter_string(s: str) -> str:
+def _normalize_seed_string(s: str) -> str:
     """Alphanumeric-lowercase normalization shared by the coverage matrix and
     the write-time coverage_tag snap. Strips punctuation/whitespace so two
     paraphrases of the same criterion collapse to the same key when their
@@ -1559,18 +1559,18 @@ def _normalize_charter_string(s: str) -> str:
     return "".join(c for c in (s or "").lower() if c.isalnum())
 
 
-def _resolve_charter_string(value: str, candidates: list[str]) -> str | None:
+def _resolve_seed_string(value: str, candidates: list[str]) -> str | None:
     """Fuzzy match `value` to the best `candidate` by longest shared
     normalized prefix. Returns the canonical candidate when the shared prefix
     is at least 12 chars (or covers both fully-normalized strings when both
     are shorter). Used by the coverage matrix and write-time snap so
     paraphrased criterion strings still credit the right cell."""
-    v = _normalize_charter_string(value)
+    v = _normalize_seed_string(value)
     if not v:
         return None
     best: tuple[int, str] | None = None
     for cand in candidates:
-        c = _normalize_charter_string(cand)
+        c = _normalize_seed_string(cand)
         if not c:
             continue
         common = 0
@@ -1588,14 +1588,14 @@ def _resolve_charter_string(value: str, candidates: list[str]) -> str | None:
     return best[1] if best else None
 
 
-def _build_coverage_matrix(charter: dict, examples: list[dict]) -> dict[str, dict[str, int]]:
+def _build_coverage_matrix(seed: dict, examples: list[dict]) -> dict[str, dict[str, int]]:
     """Count examples per (criterion × feature_area) cell.
 
     Behavior:
     - Counts any example whose review_status is not "rejected" (pending and
       approved both count, so the map reflects what was generated, not just
       what was reviewed).
-    - Fuzzy-matches feature_area and coverage_tags against the charter using
+    - Fuzzy-matches feature_area and coverage_tags against the seed using
       bidirectional prefix matching on alphanumeric-lowercase normalization.
       LLMs paraphrase, truncate, or re-punctuate criterion strings even when
       told not to — exact-key lookup silently zeros cells that did get
@@ -1603,8 +1603,8 @@ def _build_coverage_matrix(charter: dict, examples: list[dict]) -> dict[str, dic
       prefix of at least 12 characters (or one is a complete prefix of the
       other when both are shorter than that).
     """
-    coverage = charter.get("coverage", {}).get("criteria", [])
-    alignment = charter.get("alignment", [])
+    coverage = seed.get("coverage", {}).get("criteria", [])
+    alignment = seed.get("alignment", [])
     feature_areas = [a.get("feature_area", "") for a in alignment]
 
     matrix: dict[str, dict[str, int]] = {c: {fa: 0 for fa in feature_areas} for c in coverage}
@@ -1612,30 +1612,30 @@ def _build_coverage_matrix(charter: dict, examples: list[dict]) -> dict[str, dic
     for ex in examples:
         if ex.get("review_status") == "rejected":
             continue
-        ex_fa = _resolve_charter_string(ex.get("feature_area", ""), feature_areas)
+        ex_fa = _resolve_seed_string(ex.get("feature_area", ""), feature_areas)
         if ex_fa is None:
             continue
         for tag in ex.get("coverage_tags", []):
-            crit = _resolve_charter_string(tag, coverage)
+            crit = _resolve_seed_string(tag, coverage)
             if crit is not None:
                 matrix[crit][ex_fa] += 1
     return matrix
 
 
-def build_gap_analysis_prompt(charter: dict, dataset_stats: dict, examples: list[dict]) -> str:
-    coverage = charter.get("coverage", {}).get("criteria", [])
-    balance = charter.get("balance", {}).get("criteria", [])
-    alignment = charter.get("alignment", [])
+def build_gap_analysis_prompt(seed: dict, dataset_stats: dict, examples: list[dict]) -> str:
+    coverage = seed.get("coverage", {}).get("criteria", [])
+    balance = seed.get("balance", {}).get("criteria", [])
+    alignment = seed.get("alignment", [])
     feature_areas = [a.get("feature_area", "") for a in alignment]
 
-    coverage_matrix = _build_coverage_matrix(charter, examples)
+    coverage_matrix = _build_coverage_matrix(seed, examples)
 
-    return f"""Analyze this dataset for gaps against the charter.
+    return f"""Analyze this dataset for gaps against the seed.
 
-## Charter coverage criteria:
+## Seed coverage criteria:
 {json.dumps(coverage, indent=2)}
 
-## Charter balance criteria:
+## Seed balance criteria:
 {json.dumps(balance, indent=2)}
 
 ## Feature areas:
@@ -1666,28 +1666,28 @@ Return ONLY valid JSON:
 
 # --- Scorer generation prompts ---
 
-def build_generate_scorers_prompt(charter: dict, agent_contract: str | None = None) -> str:
-    """Build prompt for generating evaluation scorers from charter.
+def build_generate_scorers_prompt(seed: dict, agent_contract: str | None = None) -> str:
+    """Build prompt for generating evaluation scorers from seed.
 
     ``agent_contract`` is the system-prompt / SKILL.md / prompt-template that
     the system being scored operates under. Pass it when known so the LLM can
     align scorer pass criteria with what the system is *actually told to do*
     — e.g. if the contract says "infer goals from context", a scorer that
     requires literal preservation will always fail. Without this signal the
-    LLM has to guess from the charter alone, and the failure mode that
+    LLM has to guess from the seed alone, and the failure mode that
     surfaces is overly strict scorers that the agent can never satisfy.
 
     For prompt-eval projects this is ``PROMPT_TARGETS[prompt_target].prompt_text``.
     For skill-eval (triggered) projects this is the user's SKILL.md body.
     For skill-eval (chat) projects there is no separate agent prompt — the
-    charter is the only contract — pass None and the section is omitted.
+    seed is the only contract — pass None and the section is omitted.
     """
-    task = charter.get("task", {})
-    coverage = charter.get("coverage", {}).get("criteria", [])
-    balance = charter.get("balance", {}).get("criteria", [])
-    alignment = charter.get("alignment", [])
-    rot = charter.get("rot", {}).get("criteria", [])
-    safety = charter.get("safety", {}).get("criteria", []) or []
+    task = seed.get("task", {})
+    coverage = seed.get("coverage", {}).get("criteria", [])
+    balance = seed.get("balance", {}).get("criteria", [])
+    alignment = seed.get("alignment", [])
+    rot = seed.get("rot", {}).get("criteria", [])
+    safety = seed.get("safety", {}).get("criteria", []) or []
 
     alignment_context = ""
     for a in alignment:
@@ -1701,9 +1701,9 @@ def build_generate_scorers_prompt(charter: dict, agent_contract: str | None = No
 
 """
 
-    # Cap at ~8000 chars so the contract never crowds out the charter or
+    # Cap at ~8000 chars so the contract never crowds out the seed or
     # instructions in the LLM's context window. Same convention used by
-    # build_skill_seed_prompt for the same reason. We truncate from the end
+    # build_skill_import_prompt for the same reason. We truncate from the end
     # rather than the middle because the head of an agent contract typically
     # carries the role description + key constraints, while the tail is
     # often examples or schema — losing examples is cheaper than losing
@@ -1726,7 +1726,7 @@ Concretely:
 - When the contract says "infer X from context" or "extract 2-4 of Y" → grade quality of inference (grounded, well-shaped, distinct), NOT literal preservation from the input.
 - When the contract says "extract verbatim" or "preserve original wording" → grade fidelity to the source.
 - When the contract says "do not invent scope" or "stay within the skill's purpose" → that becomes a real failure mode worth scoring; out-of-scope additions should fail the relevant alignment scorer.
-- If the charter and the contract disagree (charter requires what the contract forbids, or vice versa), the contract wins — write the scorer to grade what the system is actually told to produce.
+- If the seed and the contract disagree (seed requires what the contract forbids, or vice versa), the contract wins — write the scorer to grade what the system is actually told to produce.
 
 `````
 {snippet}
@@ -1734,9 +1734,9 @@ Concretely:
 
 """
 
-    return f"""Generate Python evaluation scorer functions from this charter. Each scorer should be a complete, working function that uses an LLM-as-judge pattern.
+    return f"""Generate Python evaluation scorer functions from this seed. Each scorer should be a complete, working function that uses an LLM-as-judge pattern.
 
-{contract_section}{task_context}## Charter
+{contract_section}{task_context}## Seed
 
 ### Coverage criteria (input scenarios):
 {json.dumps(coverage, indent=2)}
@@ -1759,7 +1759,7 @@ Generate one scorer per alignment entry, one per coverage criterion, and one per
 
 1. Be a complete Python function with signature: `def scorer_name(output: str, input: str, metadata: dict) -> float | None`
 2. Return a float from 0.0 (worst) to 1.0 (best), OR `None` to skip this row entirely (used by coverage scorers — see below)
-3. Contain a complete LLM-as-judge prompt as a string variable — the prompt should be specific and grounded in the charter criteria, not generic
+3. Contain a complete LLM-as-judge prompt as a string variable — the prompt should be specific and grounded in the seed criteria, not generic
 4. Call `call_judge(prompt)` to get the score (assume this helper exists and returns a float)
 5. Have a clear docstring explaining what it evaluates
 
@@ -1770,7 +1770,7 @@ Scorer types:
 
 ## Gating (CRITICAL — purely structural, no LLM judgment at eval time)
 
-Every alignment and coverage scorer is generated from exactly one charter entry, and every dataset row carries the metadata that says which entry it exercises. Match them up directly — no judging "is this output FAQ-ish?" at runtime, just `is this row tagged for this scorer?`:
+Every alignment and coverage scorer is generated from exactly one seed entry, and every dataset row carries the metadata that says which entry it exercises. Match them up directly — no judging "is this output FAQ-ish?" at runtime, just `is this row tagged for this scorer?`:
 
 - **Coverage** scorer ← one `coverage.criteria` entry. Row matches when `metadata["coverage_tags"]` contains that criterion text.
 - **Alignment** scorer ← one `alignment[i].feature_area`. Row matches when `metadata["feature_area"]` equals that string.
@@ -1787,7 +1787,7 @@ Return ONLY valid JSON:
       "name": "snake_case_name",
       "type": "alignment" | "coverage" | "safety",
       "description": "one sentence describing what this scorer evaluates",
-      "target_tag": "exact charter text (REQUIRED for alignment + coverage; OMIT or null for safety)",
+      "target_tag": "exact seed text (REQUIRED for alignment + coverage; OMIT or null for safety)",
       "code": "complete Python function as a string"
     }}
   ]
@@ -1795,23 +1795,23 @@ Return ONLY valid JSON:
 
 CRITICAL RULES:
 - Function names must be valid Python identifiers (snake_case)
-- The judge prompt inside each function must be SPECIFIC to the charter criterion — not a generic "rate this output" prompt
+- The judge prompt inside each function must be SPECIFIC to the seed criterion — not a generic "rate this output" prompt
 - Each function must be self-contained and complete
 - Do not include import statements — only the function definition
 - Use f-strings to interpolate the output and input into the judge prompt
-- For each **coverage** scorer, `target_tag` MUST be the EXACT criterion text from the charter's `coverage.criteria` list — copied verbatim, case-sensitive.
-- For each **alignment** scorer, `target_tag` MUST be the EXACT `feature_area` string from the charter's alignment entry it grades — copied verbatim, case-sensitive.
-- Both forms gate at runtime; if `target_tag` is missing or doesn't match charter text, the scorer falls back to running ungated and pollutes the per-scorer average with noise on rows it wasn't designed for.
+- For each **coverage** scorer, `target_tag` MUST be the EXACT criterion text from the seed's `coverage.criteria` list — copied verbatim, case-sensitive.
+- For each **alignment** scorer, `target_tag` MUST be the EXACT `feature_area` string from the seed's alignment entry it grades — copied verbatim, case-sensitive.
+- Both forms gate at runtime; if `target_tag` is missing or doesn't match seed text, the scorer falls back to running ungated and pollutes the per-scorer average with noise on rows it wasn't designed for.
 - **Safety** scorers must omit `target_tag` (or set it to null) — they grade output-level rules that apply to every row."""
 
 
 # --- Revision suggestion prompts ---
 
-def build_revise_examples_prompt(charter: dict, examples_with_verdicts: list[dict]) -> str:
+def build_revise_examples_prompt(seed: dict, examples_with_verdicts: list[dict]) -> str:
     """Build prompt for suggesting revisions to examples that failed review."""
-    task = charter.get("task", {})
-    alignment = charter.get("alignment", [])
-    coverage = charter.get("coverage", {}).get("criteria", [])
+    task = seed.get("task", {})
+    alignment = seed.get("alignment", [])
+    coverage = seed.get("coverage", {}).get("criteria", [])
 
     alignment_context = ""
     for a in alignment:
@@ -1841,10 +1841,10 @@ def build_revise_examples_prompt(charter: dict, examples_with_verdicts: list[dic
 
     return f"""Suggest minimal, targeted revisions to these dataset examples to fix the issues identified during review.
 
-{task_context}## Charter alignment definitions:
+{task_context}## Seed alignment definitions:
 {alignment_context}
 
-## Charter coverage criteria:
+## Seed coverage criteria:
 {json.dumps(coverage, indent=2)}
 
 ## Examples to revise:
@@ -1858,7 +1858,7 @@ For each example, propose a revised version that:
 3. Maintains the same feature_area and coverage intent
 4. Ensures the input matches the task's input format
 5. Ensures the expected_output matches the task's output format
-6. Aligns with the charter's good/bad definitions for the feature area
+6. Aligns with the seed's good/bad definitions for the feature area
 
 If an example's input is fine and only the expected_output needs fixing, keep the input unchanged (return it as-is).
 If the label seems wrong based on the alignment definitions, the revision should match the ORIGINAL label intent — fix the output to actually be good (or bad) rather than changing what the example tests.
@@ -1919,17 +1919,17 @@ Rules:
 - Keep descriptions in plain language a non-technical person would understand"""
 
 
-def build_infer_schema_prompt(examples: list[dict], charter: dict) -> str:
+def build_infer_schema_prompt(examples: list[dict], seed: dict) -> str:
     """Build prompt for inferring schema from existing dataset examples."""
     # Format examples for the prompt
     examples_text = json.dumps(examples[:10], indent=2)  # Limit to 10 examples
 
-    alignment = charter.get("alignment", [])
+    alignment = seed.get("alignment", [])
     feature_areas = [a.get("feature_area", "") for a in alignment]
 
     return f"""Analyze these dataset examples to infer the input/output format for this application.
 
-Feature areas in the charter: {json.dumps(feature_areas)}
+Feature areas in the seed: {json.dumps(feature_areas)}
 
 Examples from the dataset:
 {examples_text}
@@ -2022,7 +2022,7 @@ Return clusters in descending count order so the worst bucket is first."""
 def build_suggest_improvements_prompt(
     skill_body: str,
     eval_run: dict,
-    charter: dict,
+    seed: dict,
     clusters: list[dict] | None = None,
 ) -> str:
     """Analyze eval failures and propose targeted edits to SKILL.md.
@@ -2030,7 +2030,7 @@ def build_suggest_improvements_prompt(
     The prompt receives:
       - current SKILL.md body
       - completed eval run (per-row outputs + per-scorer scores + judge reasoning)
-      - charter summary (so suggestions stay grounded in what "good" means)
+      - seed summary (so suggestions stay grounded in what "good" means)
 
     The model returns a short list of concrete, minimal edits with rationale
     that cites specific failing rows. Each edit is either a find/replace or
@@ -2097,8 +2097,8 @@ def build_suggest_improvements_prompt(
     failures = failures[:20]
     successes = successes[:5]
 
-    alignment = charter.get("alignment", []) or []
-    coverage_criteria = (charter.get("coverage") or {}).get("criteria") or []
+    alignment = seed.get("alignment", []) or []
+    coverage_criteria = (seed.get("coverage") or {}).get("criteria") or []
 
     return f"""You are reviewing a completed eval run on a Claude Code skill and proposing targeted edits to its SKILL.md. Your job is to identify patterns in the failures, then write minimal, specific edits that would plausibly fix them.
 
@@ -2108,7 +2108,7 @@ def build_suggest_improvements_prompt(
 {skill_body}
 ```
 
-## Charter (what "good" looks like for this skill)
+## Seed (what "good" looks like for this skill)
 
 Feature areas (alignment):
 {json.dumps(alignment, indent=2) if alignment else "(none)"}
@@ -2202,7 +2202,7 @@ def _cluster_task_hint(clusters: list[dict] | None) -> str:
     return " The user-written cluster labels above are the source of truth for grouping — when you propose a suggestion that fixes one of those clusters, set `target_label` to that cluster's `label` so the UI can show 'fixes for over_triggers_on_greeting' etc. A single suggestion can target at most one cluster; if a suggestion isn't tied to a specific cluster, leave `target_label` empty."
 
 
-def build_skill_seed_prompt(skill_body: str, skill_name: str | None, skill_description: str | None) -> str:
+def build_skill_import_prompt(skill_body: str, skill_name: str | None, skill_description: str | None) -> str:
     """Build prompt for seeding goals/users/stories/task from a SKILL.md body.
 
     Triggered-mode only. Used when the user pastes a SKILL.md so the flow can
@@ -2211,7 +2211,7 @@ def build_skill_seed_prompt(skill_body: str, skill_name: str | None, skill_descr
     name_line = f"Name: {skill_name}" if skill_name else "Name: (not provided)"
     desc_line = f"Description (routing signal): {skill_description}" if skill_description else "Description: (not provided — extract from frontmatter if present)"
 
-    return f"""You are seeding a skill evaluation session from a SKILL.md file. The skill is loaded into Claude Code (or a similar harness) based on its description. Your job is to extract structured inputs for a charter-building flow so the user doesn't have to re-state what the skill already declares.
+    return f"""You are seeding a skill evaluation session from a SKILL.md file. The skill is loaded into Claude Code (or a similar harness) based on its description. Your job is to extract structured inputs for a seed-building flow so the user doesn't have to re-state what the skill already declares.
 
 ## SKILL metadata
 {name_line}
@@ -2295,17 +2295,17 @@ Rules:
 
 
 
-def build_retag_examples_against_charter_prompt(charter: dict, examples: list[dict]) -> str:
+def build_retag_examples_against_seed_prompt(seed: dict, examples: list[dict]) -> str:
     """For each example, decide which alignment feature_area it most resembles
-    and which charter coverage criteria its input scenario hits.
+    and which seed coverage criteria its input scenario hits.
 
     Used by prompt-eval projects: the dataset arrives via sampled `turns` with
     coarse `feature_area` buckets ("goals_only", "goals+stories", etc.) that
-    don't align with the charter's output-quality dimensions. After charter
+    don't align with the seed's output-quality dimensions. After seed
     generation we re-tag each row so the Coverage Map can show real gaps.
     """
-    coverage = charter.get("coverage", {}).get("criteria", []) or []
-    alignment = charter.get("alignment", []) or []
+    coverage = seed.get("coverage", {}).get("criteria", []) or []
+    alignment = seed.get("alignment", []) or []
     feature_areas = [a.get("feature_area", "") for a in alignment if a.get("feature_area")]
 
     alignment_block = ""
@@ -2324,16 +2324,16 @@ def build_retag_examples_against_charter_prompt(charter: dict, examples: list[di
             inp = inp[:800] + "…"
         rows.append({"id": ex.get("id"), "input": inp})
 
-    return f"""Re-tag each dataset row against the charter so the coverage matrix is meaningful.
+    return f"""Re-tag each dataset row against the seed so the coverage matrix is meaningful.
 
 For every row, decide:
 1. Which alignment feature_area best describes what the prompt is being asked to handle for that input. Pick exactly one from the list. If none fit cleanly, pick the closest.
 2. Which coverage criteria the input scenario hits. Multiple tags are fine; empty list is fine if nothing applies.
 
-## Charter coverage criteria
+## Seed coverage criteria
 {json.dumps(coverage, indent=2)}
 
-## Charter alignment feature areas
+## Seed alignment feature areas
 {alignment_block if alignment_block else '(none defined)'}
 
 ## Rows to retag
@@ -2364,12 +2364,12 @@ Rules:
 # ============================================================================
 
 
-def build_polaris_system_prompt(context: dict, charter_summary: dict | None) -> str:
+def build_polaris_system_prompt(context: dict, seed_summary: dict | None) -> str:
     """System prompt for Polaris — the global, tool-using assistant.
 
     The frontend hands us a `context` blob (current route, project, dataset,
     selected example, phase) so the model knows where the user is without
-    having to call read tools just to find out. The charter summary is
+    having to call read tools just to find out. The seed summary is
     inlined when present (small enough; saves a round-trip).
     """
     route = context.get("route") or "(unknown)"
@@ -2378,13 +2378,13 @@ def build_polaris_system_prompt(context: dict, charter_summary: dict | None) -> 
     dataset = context.get("dataset_id") or "(none)"
     selected = context.get("selected_example_id") or "(none)"
 
-    charter_block = ""
-    if charter_summary:
-        task = charter_summary.get("task") or {}
-        alignment = charter_summary.get("alignment") or []
-        coverage = (charter_summary.get("coverage") or {}).get("criteria") or []
-        charter_block = (
-            "\n## Charter (current project)\n"
+    seed_block = ""
+    if seed_summary:
+        task = seed_summary.get("task") or {}
+        alignment = seed_summary.get("alignment") or []
+        coverage = (seed_summary.get("coverage") or {}).get("criteria") or []
+        seed_block = (
+            "\n## Seed (current project)\n"
             f"- Input: {task.get('input_description') or '(unspecified)'}\n"
             f"- Output: {task.get('output_description') or '(unspecified)'}\n"
             f"- Feature areas ({len(alignment)}): "
@@ -2396,7 +2396,7 @@ def build_polaris_system_prompt(context: dict, charter_summary: dict | None) -> 
             + "\n"
         )
 
-    return f"""You are Polaris, the assistant for North Star — an eval-driven development tool. The user describes their AI feature, you help them build a charter and curate a dataset.
+    return f"""You are Polaris, the assistant for North Star — an eval-driven development tool. The user describes their AI feature, you help them build a seed and curate a dataset.
 
 ## How you work
 
@@ -2414,7 +2414,7 @@ Tool tiers:
 - Phase: {phase}
 - Dataset (dataset_id): {dataset}
 - Selected example: {selected}
-{charter_block}
+{seed_block}
 ## Style
 
 - Be brief. 1–3 short sentences before/after a tool call.

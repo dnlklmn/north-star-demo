@@ -1,29 +1,29 @@
 import { X, Copy, Check } from 'lucide-react'
 import { useMemo, useState } from 'react'
-import type { Charter } from '../types'
+import type { Seed } from '../types'
 
 interface Props {
-  charter: Charter
+  seed: Seed
   title?: string
   subtitle?: string
   onClose: () => void
 }
 
 /**
- * Full-screen modal that renders a Charter as one scrollable document.
- * Used from the Charter tab header ("View as document") and from any
- * eval run ("View charter" — reads charter_snapshot from the run).
+ * Full-screen modal that renders a Seed as one scrollable document.
+ * Used from the Seed tab header ("View as document") and from any
+ * eval run ("View seed" — reads seed_snapshot from the run).
  *
  * Output is markdown-shaped so a user can copy-paste into a PRD or PR
  * description.
  */
-export default function CharterDocument({
-  charter,
-  title = 'Charter',
+export default function SeedDocument({
+  seed,
+  title = 'Seed',
   subtitle,
   onClose,
 }: Props) {
-  const markdown = useMemo(() => charterToMarkdown(charter), [charter])
+  const markdown = useMemo(() => seedToMarkdown(seed), [seed])
   const [copied, setCopied] = useState(false)
 
   const handleCopy = async () => {
@@ -78,15 +78,15 @@ export default function CharterDocument({
 }
 
 /**
- * Renders a Charter as a flat markdown document. Missing sections render
+ * Renders a Seed as a flat markdown document. Missing sections render
  * with "(none)" so the document is always structurally complete and diffs
  * well across runs.
  */
-function charterToMarkdown(charter: Charter): string {
+function seedToMarkdown(seed: Seed): string {
   const lines: string[] = []
-  const t = charter.task
+  const t = seed.task
 
-  lines.push('# Charter')
+  lines.push('# Seed')
   lines.push('')
 
   // Task / skill metadata
@@ -130,12 +130,12 @@ function charterToMarkdown(charter: Charter): string {
   lines.push('## Coverage')
   lines.push('')
   lines.push('### Positive — scenarios the skill SHOULD handle')
-  if (charter.coverage.criteria.length === 0) {
+  if (seed.coverage.criteria.length === 0) {
     lines.push('- (none)')
   } else {
-    for (const c of charter.coverage.criteria) lines.push(`- ${c}`)
+    for (const c of seed.coverage.criteria) lines.push(`- ${c}`)
   }
-  const negatives = charter.coverage.negative_criteria ?? []
+  const negatives = seed.coverage.negative_criteria ?? []
   if (negatives.length > 0) {
     lines.push('')
     lines.push('### Off-target — scenarios the skill should NOT handle')
@@ -146,20 +146,20 @@ function charterToMarkdown(charter: Charter): string {
   // Balance
   lines.push('## Balance')
   lines.push('')
-  if (charter.balance.criteria.length === 0) {
+  if (seed.balance.criteria.length === 0) {
     lines.push('- (none)')
   } else {
-    for (const c of charter.balance.criteria) lines.push(`- ${c}`)
+    for (const c of seed.balance.criteria) lines.push(`- ${c}`)
   }
   lines.push('')
 
   // Alignment
   lines.push('## Alignment')
   lines.push('')
-  if (charter.alignment.length === 0) {
+  if (seed.alignment.length === 0) {
     lines.push('*(no feature areas)*')
   } else {
-    for (const a of charter.alignment) {
+    for (const a of seed.alignment) {
       lines.push(`### ${a.feature_area}`)
       lines.push(`- **Good:** ${a.good || '(none)'}`)
       lines.push(`- **Bad:** ${a.bad || '(none)'}`)
@@ -170,15 +170,15 @@ function charterToMarkdown(charter: Charter): string {
   // Rot
   lines.push('## Rot')
   lines.push('')
-  if (charter.rot.criteria.length === 0) {
+  if (seed.rot.criteria.length === 0) {
     lines.push('- (none)')
   } else {
-    for (const c of charter.rot.criteria) lines.push(`- ${c}`)
+    for (const c of seed.rot.criteria) lines.push(`- ${c}`)
   }
   lines.push('')
 
   // Safety (optional)
-  const safetyCriteria = charter.safety?.criteria ?? []
+  const safetyCriteria = seed.safety?.criteria ?? []
   if (safetyCriteria.length > 0) {
     lines.push('## Safety')
     lines.push('')

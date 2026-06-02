@@ -1,16 +1,16 @@
 import { Loader2, Maximize2 } from 'lucide-react'
-import type { Charter, GapAnalysis } from '../types'
+import type { Seed, GapAnalysis } from '../types'
 import ResponsiveRadar from './ResponsiveRadar'
 import { computeCoverageScore } from './coverage'
 import { useSidebarWidth } from '../lib/useSidebarWidth'
 
-interface CharterSidebarProps {
-  charter: Charter
-  /** Charter at the time the dataset was generated. Rows' feature_area
+interface SeedSidebarProps {
+  seed: Seed
+  /** Seed at the time the dataset was generated. Rows' feature_area
    *  strings are normalized against this at synth time, so we look up
-   *  alignment here first — using the live charter would miss matches
-   *  whenever the user edited the charter post-synth. */
-  charterSnapshot?: Charter | null
+   *  alignment here first — using the live seed would miss matches
+   *  whenever the user edited the seed post-synth. */
+  seedSnapshot?: Seed | null
   /** feature_area of the currently focused row (set by click or scroll).
    *  Resolved against alignment by name match. */
   focusedFeatureArea: string | null | undefined
@@ -25,15 +25,15 @@ interface CharterSidebarProps {
    *  "Improve coverage" button and shows an inline spinner — same gating as
    *  the toolbar's Generate button. */
   fillingGaps?: boolean
-  /** Navigate to the Charter tab's alignment section so the user can add or
+  /** Navigate to the Seed tab's alignment section so the user can add or
    *  edit alignment entries. Called from the "Add alignment criteria" CTA
-   *  in the no-match branch of the charter criteria block. */
+   *  in the no-match branch of the seed criteria block. */
   onAddAlignmentCriteria?: () => void
 }
 
-export default function CharterSidebar({
-  charter,
-  charterSnapshot,
+export default function SeedSidebar({
+  seed,
+  seedSnapshot,
   focusedFeatureArea,
   focusedCoverageTags,
   gaps,
@@ -41,18 +41,18 @@ export default function CharterSidebar({
   onRequestFillGaps,
   fillingGaps = false,
   onAddAlignmentCriteria,
-}: CharterSidebarProps) {
+}: SeedSidebarProps) {
   const [sidebarWidth, startResize, isResizing] = useSidebarWidth()
   // Prefer the snapshot for matching — that's the alignment the rows were
-  // tagged against. Fall back to the live charter if the dataset has no
+  // tagged against. Fall back to the live seed if the dataset has no
   // snapshot (older datasets) or it's empty.
-  const snapshotAlignment = charterSnapshot?.alignment ?? []
-  const liveAlignment = charter.alignment ?? []
+  const snapshotAlignment = seedSnapshot?.alignment ?? []
+  const liveAlignment = seed.alignment ?? []
   const allAlignment = snapshotAlignment.length > 0 ? snapshotAlignment : liveAlignment
   const matched = allAlignment.find(a => a.feature_area === focusedFeatureArea)
   // Drift signal: when both lists are non-empty and their feature_area sets
-  // differ, the user edited the charter after synth and "Retag against
-  // charter" would help.
+  // differ, the user edited the seed after synth and "Retag against
+  // seed" would help.
   const usingSnapshot = snapshotAlignment.length > 0
   const driftDetected =
     usingSnapshot &&
@@ -89,7 +89,7 @@ export default function CharterSidebar({
       <section className="p-6 flex flex-col gap-3 text-xs">
         <header className="flex flex-col gap-0.5">
           <div className="text-[10px] uppercase tracking-wide text-fg-dim">
-            Charter criteria
+            Seed criteria
           </div>
           <div className="text-sm font-semibold text-fg-contrast leading-tight">
             {focusedFeatureArea || 'No row in view'}
@@ -98,14 +98,14 @@ export default function CharterSidebar({
 
         {driftDetected && (
           <div className="px-2 py-1.5 bg-warning/10 border-l-2 border-warning text-[11px] text-warning leading-snug">
-            The charter alignment has changed since this dataset was
-            generated. Run "Retag against charter" to align rows.
+            The seed alignment has changed since this dataset was
+            generated. Run "Retag against seed" to align rows.
           </div>
         )}
 
         {!focusedFeatureArea ? (
           <p className="text-fg-dim">
-            Scroll or click a row to see the charter alignment for it.
+            Scroll or click a row to see the seed alignment for it.
           </p>
         ) : matched ? (
           <>
@@ -136,7 +136,7 @@ export default function CharterSidebar({
   )
 }
 
-function sameFeatureAreas(a: Charter['alignment'], b: Charter['alignment']): boolean {
+function sameFeatureAreas(a: Seed['alignment'], b: Seed['alignment']): boolean {
   if (a.length !== b.length) return false
   const setA = new Set(a.map(e => e.feature_area))
   for (const e of b) {

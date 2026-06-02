@@ -1,4 +1,4 @@
-"""Database connection and queries for sessions and charters."""
+"""Database connection and queries for sessions and seeds."""
 
 from __future__ import annotations
 
@@ -54,13 +54,35 @@ async def _create_tables() -> None:
             EXCEPTION WHEN others THEN NULL;
             END $$;
         """)
+        # charter -> seed rename migration (idempotent). Runs BEFORE the
+        # `CREATE TABLE IF NOT EXISTS seeds` below so an existing `charters`
+        # table is renamed in place rather than stranded next to a fresh empty
+        # `seeds`. Guards via information_schema make every branch a no-op once
+        # already applied (and on a brand-new database).
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS charters (
+            DO $$ BEGIN
+                IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'charters')
+                   AND NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'seeds') THEN
+                    ALTER TABLE charters RENAME TO seeds;
+                END IF;
+                IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'seeds' AND column_name = 'charter') THEN
+                    ALTER TABLE seeds RENAME COLUMN charter TO seed;
+                END IF;
+                IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'datasets' AND column_name = 'charter_snapshot') THEN
+                    ALTER TABLE datasets RENAME COLUMN charter_snapshot TO seed_snapshot;
+                END IF;
+                IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'eval_runs' AND column_name = 'charter_snapshot') THEN
+                    ALTER TABLE eval_runs RENAME COLUMN charter_snapshot TO seed_snapshot;
+                END IF;
+            END $$;
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS seeds (
                 id              TEXT PRIMARY KEY,
                 session_id      TEXT NOT NULL REFERENCES sessions(id),
                 created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
                 finalised_at    TIMESTAMPTZ,
-                charter         JSONB NOT NULL DEFAULT '{}'::jsonb,
+                seed         JSONB NOT NULL DEFAULT '{}'::jsonb,
                 weak_criteria   JSONB NOT NULL DEFAULT '[]'::jsonb
             );
         """)
@@ -97,7 +119,7 @@ async def _create_tables() -> None:
                 name              TEXT,
                 status            TEXT NOT NULL DEFAULT 'draft',
                 stats             JSONB NOT NULL DEFAULT '{}'::jsonb,
-                charter_snapshot  JSONB NOT NULL DEFAULT '{}'::jsonb,
+                seed_snapshot  JSONB NOT NULL DEFAULT '{}'::jsonb,
                 created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
             );
         """)
@@ -122,6 +144,23 @@ async def _create_tables() -> None:
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_examples_dataset ON examples(dataset_id);
         """)
+        # Per-session/per-turn foreign-key indexes. Without these, deleting a
+        # project sequential-scans the whole turns/judgements/datasets/seeds
+        # tables per statement — cheap on a local dev DB, but slow in production
+        # once turns (one row per LLM call) grows large. These back both the
+        # cascading delete and any per-session lookups.
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_judgements_turn ON judgements(turn_id);
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_datasets_session ON datasets(session_id);
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_seeds_session ON seeds(session_id);
+        """)
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_examples_review ON examples(dataset_id, review_status);
         """)
@@ -143,7 +182,7 @@ async def _create_tables() -> None:
         """)
         # One-time heal: retire dead model IDs that an earlier dropdown shipped.
         # The retired snapshots 404 at request time, which surfaces as
-        # "Internal Server Error" on Improve / charter generation. Map them to
+        # "Internal Server Error" on Improve / seed generation. Map them to
         # the closest live model in the same family.
         await conn.execute("""
             UPDATE settings SET model_name = 'claude-sonnet-4-5-20250929'
@@ -223,10 +262,10 @@ async def _create_tables() -> None:
             CREATE INDEX IF NOT EXISTS idx_eval_runs_session
                 ON eval_runs(session_id, created_at DESC);
         """)
-        # Migration: capture the charter at run-creation time so the UI can
+        # Migration: capture the seed at run-creation time so the UI can
         # show exactly what was evaluated, even after later edits.
         await conn.execute("""
-            ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS charter_snapshot JSONB;
+            ALTER TABLE eval_runs ADD COLUMN IF NOT EXISTS seed_snapshot JSONB;
         """)
         # Migration: persist the suggestions generated by analyzing this run
         # so they survive page reload. Each suggestion carries its generated
@@ -289,6 +328,36 @@ async def _create_tables() -> None:
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_share_tokens_session
                 ON share_tokens(session_id);
+        """)
+
+        # charter -> seed / skill_seed -> skill_import data migrations. Run after
+        # every table exists; all are no-ops on a fresh database (0 rows). These
+        # rename stored JSONB keys + provenance values that the column/table
+        # renames above don't reach.
+        # 1) live session state: { "charter": {...} } -> { "seed": {...} }
+        await conn.execute("""
+            UPDATE sessions
+               SET state = (state - 'charter') || jsonb_build_object('seed', state -> 'charter')
+             WHERE state ? 'charter';
+        """)
+        # 2) turn provenance: the skill-seed pass is now "skill_import"
+        await conn.execute("""
+            UPDATE turns SET turn_type = 'skill_import' WHERE turn_type = 'skill_seed';
+        """)
+        # 3) skill-version provenance value created_from "seed" -> "import"
+        #    (nested array inside session state)
+        await conn.execute("""
+            UPDATE sessions
+               SET state = jsonb_set(
+                       state,
+                       '{skill_versions}',
+                       (SELECT jsonb_agg(
+                            CASE WHEN elem ->> 'created_from' = 'seed'
+                                 THEN jsonb_set(elem, '{created_from}', '"import"')
+                                 ELSE elem END)
+                        FROM jsonb_array_elements(state -> 'skill_versions') elem))
+             WHERE jsonb_typeof(state -> 'skill_versions') = 'array'
+               AND state -> 'skill_versions' @> '[{"created_from": "seed"}]';
         """)
 
         # Tables owned by self-contained app modules — they manage their own
@@ -397,13 +466,13 @@ async def list_sessions(limit: int = 50) -> list[dict]:
             state = row.get("state")
             if isinstance(state, str):
                 state = json.loads(state)
-            # Compute has_charter from state
-            charter = (state or {}).get("charter", {})
-            has_charter = bool(
-                charter.get("coverage", {}).get("criteria")
-                or charter.get("alignment")
+            # Compute has_seed from state
+            seed = (state or {}).get("seed", {})
+            has_seed = bool(
+                seed.get("coverage", {}).get("criteria")
+                or seed.get("alignment")
             )
-            row["has_charter"] = has_charter
+            row["has_seed"] = has_seed
             row["kind"] = (state or {}).get("kind", "skill")
             row["prompt_target"] = (state or {}).get("prompt_target")
             results.append(row)
@@ -414,21 +483,23 @@ async def delete_session(session_id: str) -> None:
     """Delete a session and all associated data (cascading)."""
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # Delete in dependency order
-        await conn.execute(
-            "DELETE FROM examples WHERE dataset_id IN (SELECT id FROM datasets WHERE session_id = $1)",
-            session_id,
-        )
-        await conn.execute(
-            "DELETE FROM judgements WHERE turn_id IN (SELECT id FROM turns WHERE session_id = $1)",
-            session_id,
-        )
-        await conn.execute("DELETE FROM datasets WHERE session_id = $1", session_id)
-        await conn.execute("DELETE FROM turns WHERE session_id = $1", session_id)
-        await conn.execute("DELETE FROM charters WHERE session_id = $1", session_id)
-        result = await conn.execute("DELETE FROM sessions WHERE id = $1", session_id)
-        if result == "DELETE 0":
-            raise ValueError(f"Session {session_id} not found")
+        # One transaction so a mid-delete failure can't leave a session with
+        # orphaned children. Delete in dependency order (children first).
+        async with conn.transaction():
+            await conn.execute(
+                "DELETE FROM examples WHERE dataset_id IN (SELECT id FROM datasets WHERE session_id = $1)",
+                session_id,
+            )
+            await conn.execute(
+                "DELETE FROM judgements WHERE turn_id IN (SELECT id FROM turns WHERE session_id = $1)",
+                session_id,
+            )
+            await conn.execute("DELETE FROM datasets WHERE session_id = $1", session_id)
+            await conn.execute("DELETE FROM turns WHERE session_id = $1", session_id)
+            await conn.execute("DELETE FROM seeds WHERE session_id = $1", session_id)
+            result = await conn.execute("DELETE FROM sessions WHERE id = $1", session_id)
+            if result == "DELETE 0":
+                raise ValueError(f"Session {session_id} not found")
 
 
 async def update_session_name(session_id: str, name: str) -> dict:
@@ -487,48 +558,48 @@ async def update_session_input(session_id: str, state: dict) -> dict:
         return result
 
 
-# --- Charter CRUD ---
+# --- Seed CRUD ---
 
-async def create_charter(session_id: str, charter: dict, weak_criteria: list[dict] | None = None) -> dict:
+async def create_seed(session_id: str, seed: dict, weak_criteria: list[dict] | None = None) -> dict:
     pool = await get_pool()
-    charter_id = str(uuid.uuid4())
+    seed_id = str(uuid.uuid4())
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO charters (id, session_id, charter, weak_criteria)
+            INSERT INTO seeds (id, session_id, seed, weak_criteria)
             VALUES ($1, $2, $3, $4::jsonb)
-            RETURNING id, session_id, created_at, finalised_at, charter, weak_criteria
+            RETURNING id, session_id, created_at, finalised_at, seed, weak_criteria
             """,
-            charter_id,
+            seed_id,
             session_id,
-            json.dumps(charter),
+            json.dumps(seed),
             json.dumps(weak_criteria or []),
         )
         result = dict(row)
-        if isinstance(result["charter"], str):
-            result["charter"] = json.loads(result["charter"])
+        if isinstance(result["seed"], str):
+            result["seed"] = json.loads(result["seed"])
         if isinstance(result["weak_criteria"], str):
             result["weak_criteria"] = json.loads(result["weak_criteria"])
         return result
 
 
-async def finalize_charter(charter_id: str) -> dict:
+async def finalize_seed(seed_id: str) -> dict:
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            UPDATE charters SET finalised_at = $2
+            UPDATE seeds SET finalised_at = $2
             WHERE id = $1
-            RETURNING id, session_id, created_at, finalised_at, charter, weak_criteria
+            RETURNING id, session_id, created_at, finalised_at, seed, weak_criteria
             """,
-            charter_id,
+            seed_id,
             datetime.now(timezone.utc),
         )
         if row is None:
-            raise ValueError(f"Charter {charter_id} not found")
+            raise ValueError(f"Seed {seed_id} not found")
         result = dict(row)
-        if isinstance(result["charter"], str):
-            result["charter"] = json.loads(result["charter"])
+        if isinstance(result["seed"], str):
+            result["seed"] = json.loads(result["seed"])
         if isinstance(result["weak_criteria"], str):
             result["weak_criteria"] = json.loads(result["weak_criteria"])
         return result
@@ -736,17 +807,17 @@ async def create_judgement(
 
 # --- Dataset CRUD ---
 
-async def create_dataset(session_id: str, name: str, charter_snapshot: dict) -> dict:
+async def create_dataset(session_id: str, name: str, seed_snapshot: dict) -> dict:
     pool = await get_pool()
     dataset_id = str(uuid.uuid4())
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO datasets (id, session_id, name, charter_snapshot)
+            INSERT INTO datasets (id, session_id, name, seed_snapshot)
             VALUES ($1, $2, $3, $4)
             RETURNING *
             """,
-            dataset_id, session_id, name, json.dumps(charter_snapshot),
+            dataset_id, session_id, name, json.dumps(seed_snapshot),
         )
         return _parse_dataset_row(row)
 
@@ -783,7 +854,7 @@ async def get_dataset_versions(session_id: str) -> list[dict]:
         return [_parse_dataset_row(r) for r in rows]
 
 
-async def create_dataset_version(dataset_id: str, charter_snapshot: dict) -> dict:
+async def create_dataset_version(dataset_id: str, seed_snapshot: dict) -> dict:
     """Create a new version by copying all examples from the current dataset."""
     pool = await get_pool()
     current = await get_dataset(dataset_id)
@@ -797,12 +868,12 @@ async def create_dataset_version(dataset_id: str, charter_snapshot: dict) -> dic
         # Create new dataset version
         row = await conn.fetchrow(
             """
-            INSERT INTO datasets (id, session_id, version, parent_version_id, name, status, charter_snapshot)
+            INSERT INTO datasets (id, session_id, version, parent_version_id, name, status, seed_snapshot)
             VALUES ($1, $2, $3, $4, $5, 'draft', $6)
             RETURNING *
             """,
             new_id, current["session_id"], new_version, dataset_id,
-            current["name"], json.dumps(charter_snapshot),
+            current["name"], json.dumps(seed_snapshot),
         )
 
         # Copy examples
@@ -856,15 +927,15 @@ async def clear_new_tag_from_examples(example_ids: list[str]) -> int:
             return 0
 
 
-async def update_dataset_charter_snapshot(dataset_id: str, charter: dict) -> None:
-    """Refresh the dataset's stored charter snapshot — used when the live
-    charter has changed and gap analysis / scorers should compare against
-    the new version (e.g. prompt-eval just generated its first charter)."""
+async def update_dataset_seed_snapshot(dataset_id: str, seed: dict) -> None:
+    """Refresh the dataset's stored seed snapshot — used when the live
+    seed has changed and gap analysis / scorers should compare against
+    the new version (e.g. prompt-eval just generated its first seed)."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE datasets SET charter_snapshot = $1 WHERE id = $2",
-            json.dumps(charter), dataset_id,
+            "UPDATE datasets SET seed_snapshot = $1 WHERE id = $2",
+            json.dumps(seed), dataset_id,
         )
 
 
@@ -904,7 +975,7 @@ async def update_dataset_stats(dataset_id: str) -> dict:
 
 def _parse_dataset_row(row) -> dict:
     result = dict(row)
-    for key in ("stats", "charter_snapshot"):
+    for key in ("stats", "seed_snapshot"):
         if key in result and isinstance(result[key], str):
             result[key] = json.loads(result[key])
     return result
@@ -1418,7 +1489,7 @@ _EVAL_RUN_JSON_FIELDS = (
     "scorer_names",
     "scorer_averages",
     "per_row",
-    "charter_snapshot",
+    "seed_snapshot",
     "improvement_suggestions",
     "clusters",
 )
@@ -1440,25 +1511,25 @@ async def create_eval_run(
     rows_total: int,
     skill_version_id: str | None,
     skill_version_number: int | None,
-    charter_snapshot: dict | None = None,
+    seed_snapshot: dict | None = None,
     judge_model_used: str | None = None,
 ) -> dict:
     """Insert a fresh pending eval run. The background task later updates it."""
     pool = await get_pool()
-    charter_json = json.dumps(charter_snapshot, default=str) if charter_snapshot else None
+    seed_json = json.dumps(seed_snapshot, default=str) if seed_snapshot else None
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO eval_runs (
                 id, session_id, status, project, experiment_name,
-                rows_total, skill_version_id, skill_version_number, charter_snapshot,
+                rows_total, skill_version_id, skill_version_number, seed_snapshot,
                 judge_model_used
             )
             VALUES ($1, $2, 'pending', $3, $4, $5, $6, $7, $8::jsonb, $9)
             RETURNING *
             """,
             run_id, session_id, project, experiment_name,
-            rows_total, skill_version_id, skill_version_number, charter_json,
+            rows_total, skill_version_id, skill_version_number, seed_json,
             judge_model_used,
         )
         return _parse_eval_run_row(row)

@@ -339,8 +339,8 @@ function describeToolCall(s: PolarisToolSummary): string {
       return `created example in ${args.feature_area as string}`
     case 'rename_project':
       return `renamed project to "${args.name as string}"`
-    case 'patch_charter':
-      return `updated charter`
+    case 'patch_seed':
+      return `updated seed`
     case 'update_settings':
       return 'updated settings'
     case 'synthesize_examples':
@@ -355,14 +355,14 @@ function describeToolCall(s: PolarisToolSummary): string {
       return 'opened eval runner'
     case 'generate_scorers':
       return 'opened scorers tab'
-    case 'finalize_charter':
-      return 'opened charter for finalize'
+    case 'finalize_seed':
+      return 'opened seed for finalize'
     case 'delete_project':
       return 'deleted project'
     case 'create_project':
       return `created project "${args.name as string}"`
     // Read tools — the UI moved, so just describe what was opened.
-    case 'get_charter':
+    case 'get_seed':
     case 'get_scorers':
     case 'get_dataset_overview':
     case 'list_examples':

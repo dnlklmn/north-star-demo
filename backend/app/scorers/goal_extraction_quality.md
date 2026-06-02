@@ -49,7 +49,7 @@ If the user themselves was vague, the agent should either ask a clarifying quest
 
 **FAIL if:** the agent invented goals not present in the conversation. This includes "reasonable defaults" the agent assumed — they may be reasonable but they are not faithful to *this* user.
 
-Hallucinated goals are a critical failure: they pollute downstream charter generation with priorities the user never set.
+Hallucinated goals are a critical failure: they pollute downstream seed generation with priorities the user never set.
 
 ---
 

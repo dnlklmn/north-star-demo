@@ -38,7 +38,7 @@ class DiscoveryPhase(str, Enum):
     goals = "goals"
     users = "users"
     stories = "stories"
-    charter = "charter"
+    seed = "seed"
 
 
 class EvalMode(str, Enum):
@@ -64,12 +64,12 @@ class SessionKind(str, Enum):
     prompt = "prompt"
 
 
-# --- Charter models ---
+# --- Seed models ---
 
 class TaskDefinition(BaseModel):
     """Defines what the app receives and produces."""
     input_description: str = ""  # What the app receives (e.g., "business goals + user stories")
-    output_description: str = ""  # What the app produces (e.g., "structured charter JSON")
+    output_description: str = ""  # What the app produces (e.g., "structured seed JSON")
     sample_input: Optional[str] = None  # Example input
     sample_output: Optional[str] = None  # Example output
     # Triggered-mode fields: metadata about the skill/tool under evaluation.
@@ -93,7 +93,7 @@ class AlignmentEntry(BaseModel):
     status: DimensionStatus = DimensionStatus.pending
 
 
-class Charter(BaseModel):
+class Seed(BaseModel):
     task: TaskDefinition = Field(default_factory=TaskDefinition)
     coverage: DimensionCriteria = Field(default_factory=DimensionCriteria)
     balance: DimensionCriteria = Field(default_factory=DimensionCriteria)
@@ -144,7 +144,7 @@ class SessionInput(BaseModel):
 class SessionState(BaseModel):
     session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     input: SessionInput = Field(default_factory=SessionInput)
-    charter: Charter = Field(default_factory=Charter)
+    seed: Seed = Field(default_factory=Seed)
     validation: Validation = Field(default_factory=Validation)
     rounds_of_questions: int = 0
     agent_status: AgentStatus = AgentStatus.drafting
@@ -174,17 +174,17 @@ class SessionState(BaseModel):
     # API roundtrip. Only set when kind=prompt.
     prompt_builder_name: Optional[str] = None
     # Every accepted SKILL.md edit creates a new SkillVersion. The current
-    # active body always lives on charter.task.skill_body; this list is history.
+    # active body always lives on seed.task.skill_body; this list is history.
     skill_versions: list[dict] = Field(default_factory=list)
     active_skill_version_id: Optional[str] = None
     # Pointer to the version currently being trialled. Distinct from active so
     # the user can iterate on a candidate (run evals, see per-row deltas)
-    # before deciding to promote it. When set, charter.task.skill_body
+    # before deciding to promote it. When set, seed.task.skill_body
     # mirrors the candidate's body so the next eval runs against it. Cleared
     # on promote (becomes active) or discard (revert to active's body).
     candidate_skill_version_id: Optional[str] = None
     # Lineage: which skill version was active when each downstream artifact
-    # was last generated. Keys: "goals" | "users" | "stories" | "charter" |
+    # was last generated. Keys: "goals" | "users" | "stories" | "seed" |
     # "dataset" | "scorers". UI shows a "Regenerate" affordance on tabs where
     # the lineage id is older than active_skill_version_id.
     generated_at_skill_version: dict[str, str] = Field(default_factory=dict)
@@ -212,7 +212,7 @@ class ProjectSummary(BaseModel):
     created_at: datetime
     updated_at: datetime
     agent_status: str
-    has_charter: bool = False
+    has_seed: bool = False
     has_dataset: bool = False
     kind: str = "skill"
     prompt_target: Optional[str] = None
@@ -230,7 +230,7 @@ class SendMessageRequest(BaseModel):
 
 
 class Suggestion(BaseModel):
-    """A suggested addition to the charter that the user can accept or dismiss."""
+    """A suggested addition to the seed that the user can accept or dismiss."""
     section: str  # coverage, balance, rot, alignment
     text: str  # the criterion text or feature_area for alignment
     good: Optional[str] = None  # only for alignment suggestions
@@ -258,8 +258,8 @@ class ProceedResponse(BaseModel):
     state: SessionState
 
 
-class PatchCharterRequest(BaseModel):
-    """Partial charter update — only include fields being edited."""
+class PatchSeedRequest(BaseModel):
+    """Partial seed update — only include fields being edited."""
     task: Optional[TaskDefinition] = None
     coverage: Optional[DimensionCriteria] = None
     balance: Optional[DimensionCriteria] = None
@@ -269,9 +269,9 @@ class PatchCharterRequest(BaseModel):
 
 
 class FinalizeResponse(BaseModel):
-    charter_id: str
+    seed_id: str
     session_id: str
-    charter: Charter
+    seed: Seed
 
 
 # --- Dataset models ---
@@ -324,7 +324,7 @@ class Dataset(BaseModel):
     name: Optional[str] = None
     status: str = "draft"
     stats: dict = Field(default_factory=dict)
-    charter_snapshot: dict = Field(default_factory=dict)
+    seed_snapshot: dict = Field(default_factory=dict)
     created_at: Optional[datetime] = None
 
 
@@ -379,14 +379,14 @@ class SetModeRequest(BaseModel):
     eval_mode: EvalMode
 
 
-class SkillSeedRequest(BaseModel):
+class SkillImportRequest(BaseModel):
     """Paste a SKILL.md (body) to auto-populate goals/users/stories + task def."""
     skill_body: str
     skill_name: Optional[str] = None
     skill_description: Optional[str] = None  # overrides frontmatter if provided
 
 
-class SkillSeedResponse(BaseModel):
+class SkillImportResponse(BaseModel):
     state: SessionState
     message: str  # short human-readable summary of what was seeded
 
@@ -536,10 +536,10 @@ class EvalRunSummary(BaseModel):
     # so history can show "ran with claude-opus-4-7" etc. without inferring
     # from per_row metadata. NULL on legacy rows created before this column.
     judge_model_used: Optional[str] = None
-    # Full charter at the moment this run was started — so "View charter"
+    # Full seed at the moment this run was started — so "View seed"
     # on an old run shows exactly what was evaluated, not the current live
-    # charter (which may have been edited since).
-    charter_snapshot: Optional[dict] = None
+    # seed (which may have been edited since).
+    seed_snapshot: Optional[dict] = None
     # Persisted output of /suggest-improvements on this run. None = never
     # analyzed; empty list = analyzed + no patterns found.
     improvement_suggestions: Optional[list[dict]] = None
@@ -563,7 +563,7 @@ class SkillVersion(BaseModel):
     version: int  # monotonically increasing per session, starting at 1
     body: str
     notes: Optional[str] = None  # short human-readable summary of what changed
-    created_from: str = "manual"  # "seed" | "suggestion" | "manual" | "restore"
+    created_from: str = "manual"  # "import" | "suggestion" | "manual" | "restore"
     applied_suggestion_ids: list[str] = Field(default_factory=list)  # if created_from=suggestion
     created_at: Optional[datetime] = None
 
@@ -776,12 +776,12 @@ class SessionRow(BaseModel):
     conversation: list[dict]
 
 
-class CharterRow(BaseModel):
+class SeedRow(BaseModel):
     id: str
     session_id: str
     created_at: datetime
     finalised_at: Optional[datetime] = None
-    charter: dict
+    seed: dict
     weak_criteria: list[dict] = Field(default_factory=list)
 
 
@@ -841,7 +841,7 @@ class GithubSource(BaseModel):
 
 
 class FetchSkillFromUrlResponse(BaseModel):
-    """Parsed SKILL.md ready to hand to the existing skill-seed flow."""
+    """Parsed SKILL.md ready to hand to the existing skill-import flow."""
     body: str
     name: str | None
     description: str | None

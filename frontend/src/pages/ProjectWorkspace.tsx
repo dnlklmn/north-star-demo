@@ -6,18 +6,14 @@ import {
   useState,
 } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import {
-  ArrowRight as ArrowRightLucide,
-  Loader2,
-  Sparkles as SparklesIcon,
-} from "lucide-react";
+import { Loader2 } from "lucide-react";
 import {
   GearIcon,
   AIIcon,
   StarIcon,
   GoalsIcon,
   SkillIcon,
-  CharterIcon,
+  SeedIcon,
   DatasetIcon,
   ScorerIcon,
 } from "../components/ui/Icons";
@@ -39,8 +35,8 @@ import {
   createSession,
   getSession,
   sendMessage,
-  patchCharter,
-  suggestForCharter,
+  patchSeed,
+  suggestForSeed,
   suggestGoals,
   evaluateGoals,
   suggestStories,
@@ -53,7 +49,7 @@ import {
   deleteExample as apiDeleteExample,
   autoReviewExamples,
   refreshDatasetFromTurns,
-  retagExamplesAgainstCharter,
+  retagExamplesAgainstSeed,
   getGapAnalysis,
   getJudgeAgreement,
   exportDataset,
@@ -81,7 +77,7 @@ import IconButton from "../components/ui/IconButton";
 import GoalsPanel from "../components/GoalsPanel";
 import AddSourceBanner from "../components/AddSourceBanner";
 import UsersPanel from "../components/UsersPanel";
-import CharterPanel from "../components/CharterPanel";
+import SeedPanel from "../components/SeedPanel";
 import ScorersPanel from "../components/ScorersPanel";
 import EvaluatePanel from "../components/EvaluatePanel";
 import SkillPanel from "../components/SkillPanel";
@@ -104,7 +100,7 @@ type ActiveTab =
   | "skill"
   | "goals"
   | "users"
-  | "charter"
+  | "seed"
   | "dataset"
   | "scorers"
   | "evaluate";
@@ -112,7 +108,7 @@ type ActiveTab =
 const EMPTY_STATE: SessionState = {
   session_id: "",
   input: { business_goals: null, user_stories: null, conversation_history: [] },
-  charter: {
+  seed: {
     task: {
       input_description: "",
       output_description: "",
@@ -241,7 +237,7 @@ export default function ProjectWorkspace() {
   // Always visible until the session has a skill body or is a prompt-eval
   // (the banner offer becomes moot once a skill/prompt is in place).
 
-  // --- Charter phase state ---
+  // --- Seed phase state ---
   const [activeCriteria, setActiveCriteria] = useState<string[]>([]);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [suggestedStories, setSuggestedStories] = useState<SuggestedStory[]>(
@@ -258,11 +254,11 @@ export default function ProjectWorkspace() {
 
   // --- Dirty tracking: has a section changed since the next section was last touched? ---
   // Setters are still wired so future "stale upstream" UX can read these
-  // again; the read-side consumer (the regenerate-charter confirm prompt)
+  // again; the read-side consumer (the regenerate-seed confirm prompt)
   // moved off the Goal page. Underscore prefix silences no-unused-vars.
   const [, setGoalsDirty] = useState(false);
   const [, setStoriesDirty] = useState(false);
-  // Charter-edit → downstream stale. Flip true when the charter changes after
+  // Seed-edit → downstream stale. Flip true when the seed changes after
   // hydration; flip false after a successful (re)generation of that artifact.
   // Client-side only — survives tab switches within the session but not a
   // reload. Triggered-mode sessions also have skill-version lineage as a
@@ -561,17 +557,17 @@ export default function ProjectWorkspace() {
       if (cancelled || tabSetRef.current) return;
       tabSetRef.current = true;
       const s = session.state as SessionState;
-      const hasCharter = !!(
-        s.charter.coverage.criteria.length || s.charter.alignment.length
+      const hasSeed = !!(
+        s.seed.coverage.criteria.length || s.seed.alignment.length
       );
-      const hasSkillBody = !!s.charter.task.skill_body;
+      const hasSkillBody = !!s.seed.task.skill_body;
       const isTriggered = s.eval_mode === "triggered";
       const isPromptEval = s.kind === "prompt";
       // ?tab= overrides every other rule. Read fresh from window.location
       // so this only fires on real session changes, not tab toggles.
       const tabParam = new URLSearchParams(window.location.search).get("tab");
       const validTabs: ActiveTab[] = [
-        "skill", "goals", "users", "charter", "dataset", "scorers", "evaluate",
+        "skill", "goals", "users", "seed", "dataset", "scorers", "evaluate",
       ];
       const tabFromUrl = validTabs.includes(tabParam as ActiveTab)
         ? (tabParam as ActiveTab)
@@ -588,8 +584,8 @@ export default function ProjectWorkspace() {
         setActiveTab("dataset");
         return;
       }
-      if (hasCharter) {
-        setActiveTab("charter");
+      if (hasSeed) {
+        setActiveTab("seed");
         return;
       }
       if (hasSkillBody || isTriggered) {
@@ -735,7 +731,7 @@ export default function ProjectWorkspace() {
   useProjectEvents(sessionId, handleLiveStateChange, handleSynthProgress);
 
   // Mirror React state → in-memory cache. Every setState((prev) => …) call
-  // (charter edits, scorer toggles, skill body updates, etc.) trips this
+  // (seed edits, scorer toggles, skill body updates, etc.) trips this
   // effect, so the cached SessionRecord stays in lock-step without each
   // handler having to remember to update the cache. Same for dataset.
   useEffect(() => {
@@ -765,8 +761,8 @@ export default function ProjectWorkspace() {
   // own loading/error state. Kept commented as a breadcrumb if a future
   // status surface needs it.
   // const status: AgentStatus = state.agent_status;
-  const hasCharter = !!(
-    state.charter.coverage.criteria.length || state.charter.alignment.length
+  const hasSeed = !!(
+    state.seed.coverage.criteria.length || state.seed.alignment.length
   );
   const nonEmptyGoals = goals.filter((g) => g.trim());
   // totalStoryCount was used by the Goals tab badge ("3/10"); the badge
@@ -780,21 +776,21 @@ export default function ProjectWorkspace() {
   // — users can type goals manually or seed them via the Goals page banner.
   //
   // Prompt-eval projects share the full skill-eval flow: synthetic SKILL.md
-  // describes the prompt under test, gets seeded through call_skill_seed
-  // into goals/users/stories, then the user reviews the charter + generates
+  // describes the prompt under test, gets seeded through call_skill_import
+  // into goals/users/stories, then the user reviews the seed + generates
   // scorers exactly like a regular skill eval. The only divergence happens
   // at run time, where the eval task replays the prompt builder instead
   // of running skill_body as a system prompt.
   const isPromptEval = state.kind === "prompt";
   // Goals tab is always reachable — it's where users enter their goals.
   const usersAvailable = true;
-  const charterAvailable = hasCharter || loading;
+  const seedAvailable = hasSeed || loading;
   // A skill body (or a prompt-eval, which has a synthetic skill_body) is the
-  // gate for everything downstream of the charter. Without one, you can't
+  // gate for everything downstream of the seed. Without one, you can't
   // run a meaningful eval — there's nothing to evaluate against — so the
   // dataset/scorers/evaluate tabs stay locked. Prompt-eval projects always
   // have a synthetic body, so they're allowed through.
-  const hasSkillBody = !!state.charter.task.skill_body;
+  const hasSkillBody = !!state.seed.task.skill_body;
   const skillReady = hasSkillBody || isPromptEval;
   // Memoize so the empty-array fallback doesn't churn SkillPanel's
   // initialVersions identity on every parent render — that would refire
@@ -803,8 +799,8 @@ export default function ProjectWorkspace() {
     () => state.skill_versions ?? [],
     [state.skill_versions],
   );
-  const datasetAvailable = skillReady && (isPromptEval ? !!dataset : hasCharter);
-  const scorersAvailable = skillReady && hasCharter;
+  const datasetAvailable = skillReady && (isPromptEval ? !!dataset : hasSeed);
+  const scorersAvailable = skillReady && hasSeed;
   const evaluateAvailable = skillReady && !!dataset;
 
   const [evalAutoRun, setEvalAutoRun] = useState(false);
@@ -817,7 +813,7 @@ export default function ProjectWorkspace() {
   // don't race the panel's mount.
   const [scorersGenerating, setScorersGenerating] = useState(false);
   const [scorersError, setScorersError] = useState<string | null>(null);
-  // Legacy name kept because charter-shortcut handlers below reference it;
+  // Legacy name kept because seed-shortcut handlers below reference it;
   // it now mirrors the unified flag exactly.
   const generatingScorersShortcut = scorersGenerating;
   const setGeneratingScorersShortcut = setScorersGenerating;
@@ -983,7 +979,7 @@ export default function ProjectWorkspace() {
       const res = await suggestSkill(
         nonEmptyGoalsList,
         storiesPayload,
-        state.charter.task.skill_body || null,
+        state.seed.task.skill_body || null,
         urlSessionId ?? null,
       );
       setSkillSuggestions(
@@ -999,7 +995,7 @@ export default function ProjectWorkspace() {
   }, [
     goals,
     storyGroups,
-    state.charter.task.skill_body,
+    state.seed.task.skill_body,
     urlSessionId,
     dismissedSkillSuggestions,
   ]);
@@ -1047,15 +1043,15 @@ export default function ProjectWorkspace() {
       // prefixing the where-hint as a comment so the user can move it to
       // the right section if needed. Drops it from the local list once
       // accepted (and remembers it so a refresh doesn't re-suggest).
-      const current = state.charter.task.skill_body || "";
+      const current = state.seed.task.skill_body || "";
       const sep = current.endsWith("\n") || current === "" ? "" : "\n";
       const wherePrefix = suggestion.where ? `<!-- ${suggestion.where} -->\n` : "";
       const next = `${current}${sep}\n${wherePrefix}- ${suggestion.summary}\n`;
       setState((prev) => ({
         ...prev,
-        charter: {
-          ...prev.charter,
-          task: { ...prev.charter.task, skill_body: next },
+        seed: {
+          ...prev.seed,
+          task: { ...prev.seed.task, skill_body: next },
         },
       }));
       setSkillSuggestions((prev) =>
@@ -1065,7 +1061,7 @@ export default function ProjectWorkspace() {
         new Set(prev).add(suggestion.summary),
       );
     },
-    [state.charter.task.skill_body],
+    [state.seed.task.skill_body],
   );
 
   const handleDismissSkillSuggestion = useCallback(
@@ -1115,7 +1111,7 @@ export default function ProjectWorkspace() {
     generatedSkillSig !== null && generatedSkillSig !== currentGoalsSig;
   const handleGenerateSkillFromGoals = useCallback(async () => {
     if (!urlSessionId) return;
-    if (state.charter.task.skill_body?.trim()) {
+    if (state.seed.task.skill_body?.trim()) {
       const ok = window.confirm(
         "Replace the current skill body?\n\nThis overwrites the textarea with a fresh draft generated from your goals and user stories. Save the current body as a version first if you want to keep it.",
       );
@@ -1134,14 +1130,14 @@ export default function ProjectWorkspace() {
       // visible flicker).
       setState((prev) => ({
         ...prev,
-        charter: {
-          ...prev.charter,
+        seed: {
+          ...prev.seed,
           task: {
-            ...prev.charter.task,
+            ...prev.seed.task,
             skill_body: res.body,
-            skill_name: res.name ?? prev.charter.task.skill_name ?? null,
+            skill_name: res.name ?? prev.seed.task.skill_name ?? null,
             skill_description:
-              res.description ?? prev.charter.task.skill_description ?? null,
+              res.description ?? prev.seed.task.skill_description ?? null,
           },
         },
       }));
@@ -1188,7 +1184,7 @@ export default function ProjectWorkspace() {
     }
   }, [
     urlSessionId,
-    state.charter.task.skill_body,
+    state.seed.task.skill_body,
     currentGoalsSig,
     projectName,
   ]);
@@ -1469,7 +1465,7 @@ export default function ProjectWorkspace() {
   // the project from the freshly-extracted skill_name when the current name is
   // still a generic default. Used by both the SkillPanel (Analyze) and the
   // Goals-page AddSourceBanner (Add skill).
-  const handleSessionSeeded = useCallback(async () => {
+  const handleSessionImported = useCallback(async () => {
     if (!urlSessionId) return;
     try {
       const session = await getSession(urlSessionId);
@@ -1508,7 +1504,7 @@ export default function ProjectWorkspace() {
         });
       });
 
-      const desiredBase = session.state.charter?.task?.skill_name?.trim();
+      const desiredBase = session.state.seed?.task?.skill_name?.trim();
       const currentName = (session as { name?: string }).name?.trim();
       const isDefault =
         !currentName ||
@@ -1538,16 +1534,16 @@ export default function ProjectWorkspace() {
     }
   }, [urlSessionId]);
 
-  // --- Charter phase handlers ---
+  // --- Seed phase handlers ---
 
   const handleSubmitIntake = useCallback(async () => {
     const goalsText = nonEmptyGoals.join("\n");
     const storiesText = formatStoryGroups(storyGroups);
     if (!goalsText && !storiesText) return;
 
-    notePolarisActivity("generating charter");
+    notePolarisActivity("generating seed");
     suppressNextTabActivityRef.current = true;
-    setActiveTab("charter");
+    setActiveTab("seed");
     setLoading(true);
 
     try {
@@ -1743,39 +1739,39 @@ export default function ProjectWorkspace() {
   const handleEditCriterion = useCallback(
     async (dimension: string, index: number, value: string) => {
       if (!sessionId) return;
-      const charter = { ...state.charter };
+      const seed = { ...state.seed };
       const dim = dimension as "coverage" | "balance" | "rot" | "safety";
-      const existing = charter[dim] ?? { criteria: [], status: "pending" as const };
+      const existing = seed[dim] ?? { criteria: [], status: "pending" as const };
       const criteria = [...existing.criteria];
       criteria[index] = value;
-      charter[dim] = { ...existing, criteria };
+      seed[dim] = { ...existing, criteria };
 
       try {
-        const res = await patchCharter(sessionId, {
-          [dimension]: charter[dim],
+        const res = await patchSeed(sessionId, {
+          [dimension]: seed[dim],
         });
         setState((prev) => ({ ...prev, ...res.state }));
       } catch (err) {
         console.error("Failed to save edit:", err);
       }
     },
-    [sessionId, state.charter],
+    [sessionId, state.seed],
   );
 
   const handleAddCriterion = useCallback(
     async (dimension: string, value: string) => {
       if (!sessionId) return;
       const dim = dimension as "coverage" | "balance" | "rot" | "safety";
-      const currentCharter = charterRef.current;
-      const existing = currentCharter[dim] ?? { criteria: [], status: "pending" as const };
+      const currentSeed = seedRef.current;
+      const existing = currentSeed[dim] ?? { criteria: [], status: "pending" as const };
       const newCriteria = [...existing.criteria, value];
       const newDim = { ...existing, criteria: newCriteria };
-      charterRef.current = { ...charterRef.current, [dim]: newDim };
+      seedRef.current = { ...seedRef.current, [dim]: newDim };
       setState((prev) => ({
         ...prev,
-        charter: { ...prev.charter, [dim]: newDim },
+        seed: { ...prev.seed, [dim]: newDim },
       }));
-      patchCharter(sessionId, { [dim]: newDim }).catch((err) => {
+      patchSeed(sessionId, { [dim]: newDim }).catch((err) => {
         console.error("Failed to add criterion:", err);
       });
     },
@@ -1785,34 +1781,34 @@ export default function ProjectWorkspace() {
   const handleEditAlignment = useCallback(
     async (index: number, field: "good" | "bad", value: string) => {
       if (!sessionId) return;
-      const alignment = [...state.charter.alignment];
+      const alignment = [...state.seed.alignment];
       alignment[index] = { ...alignment[index], [field]: value };
 
       try {
-        const res = await patchCharter(sessionId, { alignment });
+        const res = await patchSeed(sessionId, { alignment });
         setState((prev) => ({ ...prev, ...res.state }));
       } catch (err) {
         console.error("Failed to save alignment edit:", err);
       }
     },
-    [sessionId, state.charter.alignment],
+    [sessionId, state.seed.alignment],
   );
 
   const handleDeleteCriterion = useCallback(
     async (dimension: string, index: number) => {
       if (!sessionId) return;
       const dim = dimension as "coverage" | "balance" | "rot" | "safety";
-      const currentCharter = charterRef.current;
-      const existing = currentCharter[dim] ?? { criteria: [], status: "pending" as const };
+      const currentSeed = seedRef.current;
+      const existing = currentSeed[dim] ?? { criteria: [], status: "pending" as const };
       const newCriteria = existing.criteria.filter(
         (_: string, i: number) => i !== index,
       );
       const newDim = { ...existing, criteria: newCriteria };
       setState((prev) => ({
         ...prev,
-        charter: { ...prev.charter, [dim]: newDim },
+        seed: { ...prev.seed, [dim]: newDim },
       }));
-      patchCharter(sessionId, { [dim]: newDim }).catch((err) => {
+      patchSeed(sessionId, { [dim]: newDim }).catch((err) => {
         console.error("Failed to delete criterion:", err);
       });
     },
@@ -1822,16 +1818,16 @@ export default function ProjectWorkspace() {
   const handleAddAlignment = useCallback(
     async (featureArea: string, good: string, bad: string) => {
       if (!sessionId) return;
-      const currentCharter = charterRef.current;
+      const currentSeed = seedRef.current;
       const newAlignment = [
-        ...currentCharter.alignment,
+        ...currentSeed.alignment,
         { feature_area: featureArea, good, bad, status: "pending" as const },
       ];
       setState((prev) => ({
         ...prev,
-        charter: { ...prev.charter, alignment: newAlignment },
+        seed: { ...prev.seed, alignment: newAlignment },
       }));
-      patchCharter(sessionId, { alignment: newAlignment }).catch((err) => {
+      patchSeed(sessionId, { alignment: newAlignment }).catch((err) => {
         console.error("Failed to add alignment:", err);
       });
     },
@@ -1841,29 +1837,29 @@ export default function ProjectWorkspace() {
   const handleDeleteAlignment = useCallback(
     async (index: number) => {
       if (!sessionId) return;
-      const alignment = state.charter.alignment.filter((_, i) => i !== index);
+      const alignment = state.seed.alignment.filter((_, i) => i !== index);
       setState((prev) => ({
         ...prev,
-        charter: { ...prev.charter, alignment },
+        seed: { ...prev.seed, alignment },
       }));
-      patchCharter(sessionId, { alignment }).catch((err) => {
+      patchSeed(sessionId, { alignment }).catch((err) => {
         console.error("Failed to delete alignment:", err);
       });
     },
-    [sessionId, state.charter.alignment],
+    [sessionId, state.seed.alignment],
   );
 
   const handleReorderCriteria = useCallback(
     async (dimension: string, criteria: string[]) => {
       if (!sessionId) return;
       const dim = dimension as "coverage" | "balance" | "rot" | "safety";
-      const existing = charterRef.current[dim] ?? { criteria: [], status: "pending" as const };
+      const existing = seedRef.current[dim] ?? { criteria: [], status: "pending" as const };
       const newDim = { ...existing, criteria };
       setState((prev) => ({
         ...prev,
-        charter: { ...prev.charter, [dim]: newDim },
+        seed: { ...prev.seed, [dim]: newDim },
       }));
-      patchCharter(sessionId, { [dim]: newDim }).catch((err) =>
+      patchSeed(sessionId, { [dim]: newDim }).catch((err) =>
         console.error("Failed to reorder:", err),
       );
     },
@@ -1875,9 +1871,9 @@ export default function ProjectWorkspace() {
       if (!sessionId) return;
       setState((prev) => ({
         ...prev,
-        charter: { ...prev.charter, alignment },
+        seed: { ...prev.seed, alignment },
       }));
-      patchCharter(sessionId, { alignment }).catch((err) =>
+      patchSeed(sessionId, { alignment }).catch((err) =>
         console.error("Failed to reorder:", err),
       );
     },
@@ -1887,28 +1883,28 @@ export default function ProjectWorkspace() {
   const handleEditTask = useCallback(
     async (field: keyof TaskDefinition, value: string) => {
       if (!sessionId) return;
-      const task = { ...state.charter.task, [field]: value };
+      const task = { ...state.seed.task, [field]: value };
 
       try {
-        const res = await patchCharter(sessionId, { task });
+        const res = await patchSeed(sessionId, { task });
         setState((prev) => ({ ...prev, ...res.state }));
       } catch (err) {
         console.error("Failed to save task edit:", err);
       }
     },
-    [sessionId, state.charter.task],
+    [sessionId, state.seed.task],
   );
 
-  // --- Charter suggestion state ---
-  const [charterSuggestionsLoading, setCharterSuggestionsLoading] =
+  // --- Seed suggestion state ---
+  const [seedSuggestionsLoading, setSeedSuggestionsLoading] =
     useState(false);
-  const charterSuggestionDebounceRef = useRef<number | null>(null);
+  const seedSuggestionDebounceRef = useRef<number | null>(null);
 
   const handleSuggest = useCallback(async () => {
     if (!sessionId) return;
-    setCharterSuggestionsLoading(true);
+    setSeedSuggestionsLoading(true);
     try {
-      const res = await suggestForCharter(sessionId);
+      const res = await suggestForSeed(sessionId);
       // Replace (not append) — reload should feel like "give me fresh
       // suggestions", not pile more on top. Dedup within the same section
       // by the first 40 chars of the text (case-insensitive) so the LLM
@@ -1932,45 +1928,45 @@ export default function ProjectWorkspace() {
     } catch (err) {
       console.error("Failed to get suggestions:", err);
     } finally {
-      setCharterSuggestionsLoading(false);
+      setSeedSuggestionsLoading(false);
     }
   }, [sessionId]);
 
-  const scheduleCharterSuggestionRegen = useCallback(() => {
-    if (charterSuggestionDebounceRef.current) {
-      window.clearTimeout(charterSuggestionDebounceRef.current);
+  const scheduleSeedSuggestionRegen = useCallback(() => {
+    if (seedSuggestionDebounceRef.current) {
+      window.clearTimeout(seedSuggestionDebounceRef.current);
     }
-    charterSuggestionDebounceRef.current = window.setTimeout(() => {
-      charterSuggestionDebounceRef.current = null;
+    seedSuggestionDebounceRef.current = window.setTimeout(() => {
+      seedSuggestionDebounceRef.current = null;
       handleSuggest();
     }, 3000);
   }, [handleSuggest]);
 
   useEffect(() => {
     return () => {
-      if (charterSuggestionDebounceRef.current) {
-        window.clearTimeout(charterSuggestionDebounceRef.current);
+      if (seedSuggestionDebounceRef.current) {
+        window.clearTimeout(seedSuggestionDebounceRef.current);
       }
     };
   }, []);
 
-  const charterRef = useRef(state.charter);
+  const seedRef = useRef(state.seed);
   useEffect(() => {
-    charterRef.current = state.charter;
-  }, [state.charter]);
+    seedRef.current = state.seed;
+  }, [state.seed]);
 
-  // Mark downstream artifacts stale whenever the charter changes after the
+  // Mark downstream artifacts stale whenever the seed changes after the
   // initial hydration. Only stamp stale for artifacts that actually exist —
   // there's no "regenerate" affordance for something that was never generated.
-  const charterChangeInitRef = useRef(true);
+  const seedChangeInitRef = useRef(true);
   useEffect(() => {
-    if (charterChangeInitRef.current) {
-      charterChangeInitRef.current = false;
+    if (seedChangeInitRef.current) {
+      seedChangeInitRef.current = false;
       return;
     }
     if (dataset) setDatasetStale(true);
     if (scorers.length > 0) setScorersStale(true);
-  }, [state.charter]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [state.seed]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-fetch gap analysis whenever the dataset's example count changes.
   // The map is the user's "is my data hitting every cell" view, so it has
@@ -2025,7 +2021,7 @@ export default function ProjectWorkspace() {
     async (suggestion: Suggestion) => {
       if (!sessionId) return;
 
-      const currentCharter = charterRef.current;
+      const currentSeed = seedRef.current;
 
       if (
         suggestion.section === "alignment" &&
@@ -2038,57 +2034,57 @@ export default function ProjectWorkspace() {
           bad: suggestion.bad,
           status: "pending" as const,
         };
-        const newAlignment = [...currentCharter.alignment, newEntry];
-        charterRef.current = { ...charterRef.current, alignment: newAlignment };
+        const newAlignment = [...currentSeed.alignment, newEntry];
+        seedRef.current = { ...seedRef.current, alignment: newAlignment };
         setState((prev) => ({
           ...prev,
-          charter: { ...prev.charter, alignment: newAlignment },
+          seed: { ...prev.seed, alignment: newAlignment },
         }));
-        patchCharter(sessionId, { alignment: newAlignment }).catch((err) => {
+        patchSeed(sessionId, { alignment: newAlignment }).catch((err) => {
           console.error("Failed to accept suggestion:", err);
         });
       } else {
         const dim = suggestion.section as "coverage" | "balance" | "rot";
-        const newCriteria = [...currentCharter[dim].criteria, suggestion.text];
-        const newDim = { ...currentCharter[dim], criteria: newCriteria };
-        charterRef.current = { ...charterRef.current, [dim]: newDim };
+        const newCriteria = [...currentSeed[dim].criteria, suggestion.text];
+        const newDim = { ...currentSeed[dim], criteria: newCriteria };
+        seedRef.current = { ...seedRef.current, [dim]: newDim };
         setState((prev) => ({
           ...prev,
-          charter: { ...prev.charter, [dim]: newDim },
+          seed: { ...prev.seed, [dim]: newDim },
         }));
-        patchCharter(sessionId, { [dim]: newDim }).catch((err) => {
+        patchSeed(sessionId, { [dim]: newDim }).catch((err) => {
           console.error("Failed to accept suggestion:", err);
         });
       }
 
       setSuggestions((prev) => prev.filter((s) => s !== suggestion));
-      scheduleCharterSuggestionRegen();
+      scheduleSeedSuggestionRegen();
     },
-    [sessionId, scheduleCharterSuggestionRegen],
+    [sessionId, scheduleSeedSuggestionRegen],
   );
 
   const handleDismissSuggestion = useCallback(
     (suggestion: Suggestion) => {
       setSuggestions((prev) => prev.filter((s) => s !== suggestion));
-      scheduleCharterSuggestionRegen();
+      scheduleSeedSuggestionRegen();
     },
-    [scheduleCharterSuggestionRegen],
+    [scheduleSeedSuggestionRegen],
   );
 
-  // --- Phase transition: charter -> dataset/scorers ---
+  // --- Phase transition: seed -> dataset/scorers ---
 
-  // Shortcuts triggered from the Charter page footer: run any prerequisites
-  // (charter generation) if missing, then kick off the downstream work —
+  // Shortcuts triggered from the Seed page footer: run any prerequisites
+  // (seed generation) if missing, then kick off the downstream work —
   // dataset, scorers, or both in parallel — and navigate to the relevant
   // tab so the user sees the output.
-  const ensureCharter = useCallback(async () => {
-    if (hasCharter) return;
+  const ensureSeed = useCallback(async () => {
+    if (hasSeed) return;
     await handleSubmitIntake();
-  }, [hasCharter, handleSubmitIntake]);
+  }, [hasSeed, handleSubmitIntake]);
 
   const runGenerateDataset = useCallback(async () => {
     if (!sessionId) return;
-    await ensureCharter();
+    await ensureSeed();
     let ds = dataset;
     if (!ds) {
       await createDataset(sessionId);
@@ -2114,41 +2110,41 @@ export default function ProjectWorkspace() {
       console.warn("Failed to refetch dataset after synth:", refreshErr);
     }
     if (synthError) throw synthError;
-  }, [sessionId, dataset, ensureCharter]);
+  }, [sessionId, dataset, ensureSeed]);
 
   const runGenerateScorers = useCallback(async () => {
     if (!sessionId) return;
-    await ensureCharter();
+    await ensureSeed();
     try {
       const res = await generateScorers(sessionId);
       setScorers(res.scorers);
-      // Merge the refreshed session state but KEEP the previous `charter`
-      // object reference. The charter-changed effect keys off
-      // `state.charter` by identity — a wholesale setState(s.state)
-      // produces a fresh charter reference and stales the dataset even
-      // though scorers gen never touches the charter (it read as "the
+      // Merge the refreshed session state but KEEP the previous `seed`
+      // object reference. The seed-changed effect keys off
+      // `state.seed` by identity — a wholesale setState(s.state)
+      // produces a fresh seed reference and stales the dataset even
+      // though scorers gen never touches the seed (it read as "the
       // dataset disappeared" right after scorers finished). Spreading
       // s.state still picks up everything the backend actually changed
-      // (scorers, lineage stamp, turn metadata); only the charter ref is
+      // (scorers, lineage stamp, turn metadata); only the seed ref is
       // pinned. Safe because the generate-scorers endpoint does not edit
-      // the charter — if that ever changes, drop the override.
+      // the seed — if that ever changes, drop the override.
       const s = await getSession(sessionId);
       setState((prev) => ({
         ...prev,
         ...(s.state as SessionState),
-        charter: prev.charter,
+        seed: prev.seed,
       }));
     } catch (err) {
       console.error("Shortcut: generate scorers failed", err);
       throw err;
     }
-  }, [sessionId, ensureCharter]);
+  }, [sessionId, ensureSeed]);
 
   // Unified entry-point for kicking off scorer generation from any surface
-  // (panel button, charter-shortcut, Polaris). Owns the busy/error state so
+  // (panel button, seed-shortcut, Polaris). Owns the busy/error state so
   // the user sees consistent feedback regardless of where they triggered
   // it. `skipConfirm` is set by Polaris (it already showed its own confirm
-  // chip) and by the charter shortcut (it has its own confirm dialog
+  // chip) and by the seed shortcut (it has its own confirm dialog
   // upstream).
   const handleGenerateScorers = useCallback(
     async (opts?: { skipConfirm?: boolean }) => {
@@ -2174,9 +2170,9 @@ export default function ProjectWorkspace() {
         return;
       }
       // Don't pre-empt on the frontend — the panel's "Generate scorers"
-      // button is already gated on the charter having at least one
+      // button is already gated on the seed having at least one
       // criterion (any of coverage/balance/alignment/rot). The parent's
-      // hasCharter check was stricter than the button's hasCriteria, so
+      // hasSeed check was stricter than the button's hasCriteria, so
       // a project with only balance/rot criteria would see the button
       // enabled but the click would bail silently. Let the backend
       // return a 400 if it can't draft, and we'll show that error.
@@ -2184,7 +2180,7 @@ export default function ProjectWorkspace() {
         sessionId,
         scorerCount: scorers.length,
         skipConfirm: !!opts?.skipConfirm,
-        hasCharter,
+        hasSeed,
       });
       notePolarisActivity(
         scorers.length ? "regenerating scorers" : "drafting scorers",
@@ -2206,17 +2202,17 @@ export default function ProjectWorkspace() {
         setScorersGenerating(false);
       }
     },
-    [sessionId, scorers.length, scorersGenerating, hasCharter, runGenerateScorers],
+    [sessionId, scorers.length, scorersGenerating, hasSeed, runGenerateScorers],
   );
 
   // Auto-generate scorers when either:
   //   (a) dataset generation just kicked off — fire scorers in parallel
   //       so the two long-running jobs overlap instead of serialising;
-  //   (b) the user lands on the Scorers tab with a filled charter and
+  //   (b) the user lands on the Scorers tab with a filled seed and
   //       no scorers — same shape as the previous auto-trigger.
   // Once per session, guarded by `scorersGenerating` so an in-flight
   // run doesn't double-fire. The "(a)" branch was missing before, so
-  // any path that started only the dataset (Charter footer's
+  // any path that started only the dataset (Seed footer's
   // "Generate dataset" item, Polaris generate-dataset, etc.) left
   // scorers stranded until the user visited the Scorers tab — at
   // which point they ran sequentially after the dataset finished.
@@ -2224,7 +2220,7 @@ export default function ProjectWorkspace() {
   useEffect(() => {
     if (!sessionId) return;
     if (scorers.length > 0) return;
-    if (!hasCharter) return;
+    if (!hasSeed) return;
     if (scorersGenerating) return;
     if (autoGenScorersRef.current.has(sessionId)) return;
     const triggered = generatingDataset || activeTab === "scorers";
@@ -2235,7 +2231,7 @@ export default function ProjectWorkspace() {
     sessionId,
     activeTab,
     scorers.length,
-    hasCharter,
+    hasSeed,
     scorersGenerating,
     generatingDataset,
     handleGenerateScorers,
@@ -2244,7 +2240,7 @@ export default function ProjectWorkspace() {
   // Parent listens for Polaris-triggered draft requests via a stable
   // listener (bound once at mount). The ref pattern keeps the latest
   // handler in scope without re-binding the event listener on every
-  // scorers.length / hasCharter change — that re-bind churn was creating
+  // scorers.length / hasSeed change — that re-bind churn was creating
   // a small window where the polaris:generate-scorers event could land
   // between teardown and re-setup and be silently dropped.
   const handleGenerateScorersRef = useRef(handleGenerateScorers);
@@ -2276,7 +2272,7 @@ export default function ProjectWorkspace() {
       if (!ok) return;
     }
     // Switch tabs first so the user immediately sees the spinner instead of
-    // staring at the charter page wondering whether anything happened.
+    // staring at the seed page wondering whether anything happened.
     notePolarisActivity(dataset ? "regenerating dataset" : "generating dataset");
     suppressNextTabActivityRef.current = true;
     setActiveTab("dataset");
@@ -2304,7 +2300,7 @@ export default function ProjectWorkspace() {
     setActiveTab("scorers");
     // Routes through the unified handler so the generating + error state
     // lives in one place and survives tab switches. `skipConfirm` because
-    // the charter shortcut already handled its own confirm dialog.
+    // the seed shortcut already handled its own confirm dialog.
     await handleGenerateScorers({ skipConfirm: true });
   }, [scorers.length, scorersStale, handleGenerateScorers]);
 
@@ -2325,8 +2321,8 @@ export default function ProjectWorkspace() {
       if (!ok) return;
     }
     // Land on the dataset tab right away so the spinner shows there while
-    // both jobs run in the background. Once both finish we move on to the
-    // evaluate tab, which is the natural next step after generation.
+    // both jobs run in the background — and stay there once generation
+    // finishes, so the user lands on the dataset they just produced.
     setActiveTab("dataset");
     setGeneratingBoth(true);
     // Per-artifact flags drive the sidebar spinners so each one stops
@@ -2335,9 +2331,9 @@ export default function ProjectWorkspace() {
     if (!datasetFresh) setGeneratingDataset(true);
     if (!scorersFresh) setGeneratingScorersShortcut(true);
     try {
-      // Ensure charter once, then fan out. Skip the ones that are already
+      // Ensure seed once, then fan out. Skip the ones that are already
       // fresh so users don't regenerate downstream work unnecessarily.
-      await ensureCharter();
+      await ensureSeed();
       const jobs: Promise<void>[] = [];
       if (!datasetFresh) {
         jobs.push(
@@ -2362,18 +2358,17 @@ export default function ProjectWorkspace() {
         );
       }
       await Promise.all(jobs);
-      setActiveTab("evaluate");
     } catch (err) {
       console.error("Shortcut: generate both failed", err);
     } finally {
       // Belt-and-braces: clear the umbrella flag and any per-artifact
-      // flags that the inner finallys missed (e.g. ensureCharter threw
+      // flags that the inner finallys missed (e.g. ensureSeed threw
       // before the jobs array got a chance to wire them).
       setGeneratingBoth(false);
       setGeneratingDataset(false);
       setGeneratingScorersShortcut(false);
     }
-  }, [ensureCharter, runGenerateDataset, runGenerateScorers, dataset, datasetStale, scorers.length, scorersStale, setGeneratingScorersShortcut]);
+  }, [ensureSeed, runGenerateDataset, runGenerateScorers, dataset, datasetStale, scorers.length, scorersStale, setGeneratingScorersShortcut]);
 
   const handleGenerateDataset = useCallback(async () => {
     if (!sessionId) return;
@@ -2544,15 +2539,15 @@ export default function ProjectWorkspace() {
     }
   }, [dataset]);
 
-  const handleRetagAgainstCharter = useCallback(async () => {
+  const handleRetagAgainstSeed = useCallback(async () => {
     if (!dataset) return;
     setRetagLoading(true);
     try {
-      await retagExamplesAgainstCharter(dataset.id);
+      await retagExamplesAgainstSeed(dataset.id);
       const fullDs = await getDataset(dataset.session_id);
       setDataset(fullDs);
     } catch (err) {
-      console.error("Failed to retag against charter:", err);
+      console.error("Failed to retag against seed:", err);
       alert(`Retag failed: ${err instanceof Error ? err.message : "Unknown error"}`);
     } finally {
       setRetagLoading(false);
@@ -2693,14 +2688,14 @@ export default function ProjectWorkspace() {
         if (req.kind === "cell") {
           targets = [{ criterion: req.criterion, featureArea: req.featureArea }];
         } else if (req.kind === "area") {
-          // Area scope = the focused feature_area × every charter
+          // Area scope = the focused feature_area × every seed
           // coverage criterion. We need the full list of criteria to
           // form the per-cell targets that drive the retry loop, so
           // expand here.
-          const allCriteria = state.charter.coverage?.criteria ?? [];
+          const allCriteria = state.seed.coverage?.criteria ?? [];
           targets = allCriteria.length > 0
             ? allCriteria.map(c => ({ criterion: c, featureArea: req.featureArea }))
-            : // No charter criteria yet — fall back to a single open-ended
+            : // No seed criteria yet — fall back to a single open-ended
               // synth scoped to the area, with no per-cell breakdown.
               [{ criterion: "", featureArea: req.featureArea }];
         } else {
@@ -2728,7 +2723,7 @@ export default function ProjectWorkspace() {
           await synthesizeExamples(dataset.id, {
             feature_areas: areas,
             // Only pass coverage_criteria when we have specific targets;
-            // an empty list means "use the full charter list" on the
+            // an empty list means "use the full seed list" on the
             // backend, which is the right fallback for the no-criteria
             // area case.
             ...(criteria.length > 0 ? { coverage_criteria: criteria } : {}),
@@ -2747,12 +2742,12 @@ export default function ProjectWorkspace() {
           const matrix = nextGaps.coverage_matrix || {};
           remaining = remaining.filter(c => {
             // Cells without a real criterion (the area-fallback case, used
-            // only when the charter has no coverage criteria) are "resolved"
+            // only when the seed has no coverage criteria) are "resolved"
             // when any row exists in this area. Note: if the area already
             // had rows before this synth, the total is non-zero regardless
             // of whether this pass produced anything — so the retry is
             // effectively single-shot for that branch. Intentional: there's
-            // no per-cell signal to retry against without charter criteria.
+            // no per-cell signal to retry against without seed criteria.
             if (!c.criterion) {
               const total = Object.values(matrix).reduce(
                 (acc, row) => acc + ((row || {})[c.featureArea] ?? 0),
@@ -2772,7 +2767,7 @@ export default function ProjectWorkspace() {
         setLoading(false);
       }
     },
-    [dataset, coverageGenerateRequest, state.charter],
+    [dataset, coverageGenerateRequest, state.seed],
   );
 
   const handleExport = useCallback(async () => {
@@ -2817,14 +2812,14 @@ export default function ProjectWorkspace() {
   //   * stories exist  → primary "Go to user stories" + neutral "Regenerate
   //     user stories". Goal-edit dirtiness is irrelevant; the user can pick
   //     Regenerate explicitly when they want a fresh draft.
-  // Combined Goal page → next phase is now Skill (not Charter). Charter
+  // Combined Goal page → next phase is now Skill (not Seed). Seed
   // generation lives on the Skill page. Goals only count once committed
   // (Enter / Submit) — typing into the trailing draft input does NOT flip
   // the button to primary.
   const committedGoalsCount = goals.slice(0, -1).filter((g) => g.trim()).length;
   // Without a skill body the next-phase action is "Generate" — same target
   // tab, but the verb signals there's still a missing artifact upstream of
-  // the charter. Once a skill exists we drop back to "Go to" navigation.
+  // the seed. Once a skill exists we drop back to "Go to" navigation.
   const goalNextLabel = isPromptEval
     ? skillReady
       ? "Go to prompt"
@@ -2840,7 +2835,7 @@ export default function ProjectWorkspace() {
     <div className="h-full flex flex-col bg-bg-default text-fg-contrast">
       {/* Top bar */}
       <header className="h-16 flex items-center justify-between px-4 flex-shrink-0 border-b border-border-hint">
-        <div className="flex items-center gap-4 min-w-0">
+        <div className="flex items-center gap-2.5 min-w-0">
           <IconButton
             tone="contrast"
             onClick={() => navigate("/")}
@@ -2873,7 +2868,7 @@ export default function ProjectWorkspace() {
                 {projectName}
               </button>
             )}
-            {!hasCharter && (
+            {!hasSeed && (
               <span className="font-mono text-xs text-fg-dim bg-fill-neutral px-1.5 py-0.5 flex-shrink-0">
                 Draft
               </span>
@@ -2930,7 +2925,7 @@ export default function ProjectWorkspace() {
       <div className="flex-1 flex min-h-0 gap-6">
         {/* Left sidebar */}
         <nav className="w-56 flex-shrink-0 px-4 py-6 overflow-y-auto border-r border-border-hint">
-          {/* Nav groups — entry order: Goal → Skill/Prompt → Charter. */}
+          {/* Nav groups — entry order: Goal → Skill/Prompt → Seed. */}
           <SidebarGroup hideTopDivider>
             <SidebarItem
               label="Goal"
@@ -2958,13 +2953,13 @@ export default function ProjectWorkspace() {
               })()}
             />
             <SidebarItem
-              label="Charter"
-              icon={<CharterIcon width={18} height={18} />}
-              active={activeTab === "charter"}
-              onClick={() => setActiveTab("charter")}
-              disabled={!charterAvailable}
-              loading={loading && !hasCharter}
-              disabledReason="Charter generates after you submit your goals and user stories."
+              label="Seed"
+              icon={<SeedIcon width={18} height={18} />}
+              active={activeTab === "seed"}
+              onClick={() => setActiveTab("seed")}
+              disabled={!seedAvailable}
+              loading={loading && !hasSeed}
+              disabledReason="Seed generates after you submit your goals and user stories."
             />
           </SidebarGroup>
 
@@ -2979,8 +2974,8 @@ export default function ProjectWorkspace() {
               disabledReason={
                 !skillReady
                   ? `Add a ${isPromptEval ? "prompt" : "skill"} first — the dataset evaluates against it.`
-                  : !hasCharter
-                    ? "Generate the charter first; the dataset is built from its criteria."
+                  : !hasSeed
+                    ? "Generate the seed first; the dataset is built from its criteria."
                     : undefined
               }
               badge={
@@ -2999,8 +2994,8 @@ export default function ProjectWorkspace() {
               disabledReason={
                 !skillReady
                   ? `Add a ${isPromptEval ? "prompt" : "skill"} first — scorers grade its output.`
-                  : !hasCharter
-                    ? "Generate the charter first; scorers map to its criteria."
+                  : !hasSeed
+                    ? "Generate the seed first; scorers map to its criteria."
                     : undefined
               }
               badge={
@@ -3037,18 +3032,18 @@ export default function ProjectWorkspace() {
           {activeTab === "skill" && urlSessionId && (
             <SkillPanel
               sessionId={urlSessionId}
-              skillBody={state.charter.task.skill_body || ""}
-              skillName={state.charter.task.skill_name ?? null}
-              skillDescription={state.charter.task.skill_description ?? null}
+              skillBody={state.seed.task.skill_body || ""}
+              skillName={state.seed.task.skill_name ?? null}
+              skillDescription={state.seed.task.skill_description ?? null}
               isPromptEval={isPromptEval}
               promptSourcePath={state.prompt_source_path ?? null}
               promptBuilderName={state.prompt_builder_name ?? null}
               onSkillBodyChange={(body) => {
                 setState((prev) => ({
                   ...prev,
-                  charter: {
-                    ...prev.charter,
-                    task: { ...prev.charter.task, skill_body: body },
+                  seed: {
+                    ...prev.seed,
+                    task: { ...prev.seed.task, skill_body: body },
                   },
                 }));
               }}
@@ -3060,50 +3055,33 @@ export default function ProjectWorkspace() {
                 const s = await getSession(urlSessionId);
                 setState(s.state as SessionState);
               }}
-              onBeforeAnalyze={() => {
-                // Snap the user to the Charter tab the moment they click
-                // "Generate charter" so the spinner shows up there
-                // instead of the Skill page sitting silent during the
-                // ~10s seed call. Flip loading too so the overlay
-                // renders without waiting for handleSubmitIntake.
-                setActiveTab("charter");
-                setLoading(true);
-              }}
-              onAnalyzeError={() => {
-                // Counterpart to onBeforeAnalyze — if the seed call throws
-                // (bad URL, network blip, LLM rejection) we have to clear
-                // the loading flag we just set, otherwise the Charter tab
-                // sits stuck behind a permanent "Generating charter…"
-                // overlay with no way to recover.
-                setLoading(false);
-              }}
-              onSeeded={async () => {
+              onImported={async () => {
                 // Re-hydrate session state so the freshly-extracted
-                // goals/users/stories land in local state, then push
-                // straight into charter generation. The "Generate
-                // charter" CTA on the Skill page should land the user
-                // on a fresh charter, not bounce them through Goals.
-                await handleSessionSeeded();
-                handleSubmitIntake();
+                // goals/users/stories land in local state. Analyze only
+                // backfills goals + user stories — it deliberately does
+                // NOT kick off seed generation. The user reviews the
+                // backfilled signal on the Skill page, then clicks
+                // "Generate seed" explicitly when ready.
+                await handleSessionImported();
               }}
               onNext={() => {
-                // Post-seed primary CTA — user clicks "Generate charter"
-                // / "Regenerate charter" again. Confirms before
-                // overwriting an existing charter, then jumps to
-                // Charter immediately (so the spinner is visible there)
+                // Post-seed primary CTA — user clicks "Generate seed"
+                // / "Regenerate seed" again. Confirms before
+                // overwriting an existing seed, then jumps to
+                // Seed immediately (so the spinner is visible there)
                 // and re-runs the intake pass.
-                if (hasCharter) {
+                if (hasSeed) {
                   const ok = window.confirm(
-                    "Regenerate the charter?\n\nThis replaces the current criteria, alignment entries, and rot signals with a fresh draft built from your goals and stories.",
+                    "Regenerate the seed?\n\nThis replaces the current criteria, alignment entries, and rot signals with a fresh draft built from your goals and stories.",
                   );
                   if (!ok) return;
                 }
-                setActiveTab("charter");
+                setActiveTab("seed");
                 setLoading(true);
                 handleSubmitIntake();
               }}
               canEdit={canEdit}
-              hasCharter={hasCharter}
+              hasSeed={hasSeed}
               hasGoals={nonEmptyGoals.length > 0}
               skillSuggestions={skillSuggestions}
               skillSuggestionsLoading={skillSuggestionsLoading}
@@ -3133,11 +3111,11 @@ export default function ProjectWorkspace() {
               topBanner={
                 canEdit &&
                 urlSessionId &&
-                !state.charter.task.skill_body &&
+                !state.seed.task.skill_body &&
                 !isPromptEval ? (
                   <AddSourceBanner
                     sessionId={urlSessionId}
-                    onSeeded={handleSessionSeeded}
+                    onImported={handleSessionImported}
                     onPromptCreated={(newSessionId) => {
                       navigate(`/project/${newSessionId}?tab=goals`);
                     }}
@@ -3205,10 +3183,10 @@ export default function ProjectWorkspace() {
             />
           )}
 
-          {activeTab === "charter" && (
+          {activeTab === "seed" && (
             <>
-              <CharterPanel
-              charter={state.charter}
+              <SeedPanel
+              seed={state.seed}
               validation={state.validation}
               activeCriteria={activeCriteria}
               onEditCriterion={handleEditCriterion}
@@ -3224,8 +3202,8 @@ export default function ProjectWorkspace() {
               onAcceptSuggestion={handleAcceptSuggestion}
               onDismissSuggestion={handleDismissSuggestion}
               onRegenSuggestions={handleSuggest}
-              onCriteriaChanged={scheduleCharterSuggestionRegen}
-              suggestionsLoading={charterSuggestionsLoading}
+              onCriteriaChanged={scheduleSeedSuggestionRegen}
+              suggestionsLoading={seedSuggestionsLoading}
               loading={loading}
               // Polaris moved to the header — no chat in the rail bottom.
               onGenerateDataset={handleShortcutDataset}
@@ -3252,9 +3230,9 @@ export default function ProjectWorkspace() {
                 }
                 setActiveTab("skill");
               }}
-              hasCharter={hasCharter}
-              onGenerateCharter={() => {
-                // User landed on an empty Charter page directly (e.g. via
+              hasSeed={hasSeed}
+              onGenerateSeed={() => {
+                // User landed on an empty Seed page directly (e.g. via
                 // sidebar after the skill was generated) — let them kick
                 // off the intake pass right here. Same handler as the
                 // Skill page CTA; loading is already reflected by the
@@ -3272,7 +3250,7 @@ export default function ProjectWorkspace() {
                 <>
                   <ExampleReview
                     examples={dataset.examples || []}
-                    charter={state.charter}
+                    seed={state.seed}
                     loading={loading}
                     generating={generatingDataset || generatingBoth}
                     generatingProgress={synthProgress}
@@ -3283,8 +3261,8 @@ export default function ProjectWorkspace() {
                       // grid call when off-target/safety rows exist; either
                       // way this is a reasonable "expected" hint.
                       const cov =
-                        state.charter.coverage?.criteria?.length || 0;
-                      const align = state.charter.alignment?.length || 0;
+                        state.seed.coverage?.criteria?.length || 0;
+                      const align = state.seed.alignment?.length || 0;
                       const cells = Math.max(cov * align, 1);
                       return cells * 2;
                     })()}
@@ -3296,16 +3274,16 @@ export default function ProjectWorkspace() {
                     onShowCoverageMap={handleShowCoverageMap}
                     gaps={gapAnalysis}
                     agreement={judgeAgreement}
-                    charterSnapshot={dataset.charter_snapshot}
+                    seedSnapshot={dataset.seed_snapshot}
                     onRequestFillGaps={handleRequestFillGaps}
                     onAddForFeatureArea={(featureArea) => {
                       setCoverageGenerateRequest({ kind: "area", featureArea });
                     }}
                     onAddAlignmentCriteria={() => {
-                      // Switch to the charter tab, focus alignment, kick
+                      // Switch to the seed tab, focus alignment, kick
                       // off a fresh suggestion fetch so the user lands on
                       // a panel that's already loading proposals.
-                      setActiveTab("charter");
+                      setActiveTab("seed");
                       void handleSuggest();
                       window.setTimeout(() => {
                         window.dispatchEvent(
@@ -3321,58 +3299,18 @@ export default function ProjectWorkspace() {
                     onAcceptRevision={handleAcceptRevision}
                     onDismissRevision={handleDismissRevision}
                     revisionsLoading={revisionsLoading}
-                    onRetagAgainstCharter={isPromptEval && hasCharter ? handleRetagAgainstCharter : undefined}
+                    onRetagAgainstSeed={isPromptEval && hasSeed ? handleRetagAgainstSeed : undefined}
                     retagLoading={retagLoading}
                     canEdit={canEdit}
                     initialFeatureAreaFilter={pendingDatasetFilter}
                     onInitialFilterApplied={() => setPendingDatasetFilter(null)}
                   />
-                  {/* Once every example has been reviewed, surface the tri-state
-                      scorers CTA — Generate / Regenerate / Go to — mirroring the
-                      footer pattern on Goals / Stories / Charter. Hidden while
-                      the user is still reviewing so it doesn't distract. */}
-                  {(() => {
-                    const allReviewed = (dataset?.examples || []).length > 0 &&
-                      !(dataset?.examples || []).some((e) => e.review_status === 'pending');
-                    if (!allReviewed) return null;
-                    const scorersStateLocal: "missing" | "stale" | "fresh" =
-                      scorers.length === 0 ? "missing" : scorersStale ? "stale" : "fresh";
-                    const label = scorersStateLocal === "missing"
-                      ? "Generate scorers"
-                      : scorersStateLocal === "stale"
-                        ? "Regenerate scorers"
-                        : "Go to scorers";
-                    const isGoTo = scorersStateLocal === "fresh";
-                    // Primary only when actually generating for the first
-                    // time. Regenerate + Go to stay neutral so the page
-                    // doesn't insistently push a re-run.
-                    const isPrimary = scorersStateLocal === "missing";
-                    return (
-                      <div className="absolute bottom-8 right-8 pointer-events-auto">
-                        <Button
-                          size="big"
-                          variant={isPrimary ? "primary" : "neutral"}
-                          onClick={() => void handleShortcutScorers()}
-                          disabled={!!(generatingScorersShortcut || loading)}
-                        >
-                          {generatingScorersShortcut ? (
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                          ) : isGoTo ? (
-                            <ArrowRightLucide className="w-4 h-4" />
-                          ) : (
-                            <SparklesIcon className="w-4 h-4" />
-                          )}
-                          {label}
-                        </Button>
-                      </div>
-                    );
-                  })()}
                 </>
               ) : (
                 // Empty state for when the user lands on Dataset directly
-                // (no charter-page shortcut involved). Generation is the only
+                // (no seed-page shortcut involved). Generation is the only
                 // path — no "import or generate?" decision — so the button
-                // just kicks off synthesis. Shortcuts from the charter page
+                // just kicks off synthesis. Shortcuts from the seed page
                 // have already started generation by the time we land here.
                 <div className="flex-1 flex items-center justify-center">
                   <div className="flex flex-col items-center gap-6 max-w-md text-center">
@@ -3381,26 +3319,26 @@ export default function ProjectWorkspace() {
                         Build your dataset
                       </h2>
                       <p className="text-sm text-fg-dim">
-                        Generate evaluation examples from your charter criteria.
+                        Generate evaluation examples from your seed criteria.
                       </p>
                     </div>
                     {(() => {
                       // Spinner during any path that's currently generating
-                      // dataset content — direct click, charter shortcut, or
+                      // dataset content — direct click, seed shortcut, or
                       // the combined "both" action. Without this the user
-                      // lands here from a charter shortcut and sees a static
+                      // lands here from a seed shortcut and sees a static
                       // button while work is happening. Once examples land
                       // in `dataset` we leave this branch entirely, so the
                       // spinner can't outlive the generation it's reporting.
                       const generating = loading || generatingDataset || generatingBoth;
-                      const cov = state.charter.coverage?.criteria?.length || 0;
-                      const align = state.charter.alignment?.length || 0;
+                      const cov = state.seed.coverage?.criteria?.length || 0;
+                      const align = state.seed.alignment?.length || 0;
                       const expected = Math.max(cov * align, 1) * 2;
                       return (
                         <>
                         <button
                           onClick={handleGenerateDataset}
-                          disabled={generating || !hasCharter}
+                          disabled={generating || !hasSeed}
                           className="flex items-center gap-2 px-5 py-2.5 text-sm font-medium bg-accent text-accent-foreground hover:opacity-90 transition-opacity disabled:opacity-50"
                         >
                           {generating ? (
@@ -3429,7 +3367,7 @@ export default function ProjectWorkspace() {
           {activeTab === "scorers" && (
             <>
               <ScorersPanel
-                charter={state.charter}
+                seed={state.seed}
                 hasDataset={!!dataset}
                 sessionId={sessionId || ""}
                 scorers={scorers}
@@ -3455,15 +3393,15 @@ export default function ProjectWorkspace() {
               sessionId={urlSessionId}
               dataset={dataset}
               scorerCount={scorers.length}
-              hasSkillBody={!!state.charter.task.skill_body}
+              hasSkillBody={!!state.seed.task.skill_body}
               isPromptEval={isPromptEval}
-              skillBody={state.charter.task.skill_body || ""}
+              skillBody={state.seed.task.skill_body || ""}
               onSkillBodyChange={(body) =>
                 setState((prev) => ({
                   ...prev,
-                  charter: {
-                    ...prev.charter,
-                    task: { ...prev.charter.task, skill_body: body },
+                  seed: {
+                    ...prev.seed,
+                    task: { ...prev.seed.task, skill_body: body },
                   },
                 }))
               }
@@ -3491,7 +3429,7 @@ export default function ProjectWorkspace() {
               onGoToSkill={() => setActiveTab("skill")}
               onGoToDataset={() => setActiveTab("dataset")}
               onGoToScorers={() => setActiveTab("scorers")}
-              onGoToCharter={() => setActiveTab("charter")}
+              onGoToSeed={() => setActiveTab("seed")}
               onGoToUnmappedRows={() => {
                 setPendingDatasetFilter("(unmapped)");
                 setActiveTab("dataset");
@@ -3603,7 +3541,7 @@ function buildCoverageGenerateModalProps(req: CoverageGenerateRequestExt): {
     };
   }
   if (req.kind === "area") {
-    // Per-feature_area: synth fans out across every charter coverage
+    // Per-feature_area: synth fans out across every seed coverage
     // criterion for this area. Show 2 as the suggested count; copy
     // explains the scope so the user can adjust.
     return {

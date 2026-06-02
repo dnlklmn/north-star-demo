@@ -166,7 +166,7 @@ async def _list_projects(ctx: ToolCtx, args: dict) -> dict:
 
 @tool(
     "get_project",
-    "Get the current (or named) project: state, charter summary, dataset summary, phase.",
+    "Get the current (or named) project: state, seed summary, dataset summary, phase.",
     {
         "type": "object",
         "properties": {"session_id": {"type": "string", "description": "Defaults to current session."}},
@@ -182,7 +182,7 @@ async def _get_project(ctx: ToolCtx, args: dict) -> dict:
     if not row:
         return {"error": "session not found"}
     state = row.get("state", {})
-    charter = state.get("charter", {})
+    seed = state.get("seed", {})
     dataset = await db.get_dataset_by_session(sid)
     return {
         "id": sid,
@@ -192,9 +192,9 @@ async def _get_project(ctx: ToolCtx, args: dict) -> dict:
         "n_goals": len(state.get("extracted_goals") or []),
         "n_users": len(state.get("extracted_users") or []),
         "n_stories": len(state.get("extracted_stories") or []),
-        "has_charter": bool(charter.get("alignment") or charter.get("coverage", {}).get("criteria")),
-        "n_alignment": len(charter.get("alignment") or []),
-        "n_coverage_criteria": len((charter.get("coverage") or {}).get("criteria") or []),
+        "has_seed": bool(seed.get("alignment") or seed.get("coverage", {}).get("criteria")),
+        "n_alignment": len(seed.get("alignment") or []),
+        "n_coverage_criteria": len((seed.get("coverage") or {}).get("criteria") or []),
         "n_scorers": len(state.get("scorers") or []),
         "dataset_id": dataset["id"] if dataset else None,
     }
@@ -230,20 +230,20 @@ async def _get_scorers(ctx: ToolCtx, args: dict) -> dict:
 
 
 @tool(
-    "get_charter",
-    "Open the charter view and return the charter (task, alignment, coverage, balance, rot). UI navigates to the charter tab so the user sees what you're describing.",
+    "get_seed",
+    "Open the seed view and return the seed (task, alignment, coverage, balance, rot). UI navigates to the seed tab so the user sees what you're describing.",
     {"type": "object", "properties": {"session_id": {"type": "string"}}, "additionalProperties": False},
     tier="auto",
 )
-async def _get_charter(ctx: ToolCtx, args: dict) -> dict:
+async def _get_seed(ctx: ToolCtx, args: dict) -> dict:
     sid = args.get("session_id") or ctx.session_id
     if not sid:
         return {"error": "no session in context"}
     row = await db.get_session(sid)
     if not row:
         return {"error": "session not found"}
-    charter = row.get("state", {}).get("charter", {})
-    return {**_nav("phase", {"phase": "charter"}), "charter": charter}
+    seed = row.get("state", {}).get("seed", {})
+    return {**_nav("phase", {"phase": "seed"}), "seed": seed}
 
 
 @tool(
@@ -359,10 +359,10 @@ async def _get_coverage_gaps(ctx: ToolCtx, args: dict) -> dict:
     ds = await db.get_dataset(did)
     if not ds:
         return {"error": "dataset not found"}
-    charter = ds.get("charter_snapshot") or {}
+    seed = ds.get("seed_snapshot") or {}
     examples = await db.get_examples(did)
     from .prompt import _build_coverage_matrix
-    matrix = _build_coverage_matrix(charter, examples)
+    matrix = _build_coverage_matrix(seed, examples)
     empty: list[dict] = []
     underfilled: list[dict] = []
     for criterion, by_fa in matrix.items():
@@ -589,12 +589,12 @@ async def _create_example(ctx: ToolCtx, args: dict) -> dict:
     return {"ok": True, "example_id": row["id"]}
 
 
-_PATCH_CHARTER_KEYS = {"task", "alignment", "coverage", "balance", "rot"}
+_PATCH_SEED_KEYS = {"task", "alignment", "coverage", "balance", "rot"}
 
 
 @tool(
-    "patch_charter",
-    "Update one or more charter fields. Touches local state only — does NOT regenerate. The merged charter is validated; invalid shapes are rejected without writing.",
+    "patch_seed",
+    "Update one or more seed fields. Touches local state only — does NOT regenerate. The merged seed is validated; invalid shapes are rejected without writing.",
     {
         "type": "object",
         "properties": {
@@ -608,29 +608,29 @@ _PATCH_CHARTER_KEYS = {"task", "alignment", "coverage", "balance", "rot"}
     },
     tier="auto",
 )
-async def _patch_charter(ctx: ToolCtx, args: dict) -> dict:
+async def _patch_seed(ctx: ToolCtx, args: dict) -> dict:
     if not ctx.session_id:
         return {"error": "no session in context"}
     fields = args.get("fields") or {}
-    bad_keys = [k for k in fields if k not in _PATCH_CHARTER_KEYS]
+    bad_keys = [k for k in fields if k not in _PATCH_SEED_KEYS]
     if bad_keys:
-        return {"error": f"unknown charter fields: {bad_keys}"}
+        return {"error": f"unknown seed fields: {bad_keys}"}
     row = await db.get_session(ctx.session_id)
     if not row:
         return {"error": "session not found"}
     state = row["state"]
-    charter = dict(state.get("charter") or {})
+    seed = dict(state.get("seed") or {})
     for k, v in fields.items():
-        charter[k] = v
+        seed[k] = v
     # Validate the merged shape before persisting — the model's instinct is
     # to write the JSON it just printed, which can include malformed
     # alignment/coverage trees that crash on next read. Pydantic catches it.
-    from .models import Charter
+    from .models import Seed
     try:
-        Charter.model_validate(charter)
+        Seed.model_validate(seed)
     except Exception as e:  # noqa: BLE001
-        return {"error": f"charter validation failed: {e}"}
-    state["charter"] = charter
+        return {"error": f"seed validation failed: {e}"}
+    state["seed"] = seed
     await db.update_session(ctx.session_id, state, state.get("conversation_history") or [])
     return {"ok": True, "updated_fields": list(fields.keys())}
 
@@ -676,7 +676,7 @@ async def _update_settings(ctx: ToolCtx, args: dict) -> dict:
 @tool(
     "create_project",
     "Create a new project. Confirms before creating to avoid accidental ones during conversation.",
-    _confirm_schema({"name": {"type": "string"}, "kind": {"type": "string", "default": "charter"}}),
+    _confirm_schema({"name": {"type": "string"}, "kind": {"type": "string", "default": "seed"}}),
     tier="confirm",
 )
 async def _create_project(ctx: ToolCtx, args: dict) -> dict:
@@ -709,7 +709,7 @@ async def _delete_project(ctx: ToolCtx, args: dict) -> dict:
         return _proposal(
             "delete_project", {**args, "session_id": sid},
             label="Delete this project",
-            reason="This is irreversible. All turns, charter, and examples will be removed.",
+            reason="This is irreversible. All turns, seed, and examples will be removed.",
         )
     await db.delete_session(sid)
     return {"ok": True, "deleted_session_id": sid}
@@ -741,7 +741,7 @@ async def _synthesize_examples(ctx: ToolCtx, args: dict) -> dict:
     if not ds:
         return {"error": "dataset not found"}
     generated, _meta = await call_synthesize_examples(
-        ds.get("charter_snapshot") or {},
+        ds.get("seed_snapshot") or {},
         feature_areas=args.get("feature_areas"),
         coverage_criteria=args.get("coverage_criteria"),
         count=args.get("count_per_scenario", 2),
@@ -773,7 +773,7 @@ async def _auto_review(ctx: ToolCtx, args: dict) -> dict:
     if not ds:
         return {"error": "dataset not found"}
     pending = await db.get_examples(ctx.dataset_id, review_status="pending")
-    reviews, _meta = await call_review_examples(ds.get("charter_snapshot") or {}, pending)
+    reviews, _meta = await call_review_examples(ds.get("seed_snapshot") or {}, pending)
     for r in reviews:
         eid = r.get("example_id")
         if not eid:
@@ -811,14 +811,14 @@ async def _enrich_gaps(ctx: ToolCtx, args: dict) -> dict:
     ds = await db.get_dataset(ctx.dataset_id)
     if not ds:
         return {"error": "dataset not found"}
-    charter = ds.get("charter_snapshot") or {}
+    seed = ds.get("seed_snapshot") or {}
     gtype = args["gap_type"]
     targets = args["targets"]
     count = args.get("count", 2)
     if gtype == "coverage":
-        generated, _ = await call_synthesize_examples(charter, coverage_criteria=targets, count=count)
+        generated, _ = await call_synthesize_examples(seed, coverage_criteria=targets, count=count)
     else:
-        generated, _ = await call_synthesize_examples(charter, feature_areas=targets, count=count)
+        generated, _ = await call_synthesize_examples(seed, feature_areas=targets, count=count)
     for ex in generated:
         ex["source"] = "synthetic"
     created = await db.bulk_create_examples(ctx.dataset_id, generated)
@@ -885,7 +885,7 @@ async def _run_eval(ctx: ToolCtx, args: dict) -> dict:
 
 @tool(
     "generate_scorers",
-    "Draft scorers from the current charter. Costs LLM tokens; confirms first.",
+    "Draft scorers from the current seed. Costs LLM tokens; confirms first.",
     _confirm_schema(),
     tier="confirm",
 )
@@ -895,7 +895,7 @@ async def _generate_scorers(ctx: ToolCtx, args: dict) -> dict:
     if not args.get("confirmed"):
         return _proposal(
             "generate_scorers", args,
-            label="Draft scorers from the charter",
+            label="Draft scorers from the seed",
             reason="Costs LLM tokens. Replaces existing scorer code — any manual edits will be lost.",
         )
     return {
@@ -1008,23 +1008,23 @@ async def _cancel_eval_run(ctx: ToolCtx, args: dict) -> dict:
 
 
 @tool(
-    "finalize_charter",
-    "Open the charter view so the user can lock the charter as final. Polaris does not finalize charters itself yet.",
+    "finalize_seed",
+    "Open the seed view so the user can lock the seed as final. Polaris does not finalize seeds itself yet.",
     _confirm_schema(),
     tier="confirm",
 )
-async def _finalize_charter(ctx: ToolCtx, args: dict) -> dict:
+async def _finalize_seed(ctx: ToolCtx, args: dict) -> dict:
     if not ctx.session_id:
         return {"error": "no session in context"}
     if not args.get("confirmed"):
         return _proposal(
-            "finalize_charter", args,
-            label="Open the charter view",
-            reason="Polaris will jump you to the Charter tab; you finalize from there.",
+            "finalize_seed", args,
+            label="Open the seed view",
+            reason="Polaris will jump you to the Seed tab; you finalize from there.",
         )
     return {
-        **_nav("phase", {"phase": "charter"}),
-        "note": "Navigated to charter tab. The user finalizes from there — Polaris did not execute it.",
+        **_nav("phase", {"phase": "seed"}),
+        "note": "Navigated to seed tab. The user finalizes from there — Polaris did not execute it.",
     }
 
 
@@ -1061,7 +1061,7 @@ async def _nav_project(ctx: ToolCtx, args: dict) -> dict:
         "properties": {
             "phase": {
                 "type": "string",
-                "enum": ["skill", "goals", "users", "charter", "dataset", "scorers", "evaluate"],
+                "enum": ["skill", "goals", "users", "seed", "dataset", "scorers", "evaluate"],
             }
         },
         "required": ["phase"],

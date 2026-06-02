@@ -12,7 +12,7 @@ from app.tools import (
     _dedupe_stories,
     _dedupe_suggestions,
     _extract_json,
-    parse_charter_update,
+    parse_seed_update,
     parse_suggestions,
 )
 
@@ -38,29 +38,29 @@ class TestExtractJson:
         assert _extract_json("not json at all") == {}
 
 
-class TestParseCharterUpdate:
+class TestParseSeedUpdate:
     def test_present(self):
         text = (
             'Some prose.\n'
-            '```charter-update\n'
+            '```seed-update\n'
             '{"coverage": {"criteria": ["x"]}}\n'
             '```\n'
             'More prose.'
         )
-        update, remaining = parse_charter_update(text)
+        update, remaining = parse_seed_update(text)
         assert update == {"coverage": {"criteria": ["x"]}}
-        assert "charter-update" not in remaining
+        assert "seed-update" not in remaining
         assert "Some prose." in remaining
         assert "More prose." in remaining
 
     def test_absent(self):
-        update, remaining = parse_charter_update("just a regular response")
+        update, remaining = parse_seed_update("just a regular response")
         assert update is None
         assert remaining == "just a regular response"
 
     def test_malformed_json_falls_back_to_none(self):
-        text = '```charter-update\n{not valid json}\n```'
-        update, remaining = parse_charter_update(text)
+        text = '```seed-update\n{not valid json}\n```'
+        update, remaining = parse_seed_update(text)
         assert update is None
         # Original text returned unchanged so the caller can show it as-is.
         assert remaining == text

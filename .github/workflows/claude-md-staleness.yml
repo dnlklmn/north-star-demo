@@ -1,0 +1,122 @@
+name: CLAUDE.md staleness check
+
+# Soft reminder: when a PR touches files that CLAUDE.md documents but leaves
+# CLAUDE.md itself untouched, post a (sticky, self-clearing) PR comment.
+# The job always succeeds — it never blocks a merge.
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: claude-md-staleness-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check:
+    name: Flag structural changes missing a CLAUDE.md update
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Detect structural changes
+        id: detect
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # --- Watchlist -------------------------------------------------------
+          # Files whose changes usually mean CLAUDE.md needs a second look.
+          # Edit this list freely as the project's documented surface changes.
+          WATCH=(
+            backend/app/agent.py
+            backend/app/prompt.py
+            backend/app/tools.py
+            backend/app/main.py
+            backend/app/models.py
+            backend/app/db.py
+            backend/pyproject.toml
+            frontend/package.json
+            package.json
+            frontend/src/types.ts
+            frontend/src/api.ts
+            frontend/src/index.css
+          )
+          # ---------------------------------------------------------------------
+
+          all_changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+
+          # Changes to any watchlisted file.
+          watch_hits=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- "${WATCH[@]}" || true)
+
+          # A brand-new Python module under backend/app/ is a new architecture
+          # surface even if it is not on the watchlist yet.
+          new_modules=$(git diff --name-only --diff-filter=A "$BASE_SHA" "$HEAD_SHA" -- 'backend/app/*.py' || true)
+
+          structural=$(printf '%s\n%s\n' "$watch_hits" "$new_modules" | sed '/^$/d' | sort -u)
+
+          claude_touched=no
+          if printf '%s\n' "$all_changed" | grep -qx 'CLAUDE.md'; then
+            claude_touched=yes
+          fi
+
+          stale=no
+          if [ -n "$structural" ] && [ "$claude_touched" = no ]; then
+            stale=yes
+          fi
+
+          echo "stale=$stale" >> "$GITHUB_OUTPUT"
+          {
+            echo 'files<<STALE_FILES_EOF'
+            echo "$structural"
+            echo 'STALE_FILES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$stale" = yes ]; then
+            echo "### CLAUDE.md may be stale" >> "$GITHUB_STEP_SUMMARY"
+            echo "$structural" | sed 's/^/- /' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "CLAUDE.md staleness check: nothing to flag." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Sync staleness comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          STALE: ${{ steps.detect.outputs.stale }}
+          FILES: ${{ steps.detect.outputs.files }}
+        run: |
+          set -euo pipefail
+          MARKER='<!-- claude-md-staleness -->'
+
+          existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq ".[] | select(.body | startswith(\"$MARKER\")) | .id" | head -n1 || true)
+
+          if [ "$STALE" = yes ]; then
+            file_list=$(printf '%s\n' "$FILES" | sed '/^$/d; s/^/- `/; s/$/`/')
+            body=$(printf '%s\n\n## CLAUDE.md may be stale\n\nThis PR changes files that `CLAUDE.md` documents, but `CLAUDE.md` itself was not updated:\n\n%s\n\n_If the docs still hold, ignore this — it is a reminder, not a merge blocker. Push a `CLAUDE.md` update to clear this comment._\n' "$MARKER" "$file_list")
+            if [ -n "$existing" ]; then
+              gh api -X PATCH "repos/$REPO/issues/comments/$existing" -f body="$body" >/dev/null
+              echo "Updated existing staleness comment."
+            else
+              gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null
+              echo "Posted staleness comment."
+            fi
+            echo "::warning::CLAUDE.md may be stale — see the PR comment."
+          else
+            if [ -n "$existing" ]; then
+              gh api -X DELETE "repos/$REPO/issues/comments/$existing" >/dev/null
+              echo "Cleared stale staleness comment."
+            else
+              echo "Nothing to flag."
+            fi
+          fi

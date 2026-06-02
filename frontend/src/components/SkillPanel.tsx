@@ -8,7 +8,7 @@ import {
   listSkillVersions,
   promoteSkillVersion,
   restoreSkillVersion,
-  seedFromSkill,
+  importFromSkill,
   setSessionMode,
   type SkillSuggestion,
 } from '../api'
@@ -29,7 +29,7 @@ interface Props {
   skillDescription?: string | null
   /** When the parent session has kind='prompt' the body describes a North Star
    *  internal prompt (e.g. build_generate_draft_prompt), not a user-authored
-   *  skill. Editing changes the seed/charter signal but does NOT change what
+   *  skill. Editing changes the seed/seed signal but does NOT change what
    *  runs at eval time — the eval runner replays the prompt builder by
    *  prompt_target. The panel surfaces this with a banner so the user
    *  doesn't think they're editing the prompt under test. */
@@ -49,10 +49,10 @@ interface Props {
   candidateVersionId?: string | null
   /** Called after Promote/Discard so the parent can refresh session state. */
   onCandidateChanged?: () => Promise<void> | void
-  /** Called after a successful skill-seed (first Analyze). Parent refreshes
+  /** Called after a successful skill-import (first Analyze). Parent refreshes
    *  session state to pick up extracted goals/users/stories and unlocks
    *  downstream tabs. */
-  onSeeded?: () => void
+  onImported?: () => void
   /** Called when the user clicks the post-seed primary CTA or presses Cmd+Enter. */
   onNext?: () => void
   /** Read-only when false: Analyze / Save / Promote / Discard / Start-from-
@@ -88,12 +88,12 @@ interface Props {
    *  refresh icon for an explicit "Get suggestions" button so the user
    *  has a clear affordance to fetch on demand. */
   autoGenerateSuggestions?: boolean
-  /** Whether the project already has a charter. Drives the primary CTA
-   *  label between "Generate charter" and "Regenerate charter". */
-  hasCharter?: boolean
-  /** Fired the moment the user clicks the "Generate / Regenerate charter"
+  /** Whether the project already has a seed. Drives the primary CTA
+   *  label between "Generate seed" and "Regenerate seed". */
+  hasSeed?: boolean
+  /** Fired the moment the user clicks the "Generate / Regenerate seed"
    *  button, before any backend work starts. The parent uses this to
-   *  navigate to the Charter tab immediately so the spinner shows there
+   *  navigate to the Seed tab immediately so the spinner shows there
    *  while the seed + submit-intake passes run, instead of leaving the
    *  user staring at the Skill page for ~10s. */
   onBeforeAnalyze?: () => void
@@ -101,7 +101,7 @@ interface Props {
    *  (e.g. a GitHub URL fetch fails or the seed pass errors out). The
    *  parent uses this to unflip whatever loading flag `onBeforeAnalyze`
    *  set, otherwise the user is stranded with a permanent "Generating
-   *  charter…" overlay on the Charter tab. */
+   *  seed…" overlay on the Seed tab. */
   onAnalyzeError?: () => void
   /** Seed for the version history list. The parent already has the full
    *  history in `state.skill_versions` (it ships with the session payload)
@@ -135,7 +135,7 @@ export default function SkillPanel({
   activeVersionId,
   candidateVersionId,
   onCandidateChanged,
-  onSeeded,
+  onImported,
   onNext,
   canEdit = true,
   hasGoals = false,
@@ -148,7 +148,7 @@ export default function SkillPanel({
   generatingFromGoals = false,
   regenerateFromGoals = false,
   autoGenerateSuggestions = true,
-  hasCharter = false,
+  hasSeed = false,
   onBeforeAnalyze,
   onAnalyzeError,
   initialVersions,
@@ -251,7 +251,7 @@ export default function SkillPanel({
   const handleAnalyze = useCallback(async () => {
     if (!canAnalyze) return
     // Tell the parent we're starting *before* any await so it can navigate
-    // to Charter and flip the loading state. The user sees the spinner
+    // to Seed and flip the loading state. The user sees the spinner
     // there immediately instead of waiting on the Skill page.
     onBeforeAnalyze?.()
     setWorking(true)
@@ -259,7 +259,7 @@ export default function SkillPanel({
     try {
       const { body, name, description } = await resolveDraft()
       await setSessionMode(sessionId, 'triggered')
-      await seedFromSkill(sessionId, {
+      await importFromSkill(sessionId, {
         skill_body: body,
         skill_name: name,
         skill_description: description,
@@ -270,26 +270,26 @@ export default function SkillPanel({
       // URL the user pasted.
       if (body !== draft) setDraft(body)
       await refreshVersions()
-      onSeeded?.()
+      onImported?.()
     } catch (err) {
       console.error('Seed failed', err)
       setError(err instanceof Error ? err.message : 'Failed to analyze SKILL.md')
       // Notify parent so it can unflip whatever loading flag onBeforeAnalyze
-      // set — without this, a failed analyze leaves the Charter tab stuck on
-      // the "Generating charter…" overlay forever.
+      // set — without this, a failed analyze leaves the Seed tab stuck on
+      // the "Generating seed…" overlay forever.
       onAnalyzeError?.()
     } finally {
       setWorking(false)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canAnalyze, draft, sessionId, onSkillBodyChange, onSeeded, refreshVersions, onBeforeAnalyze, onAnalyzeError])
+  }, [canAnalyze, draft, sessionId, onSkillBodyChange, onImported, refreshVersions, onBeforeAnalyze, onAnalyzeError])
 
   const handleRerunAnalysis = async () => {
     setWorking(true)
     setError(null)
     try {
       const { body, name, description } = await resolveDraft()
-      await seedFromSkill(sessionId, {
+      await importFromSkill(sessionId, {
         skill_body: body,
         skill_name: name,
         skill_description: description,
@@ -297,7 +297,7 @@ export default function SkillPanel({
       onSkillBodyChange(body)
       if (body !== draft) setDraft(body)
       await refreshVersions()
-      onSeeded?.()
+      onImported?.()
     } catch (err) {
       console.error('Rerun failed', err)
       setError(err instanceof Error ? err.message : 'Failed to re-run analysis')
@@ -326,7 +326,7 @@ export default function SkillPanel({
     }
   }, [canSave, draft, notes, sessionId, onSkillBodyChange])
 
-  // Cmd+Enter → next action (Analyze / Save / Generate charter).
+  // Cmd+Enter → next action (Analyze / Save / Generate seed).
   // Declared after the handlers so they're in scope as effect deps.
   useEffect(() => {
     if (!onNext) return;
@@ -407,17 +407,17 @@ export default function SkillPanel({
     </>
   )
 
-  // Floating footer — matches the pattern on Goals / Stories / Charter.
-  // Primary CTA before first seed is the charter-generator (relabelled
-  // from the old "Analyze" — same handler, but the user-facing name now
-  // reflects the next phase). Save as v{n} shows when edits land on top
-  // of an existing version. After seeding (no canAnalyze, no canSave)
-  // the same charter CTA stays so the user can move to the charter step.
-  // Viewers see no footer (no write actions); Cmd+Enter Next is also
-  // disabled upstream because the navigation buttons drive panel switches.
-  const charterCtaLabel = hasCharter
-    ? "Regenerate charter"
-    : "Generate charter"
+  // Floating footer — matches the pattern on Goals / Stories / Seed.
+  // Primary CTA before first seed is "Analyze" — it backfills goals and
+  // user stories from the pasted SKILL.md (no seed generation yet).
+  // Save as v{n} shows when edits land on top of an existing version.
+  // After seeding (no canAnalyze, no canSave) the seed CTA appears so
+  // the user can move to the seed step. Viewers see no footer (no
+  // write actions); Cmd+Enter Next is also disabled upstream because the
+  // navigation buttons drive panel switches.
+  const seedCtaLabel = hasSeed
+    ? "Regenerate seed"
+    : "Generate seed"
   const footer = !canEdit ? null : canAnalyze ? (
     <Button
       size="big"
@@ -426,7 +426,7 @@ export default function SkillPanel({
       disabled={working}
     >
       {working ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
-      {charterCtaLabel}
+      Analyze
     </Button>
   ) : canSave ? (
     <div className="flex items-center gap-2">
@@ -475,7 +475,7 @@ export default function SkillPanel({
         onClick={onNext}
         shortcut={<CmdReturnIcon />}
       >
-        {charterCtaLabel}
+        {seedCtaLabel}
       </Button>
     </div>
   ) : undefined
@@ -664,7 +664,7 @@ export default function SkillPanel({
                           ? 'bg-warning/15 text-warning'
                           : v.created_from === 'suggestion'
                             ? 'bg-accent/15 text-accent'
-                            : v.created_from === 'seed'
+                            : v.created_from === 'import'
                               ? 'bg-success/15 text-success'
                               : 'bg-muted/30 text-muted-foreground'
                       }`}
@@ -673,7 +673,7 @@ export default function SkillPanel({
                           ? 'Created by restoring an earlier version'
                           : v.created_from === 'suggestion'
                             ? 'Created by accepting an improvement suggestion'
-                            : v.created_from === 'seed'
+                            : v.created_from === 'import'
                               ? 'The original SKILL.md the project started from'
                               : 'Manually edited'
                       }

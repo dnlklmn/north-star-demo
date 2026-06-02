@@ -1,21 +1,21 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { ChevronDown, Check, X, RefreshCw, Pencil, Trash2, Loader2, MoreHorizontal } from 'lucide-react'
-import type { Example, Charter, GapAnalysis, JudgeAgreement } from '../types'
+import type { Example, Seed, GapAnalysis, JudgeAgreement } from '../types'
 import DeleteModal from './examples/DeleteModal'
 import GenerateModal from './examples/GenerateModal'
-import CharterSidebar from './CharterSidebar'
+import SeedSidebar from './SeedSidebar'
 
 type CellId = 'input' | 'output' | 'labels' | 'status'
 const CELL_ORDER: CellId[] = ['input', 'output', 'labels', 'status']
 
 interface ExampleReviewProps {
   examples: Example[]
-  charter: Charter
-  /** Charter at the time the dataset was created. The sidebar uses this for
+  seed: Seed
+  /** Seed at the time the dataset was created. The sidebar uses this for
    *  the alignment lookup because rows' feature_area strings are normalized
-   *  against the snapshot at synth time — checking the live charter would
-   *  miss matches whenever the user edited the charter post-synth. */
-  charterSnapshot?: Charter | null
+   *  against the snapshot at synth time — checking the live seed would
+   *  miss matches whenever the user edited the seed post-synth. */
+  seedSnapshot?: Seed | null
   loading: boolean
   /** Distinguishes "generating new examples" (long-running, blocking) from
    *  smaller utility loads like Auto-review or Suggest revisions. When true,
@@ -25,7 +25,7 @@ interface ExampleReviewProps {
   generating?: boolean
   /** Approximate row count we're about to generate, surfaced in the overlay
    *  copy ("Generating ~24 rows…"). Computed at the parent from
-   *  charter dimensions × the count requested. Used as a fallback when
+   *  seed dimensions × the count requested. Used as a fallback when
    *  no live progress event has landed yet. */
   generatingTotal?: number
   /** Live progress driven by the backend's per-cell `synth_progress` SSE
@@ -49,7 +49,7 @@ interface ExampleReviewProps {
   /** Bulk "fix every empty cell" — surfaced from the sidebar's compact
    *  coverage summary. The matrix's per-cell "+" buttons live in the modal. */
   onRequestFillGaps?: () => void
-  /** Navigate to the Charter tab's alignment section. Surfaced by the
+  /** Navigate to the Seed tab's alignment section. Surfaced by the
    *  sidebar's "Add alignment criteria" CTA when the focused row's
    *  feature_area has no matching alignment entry. */
   onAddAlignmentCriteria?: () => void
@@ -68,18 +68,18 @@ interface ExampleReviewProps {
   onDismissRevision?: (exampleId: string) => void
   revisionsLoading?: boolean
   /** Re-tags every example's feature_area + coverage_tags against the current
-   *  charter. Only useful for prompt-eval datasets seeded from sampled turns —
+   *  seed. Only useful for prompt-eval datasets seeded from sampled turns —
    *  the parent passes undefined for skill-eval to hide the button. */
-  onRetagAgainstCharter?: () => void
+  onRetagAgainstSeed?: () => void
   retagLoading?: boolean
   /** Read-only when false: synthesize, auto-review, delete, inline edit, and
    *  revision-acceptance buttons all hide. The list itself remains visible. */
   canEdit?: boolean
   /** When set, applies as the initial value of the feature_area filter on
    *  mount. Used by the Evaluations → "Open in Dataset" deep-link to
-   *  pre-narrow the list to rows the eval flagged as out-of-charter. The
+   *  pre-narrow the list to rows the eval flagged as out-of-seed. The
    *  sentinel value `(unmapped)` filters to rows whose feature_area isn't
-   *  one of the charter's alignment entries. */
+   *  one of the seed's alignment entries. */
   initialFeatureAreaFilter?: string | null
   /** Called once the deep-link initial filter has been applied so the parent
    *  can clear the latched value — without this, navigating away and back
@@ -87,7 +87,7 @@ interface ExampleReviewProps {
   onInitialFilterApplied?: () => void
 }
 
-/** Sentinel filter value for "rows whose feature_area is not in the charter
+/** Sentinel filter value for "rows whose feature_area is not in the seed
  *  alignment list". Picked to match the same string the backend uses when
  *  it snaps an out-of-range synthesis output, so the UI filter and the
  *  data tag match without further mapping. */
@@ -95,8 +95,8 @@ const UNMAPPED_FEATURE_AREA = '(unmapped)'
 
 export default function ExampleReview({
   examples,
-  charter,
-  charterSnapshot,
+  seed,
+  seedSnapshot,
   loading,
   generating = false,
   generatingTotal,
@@ -121,7 +121,7 @@ export default function ExampleReview({
   onAcceptRevision,
   onDismissRevision,
   revisionsLoading,
-  onRetagAgainstCharter,
+  onRetagAgainstSeed,
   retagLoading,
   canEdit = true,
   initialFeatureAreaFilter,
@@ -156,7 +156,7 @@ export default function ExampleReview({
   }
   const [selectedId, setSelectedId] = useState<string | null>(null)
   // Row in view (topmost visible). Updates as the user scrolls so the
-  // sidebar's charter criteria track what the eye is on, without
+  // sidebar's seed criteria track what the eye is on, without
   // hijacking the click-selected row. Falls back to selectedId.
   const [scrollFocusedId, setScrollFocusedId] = useState<string | null>(null)
   // Which input last changed the focused row. Explicit selection (click or
@@ -219,11 +219,11 @@ export default function ExampleReview({
     setEditing({ id: exampleId, cell })
   }, [focusedCell])
 
-  const featureAreas = charter.alignment.map(a => a.feature_area)
+  const featureAreas = seed.alignment.map(a => a.feature_area)
 
   const getSuggestedGeneration = () => {
-    const coverageCriteria = charter.coverage?.criteria?.length || 0
-    const alignmentAreas = charter.alignment?.length || 0
+    const coverageCriteria = seed.coverage?.criteria?.length || 0
+    const alignmentAreas = seed.alignment?.length || 0
     const totalScenarios = Math.max(coverageCriteria * alignmentAreas, 1)
 
     if (coverageGaps && coverageGaps.uncoveredCount > 0) {
@@ -257,12 +257,12 @@ export default function ExampleReview({
 
   const { count: suggestedCount, reason: suggestionReason } = getSuggestedGeneration()
   const totalScenarios = Math.max(
-    (charter.coverage?.criteria?.length || 0) * (charter.alignment?.length || 0),
+    (seed.coverage?.criteria?.length || 0) * (seed.alignment?.length || 0),
     1,
   )
 
   const validAreas = useMemo(() => new Set(featureAreas), [featureAreas])
-  // Are any rows tagged with a feature_area outside the charter alignment
+  // Are any rows tagged with a feature_area outside the seed alignment
   // list? Drives both the conditional `(unmapped)` filter option and any
   // hint text upstream wants to show. (off-target) is a triggered-mode
   // sentinel and isn't considered unmapped.
@@ -282,7 +282,7 @@ export default function ExampleReview({
       examples.filter(ex => {
         if (filterArea === UNMAPPED_FEATURE_AREA) {
           // "Unmapped" is a synthetic filter — match anything outside the
-          // charter alignment list. Excludes the (off-target) sentinel
+          // seed alignment list. Excludes the (off-target) sentinel
           // because that's a deliberate label, not a synthesis miss.
           if (!ex.feature_area) return false
           if (ex.feature_area === '(off-target)') return false
@@ -600,7 +600,7 @@ export default function ExampleReview({
         }`}
       >
         {/* Title row with dataset-level actions inline on the right.
-            Title + subtitle styling mirrors CharterPanel (via PanelLayout)
+            Title + subtitle styling mirrors SeedPanel (via PanelLayout)
             so the page headers feel consistent across tabs. */}
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div>
@@ -625,11 +625,11 @@ export default function ExampleReview({
                       disabled: loading || stats.pending === 0,
                     }]
                   : []),
-                ...(canEdit && onRetagAgainstCharter
+                ...(canEdit && onRetagAgainstSeed
                   ? [{
-                      label: retagLoading ? 'Retagging…' : 'Retag against charter',
-                      hint: "Re-tag every row's feature_area and coverage_tags against the current charter. Useful after generating or editing the charter so the Coverage Map matrix lines up.",
-                      onClick: onRetagAgainstCharter,
+                      label: retagLoading ? 'Retagging…' : 'Retag against seed',
+                      hint: "Re-tag every row's feature_area and coverage_tags against the current seed. Useful after generating or editing the seed so the Coverage Map matrix lines up.",
+                      onClick: onRetagAgainstSeed,
                       disabled: loading || retagLoading || stats.total === 0,
                     }]
                   : []),
@@ -871,9 +871,9 @@ export default function ExampleReview({
           )}
         </div>
       </div>
-      <CharterSidebar
-        charter={charter}
-        charterSnapshot={charterSnapshot}
+      <SeedSidebar
+        seed={seed}
+        seedSnapshot={seedSnapshot}
         focusedFeatureArea={focusedExample?.feature_area}
         focusedCoverageTags={focusedExample?.coverage_tags ?? []}
         gaps={gaps}

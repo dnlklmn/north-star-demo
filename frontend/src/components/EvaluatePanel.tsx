@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronDown, ChevronUp, Eye, ExternalLink, FileText, KeyRound, Loader2, RotateCcw, Settings as SettingsIcon, Sparkles, X } from 'lucide-react'
-import type { Charter, Dataset, EvalRunSummary, ImprovementSuggestion, SkillVersion } from '../types'
+import type { Seed, Dataset, EvalRunSummary, ImprovementSuggestion, SkillVersion } from '../types'
 import { notePolarisActivity } from '../polaris/activity'
-import CharterDocument from './CharterDocument'
+import SeedDocument from './SeedDocument'
 import DiffModal from './DiffModal'
 import PanelLayout from './PanelLayout'
 import {
@@ -50,10 +50,10 @@ interface Props {
   onGoToSkill?: () => void
   onGoToDataset?: () => void
   onGoToScorers?: () => void
-  /** Take the user to the Charter tab — used by the "Open in Charter"
+  /** Take the user to the Seed tab — used by the "Open in Seed"
    *  button on the unmapped-rows banner so they can add the missing
    *  alignment dimension or rename one to fit the synthesized rows. */
-  onGoToCharter?: () => void
+  onGoToSeed?: () => void
   /** Take the user to the Dataset tab with the feature_area filter
    *  pre-set to the synthetic "(unmapped)" value, so they land directly
    *  on the rows that need re-tagging. */
@@ -253,7 +253,7 @@ export default function EvaluatePanel({
   onGoToSkill,
   onGoToDataset,
   onGoToScorers,
-  onGoToCharter,
+  onGoToSeed,
   onGoToUnmappedRows,
   onGenerateScorersInline,
   onOpenSettings,
@@ -319,6 +319,10 @@ export default function EvaluatePanel({
   const [startError, setStartError] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
   const pollTimerRef = useRef<number | null>(null)
+  // Run ids we've already auto-analyzed. The poll tick that detects a
+  // terminal transition uses this to fire the analysis exactly once per
+  // run, even if an extra tick slips through before the effect tears down.
+  const autoAnalyzedRunsRef = useRef<Set<string>>(new Set())
 
   const [runsError, setRunsError] = useState<string | null>(null)
   // Tracks an in-flight promote/discard so the buttons disable during the
@@ -337,10 +341,10 @@ export default function EvaluatePanel({
   const [selectedSkillVersionId, setSelectedSkillVersionId] = useState<
     string | null
   >(null)
-  // When set, opens the CharterDocument modal showing exactly what the
-  // user clicked "View charter" for — either a run's snapshot or the live one.
-  const [viewingCharter, setViewingCharter] = useState<{
-    charter: Charter
+  // When set, opens the SeedDocument modal showing exactly what the
+  // user clicked "View seed" for — either a run's snapshot or the live one.
+  const [viewingSeed, setViewingSeed] = useState<{
+    seed: Seed
     title: string
     subtitle?: string
   } | null>(null)
@@ -501,11 +505,11 @@ export default function EvaluatePanel({
   // selectedSkillVersionId becomes null — including the user clicking
   // "Show all versions" — and instantly snaps the filter back. With the
   // ref, a user-initiated null is sticky.
-  const versionSeededRef = useRef(false)
+  const versionImportedRef = useRef(false)
   useEffect(() => {
-    if (versionSeededRef.current) return
+    if (versionImportedRef.current) return
     if (skillVersions.length === 0) return
-    versionSeededRef.current = true
+    versionImportedRef.current = true
     setSelectedSkillVersionId(candidateVersionId || activeVersionId || null)
   }, [skillVersions, candidateVersionId, activeVersionId])
 
@@ -540,6 +544,17 @@ export default function EvaluatePanel({
           // "new" tags from rows that participated in the run, and we want
           // the "X new rows" banner to drop without a manual reload.
           onRunTerminal?.()
+          // Auto-analyze the moment a run finishes so the Evaluation
+          // analysis sidebar populates without the user clicking "Analyze
+          // this run". Only done/failed runs carry results worth analyzing;
+          // the per-run guard keeps a stray extra tick from double-firing.
+          if (
+            (fresh.status === 'done' || fresh.status === 'failed') &&
+            !autoAnalyzedRunsRef.current.has(fresh.run_id)
+          ) {
+            autoAnalyzedRunsRef.current.add(fresh.run_id)
+            void handleSuggestRef.current(fresh.run_id)
+          }
         }
       } catch {
         // transient — try again next tick
@@ -817,6 +832,10 @@ export default function EvaluatePanel({
       })
       onSkillBodyChange(body)
       setSkillVersions((prev) => [newVersion, ...prev])
+      // Select the freshly-saved version so the version stack + run
+      // history snap to it — the user can fire a new eval straight away
+      // without first hunting for the new version (candidate or not).
+      setSelectedSkillVersionId(newVersion.id)
       setSuggestions([])
       setAccepted(new Set())
       setDismissed(new Set())
@@ -874,9 +893,8 @@ export default function EvaluatePanel({
     action?: { label: string; onClick: () => void; loading?: boolean }
   }
   const blockers: Blocker[] = []
-  if (!keySaved) {
-    blockers.push({ id: 'key', label: 'Braintrust API key required (enter below)' })
-  }
+  // The missing-key case is surfaced by the dedicated full-width banner below
+  // (with an "Add in Settings" button), so it intentionally isn't repeated here.
   if (!isPromptEval && !hasSkillBody) {
     blockers.push({
       id: 'skill',
@@ -914,7 +932,7 @@ export default function EvaluatePanel({
   }
 
   // Improve sidebar — sits in the right rail, mirrors the SuggestionBox
-  // pattern used by Goals/Users/Charter (sparkle header + refresh + body).
+  // pattern used by Goals/Users/Seed (sparkle header + refresh + body).
   // Visible whenever there's a completed run to analyze or any in-flight
   // suggestion state. The previous Improve content lived inline in the
   // main column; the new Figma design moves it to a persistent right
@@ -923,12 +941,15 @@ export default function EvaluatePanel({
   const doneRunForImprove = runs.find((r) => r.status === 'done' || r.status === 'failed')
   const newSkillVersionNumber = (skillVersions[0]?.version ?? 0) + 1
   const couldNotApplyCount = preview.filter((p) => p.mode === 'appended').length
+  // Dismissed suggestions disappear from the list entirely; accepted ones
+  // stay but render collapsed. Pending + accepted = visible.
+  const visibleSuggestions = suggestions.filter((s) => !dismissed.has(s.id))
   const improveRight = (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Sparkles className="w-4 h-4 text-fg-primary" />
-          <span className="text-base font-semibold text-fg-contrast">Improve skill</span>
+          <span className="text-base font-semibold text-fg-contrast">Evaluation analysis</span>
         </div>
         {doneRunForImprove && (
           <button
@@ -948,14 +969,15 @@ export default function EvaluatePanel({
 
       {!doneRunForImprove && (
         <p className="text-xs text-fg-dim">
-          Run an evaluation first. The "Analyze this run" button below the
-          run details proposes targeted SKILL.md edits from the run's failures.
+          Run an evaluation — the analysis runs automatically once it
+          finishes and proposes targeted SKILL.md edits from the failures.
         </p>
       )}
 
       {doneRunForImprove && !suggestions.length && !suggesting && !suggestError && !summary && (
         <p className="text-xs text-fg-dim">
-          Use "Analyze this run" at the bottom of the run details to propose targeted SKILL.md edits.
+          Analysis runs automatically when an evaluation finishes. Use the
+          refresh button above to re-analyze the latest run.
         </p>
       )}
 
@@ -972,10 +994,10 @@ export default function EvaluatePanel({
         <p className="text-sm text-fg-contrast leading-relaxed">{summary}</p>
       )}
 
-      {suggestions.length > 0 && (
+      {visibleSuggestions.length > 0 && (
         <>
           <p className="text-[10px] font-semibold uppercase tracking-wide text-fg-dim">
-            Proposed edits ({suggestions.length})
+            Proposed edits ({visibleSuggestions.length})
           </p>
 
           {(() => {
@@ -988,7 +1010,7 @@ export default function EvaluatePanel({
             // pre-cluster behavior.
             const groups: { label: string | null; items: ImprovementSuggestion[] }[] = []
             const indexByLabel = new Map<string, number>()
-            for (const s of suggestions) {
+            for (const s of visibleSuggestions) {
               const raw = (s.target_label ?? '').trim()
               const label = raw || null
               const key = label ?? ''
@@ -1012,22 +1034,40 @@ export default function EvaluatePanel({
 
             const renderItem = (s: ImprovementSuggestion) => {
               const isAccepted = accepted.has(s.id)
-              const isDismissed = dismissed.has(s.id)
               const { body: applied } = applySuggestion(skillBody, s)
               const matchKind = getMatchKind(skillBody, s)
               const willAppend = matchKind === 'appended' && !!s.find
 
+              // Accepted → collapse to a one-line row. The user has already
+              // decided, so the rationale, citations and diff just take up
+              // space. Dismissed suggestions never reach here — they're
+              // filtered out of visibleSuggestions and vanish from the list.
+              if (isAccepted) {
+                return (
+                  <li
+                    key={s.id}
+                    className="px-3 py-2 text-sm flex items-center gap-2 bg-fill-primary/5 border border-fill-primary/40"
+                  >
+                    <Check className="w-3.5 h-3.5 text-fg-primary flex-shrink-0" />
+                    <p
+                      className="flex-1 text-sm text-fg-contrast leading-snug truncate"
+                      title={s.summary}
+                    >
+                      {s.summary}
+                    </p>
+                    <button
+                      onClick={() => toggleAccept(s.id)}
+                      className="p-1 text-fg-dim hover:text-fg-contrast flex-shrink-0"
+                      title="Undo — remove this edit"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                    </button>
+                  </li>
+                )
+              }
+
               return (
-                <li
-                  key={s.id}
-                  className={`p-3 text-sm space-y-2 ${
-                    isAccepted
-                      ? 'bg-fill-primary/5 border border-fill-primary/40'
-                      : isDismissed
-                        ? 'bg-fill-neutral/30 opacity-60'
-                        : 'bg-fill-neutral/40'
-                  }`}
-                >
+                <li key={s.id} className="p-3 text-sm space-y-2 bg-fill-neutral/40">
                   <div className="flex items-start gap-2">
                     <p className="flex-1 text-sm text-fg-contrast leading-snug">
                       {s.summary}
@@ -1049,39 +1089,24 @@ export default function EvaluatePanel({
                       >
                         <Eye className="w-3.5 h-3.5" />
                       </button>
-                      {!isAccepted && !isDismissed && (
-                        <>
-                          <button
-                            onClick={() => toggleAccept(s.id)}
-                            className="p-1 text-fg-dim hover:text-success"
-                            title={
-                              willAppend
-                                ? "Accept (couldn't locate snippet — will append)"
-                                : 'Accept'
-                            }
-                          >
-                            <Check className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            onClick={() => toggleDismiss(s.id)}
-                            className="p-1 text-fg-dim hover:text-danger"
-                            title="Dismiss"
-                          >
-                            <X className="w-3.5 h-3.5" />
-                          </button>
-                        </>
-                      )}
-                      {(isAccepted || isDismissed) && (
-                        <button
-                          onClick={() =>
-                            isAccepted ? toggleAccept(s.id) : toggleDismiss(s.id)
-                          }
-                          className="p-1 text-fg-dim hover:text-fg-contrast"
-                          title="Undo"
-                        >
-                          <RotateCcw className="w-3.5 h-3.5" />
-                        </button>
-                      )}
+                      <button
+                        onClick={() => toggleAccept(s.id)}
+                        className="p-1 text-fg-dim hover:text-success"
+                        title={
+                          willAppend
+                            ? "Accept (couldn't locate snippet — will append)"
+                            : 'Accept'
+                        }
+                      >
+                        <Check className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={() => toggleDismiss(s.id)}
+                        className="p-1 text-fg-dim hover:text-danger"
+                        title="Dismiss"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
                     </div>
                   </div>
 
@@ -1201,85 +1226,89 @@ export default function EvaluatePanel({
               </div>
             )
           })()}
-
-          {acceptedSuggestions.length > 0 && (
-            <div className="border border-fill-primary/40 bg-fill-primary/5 p-3 space-y-2">
-              <p className="text-sm font-semibold text-fg-contrast">
-                Ready to save v{newSkillVersionNumber}
-              </p>
-              <p className="text-xs text-fg-dim">
-                {acceptedSuggestions.length} accepted
-                {couldNotApplyCount > 0 && (
-                  <> · {couldNotApplyCount} appended due to drift</>
-                )}
-              </p>
-              <input
-                type="text"
-                value={savingNotes}
-                onChange={(e) => setSavingNotes(e.target.value)}
-                placeholder="Optional note about this version…"
-                className="w-full text-xs bg-fill-dip border border-border-hint px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-fill-primary"
-              />
-              <div className="flex gap-2">
-                <button
-                  onClick={() =>
-                    setDiffVs({
-                      title: `Preview v${newSkillVersionNumber}`,
-                      oldLabel: `v${skillVersions[0]?.version ?? 0}`,
-                      newLabel: `v${newSkillVersionNumber} (preview)`,
-                      oldText: skillBody,
-                      newText: finalBody,
-                    })
-                  }
-                  className="px-2.5 py-1 text-xs font-medium border border-border-hint text-fg-contrast hover:bg-fill-neutral/30"
-                >
-                  <Eye className="w-3.5 h-3.5 inline mr-1" />
-                  Preview
-                </button>
-                <button
-                  onClick={async () => {
-                    const ok = await handleSaveVersion()
-                    if (ok) setJustSaved(null)
-                  }}
-                  disabled={saving || !finalChanged}
-                  className={`flex-1 px-3 py-1 text-xs font-medium ${
-                    finalChanged && !saving
-                      ? 'bg-fill-primary text-bg-default hover:opacity-90'
-                      : 'bg-fill-neutral text-fg-dim cursor-not-allowed'
-                  }`}
-                >
-                  {saving && <Loader2 className="w-3.5 h-3.5 animate-spin inline mr-1" />}
-                  Save as v{newSkillVersionNumber}
-                </button>
-              </div>
-              {saveError && <p className="text-xs text-danger">{saveError}</p>}
-            </div>
-          )}
         </>
-      )}
-
-      {justSaved && (
-        <div className="border border-warning/40 bg-warning/5 p-3 space-y-2">
-          <p className="text-sm font-semibold text-fg-contrast">
-            v{justSaved.version} ready as a candidate.
-          </p>
-          <p className="text-xs text-fg-dim">
-            Evaluate the new version to see if it actually improves things.
-          </p>
-          <button
-            onClick={async () => {
-              setJustSaved(null)
-              const run = await onRunEval({})
-              if (run) setActiveRun(run as EvalRunSummary)
-            }}
-            className="w-full px-3 py-1.5 text-xs font-medium bg-fill-primary text-bg-default hover:opacity-90"
-          >
-            Evaluate new version
-          </button>
-        </div>
       )}
     </div>
   )
+
+  // Sticky bottom of the sidebar — pinned below the scrollable analysis
+  // list so the save action never scrolls out of reach. After a save it
+  // flips to the "evaluate the candidate" card, so the user can re-run
+  // straight away on the version they just created.
+  const improveBottom = justSaved ? (
+    <div className="p-4 space-y-2 bg-warning/5">
+      <p className="text-sm font-semibold text-fg-contrast">
+        v{justSaved.version} ready as a candidate.
+      </p>
+      <p className="text-xs text-fg-dim">
+        Evaluate the new version to see if it actually improves things.
+      </p>
+      <button
+        onClick={async () => {
+          setJustSaved(null)
+          const run = await onRunEval({})
+          if (run) setActiveRun(run as EvalRunSummary)
+        }}
+        className="w-full px-3 py-1.5 text-xs font-medium bg-fill-primary text-bg-default hover:opacity-90"
+      >
+        Evaluate new version
+      </button>
+    </div>
+  ) : visibleSuggestions.length > 0 ? (
+    <div className="p-4 space-y-2 bg-fill-primary/5">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-sm font-semibold text-fg-contrast">
+          Save as new skill
+        </p>
+        <p className="text-xs text-fg-dim">
+          {acceptedSuggestions.length > 0
+            ? `${acceptedSuggestions.length} accepted`
+            : 'No edits added yet'}
+          {couldNotApplyCount > 0 && <> · {couldNotApplyCount} appended</>}
+        </p>
+      </div>
+      <input
+        type="text"
+        value={savingNotes}
+        onChange={(e) => setSavingNotes(e.target.value)}
+        placeholder="Optional note about this version…"
+        className="w-full text-xs bg-fill-dip border border-border-hint px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-fill-primary"
+      />
+      <div className="flex gap-2">
+        <button
+          onClick={() =>
+            setDiffVs({
+              title: `Preview v${newSkillVersionNumber}`,
+              oldLabel: `v${skillVersions[0]?.version ?? 0}`,
+              newLabel: `v${newSkillVersionNumber} (preview)`,
+              oldText: skillBody,
+              newText: finalBody,
+            })
+          }
+          disabled={acceptedSuggestions.length === 0}
+          className="px-2.5 py-1 text-xs font-medium border border-border-hint text-fg-contrast hover:bg-fill-neutral/30 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <Eye className="w-3.5 h-3.5 inline mr-1" />
+          Preview
+        </button>
+        <button
+          onClick={() => {
+            void handleSaveVersion()
+          }}
+          disabled={saving || !finalChanged}
+          className={`flex-1 px-3 py-1 text-xs font-medium ${
+            finalChanged && !saving
+              ? 'bg-fill-primary text-bg-default hover:opacity-90'
+              : 'bg-fill-neutral text-fg-dim cursor-not-allowed'
+          }`}
+        >
+          {saving && <Loader2 className="w-3.5 h-3.5 animate-spin inline mr-1" />}
+          Save as v{newSkillVersionNumber}
+        </button>
+      </div>
+      {saveError && <p className="text-xs text-danger">{saveError}</p>}
+    </div>
+  ) : undefined
 
   return (
     <PanelLayout
@@ -1290,6 +1319,7 @@ export default function EvaluatePanel({
           : "Runs each approved dataset row through Claude with your SKILL.md as system prompt, scores with the project's scorers, streams results into Braintrust."
       }
       right={improveRight}
+      rightBottom={improveBottom}
     >
         <div className="space-y-8">
           {isPromptEval && newSinceRefresh > 0 && (
@@ -2023,19 +2053,19 @@ export default function EvaluatePanel({
                         View in Braintrust <ExternalLink className="w-3 h-3" />
                       </a>
                     )}
-                    {activeRun.charter_snapshot && (
+                    {activeRun.seed_snapshot && (
                       <button
                         onClick={() =>
-                          setViewingCharter({
-                            charter: activeRun.charter_snapshot as Charter,
-                            title: `Charter used for this run`,
+                          setViewingSeed({
+                            seed: activeRun.seed_snapshot as Seed,
+                            title: `Seed used for this run`,
                             subtitle: `${activeRun.project}${activeRun.experiment_name ? ' · ' + activeRun.experiment_name : ''}${activeRun.skill_version_number != null ? ' · SKILL v' + activeRun.skill_version_number : ''}`,
                           })
                         }
                         className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
                       >
                         <FileText className="w-3.5 h-3.5" />
-                        View charter
+                        View seed
                       </button>
                     )}
                   </div>
@@ -2312,7 +2342,7 @@ export default function EvaluatePanel({
                   })()}
 
                   {/* Unmapped-feature_area banner. Surfaces rows whose
-                      `feature_area` isn't an entry in the charter's
+                      `feature_area` isn't an entry in the seed's
                       alignment list — those rows score only on coverage +
                       safety, with every alignment scorer silently gating
                       out. Common cause: synthesis put a coverage criterion
@@ -2320,10 +2350,10 @@ export default function EvaluatePanel({
                       sets these to "(unmapped)" so they're easy to count
                       and grep for. */}
                   {activeRun.per_row.length > 0 && (() => {
-                    const charterForRun =
-                      (activeRun.charter_snapshot as Charter | null | undefined) ?? null
+                    const seedForRun =
+                      (activeRun.seed_snapshot as Seed | null | undefined) ?? null
                     const validAreas = new Set(
-                      (charterForRun?.alignment ?? []).map((a) => a.feature_area),
+                      (seedForRun?.alignment ?? []).map((a) => a.feature_area),
                     )
                     if (validAreas.size === 0) return null
                     const unmapped = activeRun.per_row.filter((r) => {
@@ -2351,7 +2381,7 @@ export default function EvaluatePanel({
                         </p>
                         <p className="text-muted-foreground mt-0.5">
                           Their <span className="font-mono">feature_area</span> isn't in this
-                          run's charter alignment list — alignment scorers silently gate them
+                          run's seed alignment list — alignment scorers silently gate them
                           out, so they score only on coverage + safety. Unmapped values:{' '}
                           {sample.map((s, i) => (
                             <span key={s}>
@@ -2372,14 +2402,14 @@ export default function EvaluatePanel({
                               Fix in Dataset
                             </button>
                           )}
-                          {onGoToCharter && (
+                          {onGoToSeed && (
                             <button
                               type="button"
-                              onClick={onGoToCharter}
+                              onClick={onGoToSeed}
                               className="px-2 py-1 text-[11px] font-medium border border-border-hint bg-surface hover:bg-fill-neutral/30 text-foreground"
-                              title="Open the Charter so you can add these as alignment dimensions"
+                              title="Open the Seed so you can add these as alignment dimensions"
                             >
-                              Edit charter
+                              Edit seed
                             </button>
                           )}
                         </div>
@@ -2803,7 +2833,7 @@ export default function EvaluatePanel({
                       )}
                     </h3>
                     <div className="flex items-center gap-3">
-                      {selectedSkillVersionId && (
+                      {selectedSkillVersionId && runs.length > 0 && (
                         <button
                           onClick={() => setSelectedSkillVersionId(null)}
                           className="text-[10px] uppercase tracking-wide text-fg-dim hover:text-fg-contrast"
@@ -2814,10 +2844,10 @@ export default function EvaluatePanel({
                       )}
                       <button
                         onClick={() => refreshRuns()}
-                        className="text-[10px] uppercase tracking-wide text-fg-dim hover:text-fg-contrast"
+                        className="p-1.5 text-fg-dim hover:text-fg-contrast"
                         title="Refresh history from the server"
                       >
-                        Refresh
+                        <RotateCcw className="w-4 h-4" />
                       </button>
                     </div>
                   </div>
@@ -2924,21 +2954,21 @@ export default function EvaluatePanel({
                             </span>
                           </span>
                         )}
-                        {r.charter_snapshot && (
+                        {r.seed_snapshot && (
                           <button
                             onClick={(e) => {
                               e.stopPropagation()
-                              setViewingCharter({
-                                charter: r.charter_snapshot as Charter,
-                                title: `Charter used for this run`,
+                              setViewingSeed({
+                                seed: r.seed_snapshot as Seed,
+                                title: `Seed used for this run`,
                                 subtitle: `${r.project}${r.experiment_name ? ' · ' + r.experiment_name : ''}${r.skill_version_number != null ? ' · SKILL v' + r.skill_version_number : ''}`,
                               })
                             }}
                             className="inline-flex items-center gap-1 font-mono text-fg-dim hover:text-fg-contrast"
-                            title="View the charter this run evaluated"
+                            title="View the seed this run evaluated"
                           >
                             <FileText className="w-3.5 h-3.5" />
-                            View charter
+                            View seed
                           </button>
                         )}
                         {r.experiment_url && (
@@ -2967,12 +2997,12 @@ export default function EvaluatePanel({
           {/* Download moved to the Dataset page — that's where the user
               builds the dataset, so they can download from there. */}
 
-          {viewingCharter && (
-            <CharterDocument
-              charter={viewingCharter.charter}
-              title={viewingCharter.title}
-              subtitle={viewingCharter.subtitle}
-              onClose={() => setViewingCharter(null)}
+          {viewingSeed && (
+            <SeedDocument
+              seed={viewingSeed.seed}
+              title={viewingSeed.title}
+              subtitle={viewingSeed.subtitle}
+              onClose={() => setViewingSeed(null)}
             />
           )}
 
