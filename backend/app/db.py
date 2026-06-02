@@ -59,20 +59,50 @@ async def _create_tables() -> None:
         # table is renamed in place rather than stranded next to a fresh empty
         # `seeds`. Guards via information_schema make every branch a no-op once
         # already applied (and on a brand-new database).
+        #
+        # Each rename is self-healing for the "both source and target already
+        # exist" state — which arises if pre-rename code ran against an
+        # already-migrated DB and re-created the old name (e.g. a stray
+        # `ALTER TABLE ... ADD COLUMN IF NOT EXISTS charter_snapshot`). In that
+        # case the target holds the real data and the source is an empty
+        # re-add, so we backfill anything missing and drop the redundant source
+        # instead of failing on a duplicate.
         await conn.execute("""
             DO $$ BEGIN
-                IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'charters')
-                   AND NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'seeds') THEN
-                    ALTER TABLE charters RENAME TO seeds;
+                -- Table: charters -> seeds
+                IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'charters') THEN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'seeds') THEN
+                        ALTER TABLE charters RENAME TO seeds;
+                    ELSIF (SELECT count(*) FROM charters) = 0 THEN
+                        DROP TABLE charters;  -- stale empty re-create; `seeds` has the data
+                    END IF;
                 END IF;
+                -- Column: seeds.charter -> seeds.seed
                 IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'seeds' AND column_name = 'charter') THEN
-                    ALTER TABLE seeds RENAME COLUMN charter TO seed;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'seeds' AND column_name = 'seed') THEN
+                        ALTER TABLE seeds RENAME COLUMN charter TO seed;
+                    ELSE
+                        UPDATE seeds SET seed = charter WHERE seed = '{}'::jsonb AND charter <> '{}'::jsonb;
+                        ALTER TABLE seeds DROP COLUMN charter;
+                    END IF;
                 END IF;
+                -- Column: datasets.charter_snapshot -> datasets.seed_snapshot
                 IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'datasets' AND column_name = 'charter_snapshot') THEN
-                    ALTER TABLE datasets RENAME COLUMN charter_snapshot TO seed_snapshot;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'datasets' AND column_name = 'seed_snapshot') THEN
+                        ALTER TABLE datasets RENAME COLUMN charter_snapshot TO seed_snapshot;
+                    ELSE
+                        UPDATE datasets SET seed_snapshot = charter_snapshot WHERE seed_snapshot IS NULL AND charter_snapshot IS NOT NULL;
+                        ALTER TABLE datasets DROP COLUMN charter_snapshot;
+                    END IF;
                 END IF;
+                -- Column: eval_runs.charter_snapshot -> eval_runs.seed_snapshot
                 IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'eval_runs' AND column_name = 'charter_snapshot') THEN
-                    ALTER TABLE eval_runs RENAME COLUMN charter_snapshot TO seed_snapshot;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'eval_runs' AND column_name = 'seed_snapshot') THEN
+                        ALTER TABLE eval_runs RENAME COLUMN charter_snapshot TO seed_snapshot;
+                    ELSE
+                        UPDATE eval_runs SET seed_snapshot = charter_snapshot WHERE seed_snapshot IS NULL AND charter_snapshot IS NOT NULL;
+                        ALTER TABLE eval_runs DROP COLUMN charter_snapshot;
+                    END IF;
                 END IF;
             END $$;
         """)
