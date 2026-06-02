@@ -256,7 +256,7 @@ def compile_scorers(
             row_metadata = metadata if isinstance(metadata, dict) else {}
 
             # Runner-level gate. Coverage and alignment scorers each map
-            # 1:1 to a charter entry; the row's metadata says which entry
+            # 1:1 to a seed entry; the row's metadata says which entry
             # it exercises. We just compare strings — no LLM judgment at
             # eval time. Coverage uses tag membership (a row can exercise
             # multiple criteria); alignment uses feature_area equality

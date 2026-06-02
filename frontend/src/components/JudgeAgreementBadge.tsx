@@ -40,7 +40,7 @@ export default function JudgeAgreementBadge({ agreement }: JudgeAgreementBadgePr
   const warning = lowAgreement || lowKappa
 
   const tooltip = warning
-    ? 'The judge disagrees with your labels too often. Tighten the charter alignment definitions or stop auto-trusting suggestions.'
+    ? 'The judge disagrees with your labels too often. Tighten the seed alignment definitions or stop auto-trusting suggestions.'
     : 'How often the judge\'s suggested label matches the reviewer\'s final label.'
 
   const colorCls = warning ? 'text-warning' : 'text-fg-dim'

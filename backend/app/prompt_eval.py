@@ -6,8 +6,8 @@ prompt under test against each, and scores the new output.
 The "Prompt" panel of a prompt-eval workspace shows the *actual prompt* being
 evaluated — rendered once at module load with placeholder text marking the
 variable parts — so the user starts from the real thing, not a paraphrase.
-That same rendered text is what we feed into call_skill_seed to derive
-goals/users/stories/charter, exactly the way a SKILL.md body would be used in
+That same rendered text is what we feed into call_skill_import to derive
+goals/users/stories/seed, exactly the way a SKILL.md body would be used in
 a regular skill eval. Editing it tunes the seed pass; the prompt that runs
 at eval time still lives in prompt.py and is invoked by prompt_target.
 """
@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable
 
 from .models import (
-    Charter,
+    Seed,
     DimensionCriteria,
     DimensionStatus,
     SessionInput,
@@ -31,7 +31,7 @@ from .models import (
 from .prompt import (
     build_evaluate_goals_prompt,
     build_generate_draft_prompt,
-    build_skill_seed_prompt,
+    build_skill_import_prompt,
     build_suggest_goals_prompt,
     build_suggest_stories_prompt,
 )
@@ -87,7 +87,7 @@ class PromptTarget:
 def _state_for_generate(snapshot: dict) -> SessionState:
     """Reconstruct the minimal SessionState that _generate_and_validate held
     when call_generate_draft was called. The snapshot is just goals/stories
-    text — no charter (the charter is the *output*)."""
+    text — no seed (the seed is the *output*)."""
     return SessionState(
         input=SessionInput(
             business_goals=snapshot.get("business_goals"),
@@ -124,14 +124,14 @@ def _substitute_for_generate(body: str, snapshot: dict) -> str:
     )
 
 
-# --- skill_seed (turn_type = "skill_seed") ---
+# --- skill_import (turn_type = "skill_import") ---
 #
 # Seeds a fresh project from a pasted SKILL.md: the prompt extracts goals,
 # users, positive_stories, off_target_stories, and a task description in one
 # pass. The snapshot stores the raw skill body + name + description; we stash
 # them into the SessionState's task fields so the registry's build_prompt
 # shim can pluck them back out (prompt builders don't take SessionState
-# directly — see _build_prompt_skill_seed below).
+# directly — see _build_prompt_skill_import below).
 
 _SKILL_SEED_PLACEHOLDER_BODY = "<paste the SKILL.md body — markdown content the agent reads>"
 _SKILL_SEED_PLACEHOLDER_NAME = "<skill name (optional)>"
@@ -139,14 +139,14 @@ _SKILL_SEED_PLACEHOLDER_DESC = "<one-line skill description (optional)>"
 
 
 def _state_with_skill(body: str, name: str | None, desc: str | None) -> SessionState:
-    """Stash skill_seed inputs in a SessionState by populating the task fields.
+    """Stash skill_import inputs in a SessionState by populating the task fields.
 
-    These mirror where call_skill_seed reads from in production (via the
-    SkillSeedRequest model), so the round-trip (snapshot → state → prompt)
+    These mirror where call_skill_import reads from in production (via the
+    SkillImportRequest model), so the round-trip (snapshot → state → prompt)
     matches what the live agent does."""
     return SessionState(
         input=SessionInput(),
-        charter=Charter(
+        seed=Seed(
             task=TaskDefinition(
                 input_description="",
                 output_description="",
@@ -163,7 +163,7 @@ def _state_with_skill(body: str, name: str | None, desc: str | None) -> SessionS
     )
 
 
-def _state_for_skill_seed(snapshot: dict) -> SessionState:
+def _state_for_skill_import(snapshot: dict) -> SessionState:
     return _state_with_skill(
         snapshot.get("skill_body", "") or "",
         snapshot.get("skill_name"),
@@ -171,23 +171,23 @@ def _state_for_skill_seed(snapshot: dict) -> SessionState:
     )
 
 
-def _build_prompt_skill_seed(state: SessionState) -> str:
-    return build_skill_seed_prompt(
-        state.charter.task.skill_body or "",
-        state.charter.task.skill_name,
-        state.charter.task.skill_description,
+def _build_prompt_skill_import(state: SessionState) -> str:
+    return build_skill_import_prompt(
+        state.seed.task.skill_body or "",
+        state.seed.task.skill_name,
+        state.seed.task.skill_description,
     )
 
 
-_SKILL_SEED_PROMPT_TEXT = build_skill_seed_prompt(
+_SKILL_SEED_PROMPT_TEXT = build_skill_import_prompt(
     _SKILL_SEED_PLACEHOLDER_BODY,
     _SKILL_SEED_PLACEHOLDER_NAME,
     _SKILL_SEED_PLACEHOLDER_DESC,
 )
 
 
-def _substitute_for_skill_seed(body: str, snapshot: dict) -> str:
-    """Replace skill_seed placeholders in `body` with the row's actual fields.
+def _substitute_for_skill_import(body: str, snapshot: dict) -> str:
+    """Replace skill_import placeholders in `body` with the row's actual fields.
     Empty/None values render as ``(none provided)`` so the prompt stays valid
     even when the seed only had a body and no name/description."""
     skill_body = (snapshot.get("skill_body") or "").strip() or "(none provided)"
@@ -340,10 +340,10 @@ def _substitute_for_suggest_stories(body: str, snapshot: dict) -> str:
 PROMPT_TARGETS: dict[str, PromptTarget] = {
     "generate": PromptTarget(
         target="generate",
-        label="Generate charter draft",
+        label="Generate seed draft",
         builder_name="build_generate_draft_prompt",
         description=(
-            "Generates a structured charter (Coverage / Balance / Alignment / Rot / "
+            "Generates a structured seed (Coverage / Balance / Alignment / Rot / "
             "Safety) from the user's business goals and user stories."
         ),
         prompt_text=_GENERATE_PROMPT_TEXT,
@@ -352,19 +352,19 @@ PROMPT_TARGETS: dict[str, PromptTarget] = {
         substitute_placeholders=_substitute_for_generate,
         source_path=_source_location(build_generate_draft_prompt),
     ),
-    "skill_seed": PromptTarget(
-        target="skill_seed",
+    "skill_import": PromptTarget(
+        target="skill_import",
         label="Seed from SKILL.md",
-        builder_name="build_skill_seed_prompt",
+        builder_name="build_skill_import_prompt",
         description=(
             "Bootstraps a fresh project from a pasted SKILL.md — extracts goals, "
             "users, positive stories, off-target stories, and a task definition."
         ),
         prompt_text=_SKILL_SEED_PROMPT_TEXT,
-        build_state_from_snapshot=_state_for_skill_seed,
-        build_prompt=_build_prompt_skill_seed,
-        substitute_placeholders=_substitute_for_skill_seed,
-        source_path=_source_location(build_skill_seed_prompt),
+        build_state_from_snapshot=_state_for_skill_import,
+        build_prompt=_build_prompt_skill_import,
+        substitute_placeholders=_substitute_for_skill_import,
+        source_path=_source_location(build_skill_import_prompt),
     ),
     "suggest_goals": PromptTarget(
         target="suggest_goals",

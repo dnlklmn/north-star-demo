@@ -1,13 +1,13 @@
 ---
-name: skill_seed_quality
-turn_type: skill_seed
+name: skill_import_quality
+turn_type: skill_import
 description: Evaluates the goals/users/stories/task bundle the agent seeds from a pasted SKILL.md.
 returns: per-dimension score (faithfulness, completeness, specificity) + overall verdict
 ---
 
 # Skill Seed Quality
 
-You are evaluating how well the agent bootstrapped a North Star session from a pasted SKILL.md. The agent's job is to read the skill body and emit a structured bundle (goals, users, positive_stories, off_target_stories, task) that downstream charter generation will consume.
+You are evaluating how well the agent bootstrapped a North Star session from a pasted SKILL.md. The agent's job is to read the skill body and emit a structured bundle (goals, users, positive_stories, off_target_stories, task) that downstream seed generation will consume.
 
 You are not evaluating the SKILL.md itself or whether the underlying skill is good. You are evaluating whether this bundle accurately and usefully reflects what the SKILL.md actually says.
 
@@ -32,7 +32,7 @@ If either block above is empty, blank, or contains only schema/instruction text 
 ### Faithfulness
 **PASS if:** every goal, user, story, and task field corresponds to something stated or clearly implied by the SKILL.md. Paraphrase is fine; invention is not.
 
-**FAIL if:** the bundle includes goals or off-target scenarios that are not derivable from the skill body — "reasonable defaults" the agent assumed, generic items it pasted from training data, or features the skill explicitly does not have. Hallucinated items silently corrupt the charter.
+**FAIL if:** the bundle includes goals or off-target scenarios that are not derivable from the skill body — "reasonable defaults" the agent assumed, generic items it pasted from training data, or features the skill explicitly does not have. Hallucinated items silently corrupt the seed.
 
 ### Completeness
 **PASS if:** the bundle covers the skill's main responsibilities. If the SKILL.md describes three distinct things the skill does, the goals or stories should reflect all three. The off_target_stories should at least gesture at the kinds of requests this skill should NOT handle (the routing question).

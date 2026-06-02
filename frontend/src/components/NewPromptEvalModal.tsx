@@ -17,7 +17,7 @@ interface NewPromptEvalModalProps {
  * Create a prompt-eval session. The user picks which North Star prompt to
  * evaluate from a dropdown of registered targets, then sees the prompt text
  * pre-filled in a textarea — they can review or tweak before hitting Create.
- * Tweaking changes what the seed pass extracts (goals/users/stories/charter)
+ * Tweaking changes what the seed pass extracts (goals/users/stories/seed)
  * but not what runs at eval time; that's the registered prompt builder,
  * identified by `target`.
  */
@@ -50,10 +50,10 @@ export default function NewPromptEvalModal({
     listPromptTargets()
       .then((list) => {
         setTargets(list)
-        // Default to skill_seed when present — that's the prompt project most
+        // Default to skill_import when present — that's the prompt project most
         // closely aligned with the SKILL.md flow people land here from. Falls
         // back to the first registered target otherwise.
-        const preferred = list.find((t) => t.target === 'skill_seed') ?? list[0]
+        const preferred = list.find((t) => t.target === 'skill_import') ?? list[0]
         if (preferred) {
           setTargetId(preferred.target)
           if (preferred.prompt_text) setBody(preferred.prompt_text)

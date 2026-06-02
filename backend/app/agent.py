@@ -8,8 +8,8 @@ Flow:
 1. Discovery goals phase → elicit business goals one question at a time
 2. Discovery stories phase → elicit user stories one question at a time
 3. Generate (explicit trigger via /advance-phase) → generate + validate + suggest
-4. Regenerate → regenerate full charter + validate + suggest
-5. Chat turn (charter exists) → converse, maybe update sections, suggest
+4. Regenerate → regenerate full seed + validate + suggest
+5. Chat turn (seed exists) → converse, maybe update sections, suggest
 """
 
 from __future__ import annotations
@@ -31,12 +31,12 @@ from .db import create_turn
 from .tools import (
     call_discovery_turn,
     call_generate_draft,
-    call_validate_charter,
+    call_validate_seed,
     call_conversational_turn,
     call_generate_suggestions,
     call_dataset_chat,
     get_max_rounds,
-    parse_charter_update,
+    parse_seed_update,
     parse_suggestions,
     set_trace_meta,
 )
@@ -69,7 +69,7 @@ class AgentResult:
         self.extracted_stories = extracted_stories or []
         self.ready_for_users = False
         self.ready_for_stories = False
-        self.ready_for_charter = False
+        self.ready_for_seed = False
         self.suggested_goals: list[str] = []
         self.suggested_users: list[str] = []
         self.suggested_stories_options: list[dict] = []
@@ -83,9 +83,9 @@ async def run_agent_turn(
     """Run one turn of the agent loop.
 
     Modes:
-    1. No charter → discovery turn (goals or stories phase)
-    2. Charter exists + regenerate → regenerate charter
-    3. Charter exists + user message → chat turn to refine
+    1. No seed → discovery turn (goals or stories phase)
+    2. Seed exists + regenerate → regenerate seed
+    3. Seed exists + user message → chat turn to refine
     """
     # Append user message to conversation history
     if user_message:
@@ -94,24 +94,24 @@ async def run_agent_turn(
             "content": user_message,
         })
 
-    has_charter = bool(state.charter.coverage.criteria or state.charter.alignment)
-    phase = "charter" if has_charter else (state.discovery_phase.value if state.discovery_phase else None)
-    turn_number = state.rounds_of_questions if has_charter else state.discovery_rounds
+    has_seed = bool(state.seed.coverage.criteria or state.seed.alignment)
+    phase = "seed" if has_seed else (state.discovery_phase.value if state.discovery_phase else None)
+    turn_number = state.rounds_of_questions if has_seed else state.discovery_rounds
 
     with set_trace_meta(
         session_id=state.session_id,
         phase=phase,
         turn_number=turn_number,
     ):
-        # --- Explicit regenerate (force charter generation, even if empty) ---
+        # --- Explicit regenerate (force seed generation, even if empty) ---
         if regenerate:
             return await _generate_and_validate(state)
 
-        # --- Charter exists → chat turn ---
-        if has_charter and user_message:
+        # --- Seed exists → chat turn ---
+        if has_seed and user_message:
             return await _chat_turn(state, user_message)
 
-        # --- No charter → discovery (goals or stories phase) ---
+        # --- No seed → discovery (goals or stories phase) ---
         return await _discovery_turn(state, user_message)
 
 
@@ -124,7 +124,7 @@ async def _discovery_turn(state: SessionState, user_message: str | None) -> Agen
     # Apply extractions
     ready_for_users = False
     ready_for_stories = False
-    ready_for_charter = False
+    ready_for_seed = False
 
     if extraction:
         new_goals = extraction.get("goals", [])
@@ -132,7 +132,7 @@ async def _discovery_turn(state: SessionState, user_message: str | None) -> Agen
         new_stories = extraction.get("stories", [])
         ready_for_users = extraction.get("ready_for_users", False)
         ready_for_stories = extraction.get("ready_for_stories", False)
-        ready_for_charter = extraction.get("ready_for_charter", False)
+        ready_for_seed = extraction.get("ready_for_seed", False)
 
         # Append new goals (deduplicate)
         existing_goals_lower = {g.lower() for g in state.extracted_goals}
@@ -184,7 +184,7 @@ async def _discovery_turn(state: SessionState, user_message: str | None) -> Agen
     )
     result.ready_for_users = ready_for_users
     result.ready_for_stories = ready_for_stories
-    result.ready_for_charter = ready_for_charter
+    result.ready_for_seed = ready_for_seed
 
     # Pass through suggested clickable options
     if extraction:
@@ -196,7 +196,7 @@ async def _discovery_turn(state: SessionState, user_message: str | None) -> Agen
 
 
 async def advance_phase(state: SessionState) -> AgentResult:
-    """Advance the discovery phase: goals→users→stories→charter generation."""
+    """Advance the discovery phase: goals→users→stories→seed generation."""
     if state.discovery_phase == DiscoveryPhase.goals:
         # Move to users phase
         state.discovery_phase = DiscoveryPhase.users
@@ -210,9 +210,9 @@ async def advance_phase(state: SessionState) -> AgentResult:
             return await _discovery_turn(state, None)
 
     elif state.discovery_phase == DiscoveryPhase.stories:
-        # Move to charter generation
+        # Move to seed generation
         _build_input_from_extractions(state)
-        with set_trace_meta(session_id=state.session_id, phase="charter", turn_number=state.rounds_of_questions):
+        with set_trace_meta(session_id=state.session_id, phase="seed", turn_number=state.rounds_of_questions):
             result = await _generate_and_validate(state)
         state.input.conversation_history.append({"role": "assistant", "content": result.message})
         return result
@@ -236,31 +236,31 @@ def _build_input_from_extractions(state: SessionState) -> None:
 
 
 async def _generate_and_validate(state: SessionState) -> AgentResult:
-    """Generate a charter draft, validate it, generate suggestions."""
+    """Generate a seed draft, validate it, generate suggestions."""
     # Step 1: Generate
     state.agent_status = AgentStatus.drafting
-    charter, gen_calls = await call_generate_draft(state)
-    state.charter = charter
+    seed, gen_calls = await call_generate_draft(state)
+    state.seed = seed
 
     await create_turn(
         session_id=state.session_id,
         turn_type="generate",
         input_snapshot={"business_goals": state.input.business_goals, "user_stories": state.input.user_stories},
         llm_calls=gen_calls,
-        parsed_output=state.charter.model_dump(),
+        parsed_output=state.seed.model_dump(),
         agent_message=None,
         suggestions=None,
     )
 
     # Step 2: Validate
     state.agent_status = AgentStatus.validating
-    validation, val_calls = await call_validate_charter(state)
+    validation, val_calls = await call_validate_seed(state)
     state.validation = validation
 
     await create_turn(
         session_id=state.session_id,
         turn_type="validate",
-        input_snapshot={"charter": state.charter.model_dump()},
+        input_snapshot={"seed": state.seed.model_dump()},
         llm_calls=val_calls,
         parsed_output=state.validation.model_dump(),
         agent_message=None,
@@ -289,7 +289,7 @@ async def _generate_and_validate(state: SessionState) -> AgentResult:
     await create_turn(
         session_id=state.session_id,
         turn_type="suggest",
-        input_snapshot={"charter": state.charter.model_dump(), "validation": state.validation.model_dump()},
+        input_snapshot={"seed": state.seed.model_dump(), "validation": state.validation.model_dump()},
         llm_calls=sug_calls,
         parsed_output=None,
         agent_message=msg,
@@ -298,28 +298,28 @@ async def _generate_and_validate(state: SessionState) -> AgentResult:
 
     return AgentResult(
         msg,
-        tool_calls=["generate_draft", "validate_charter"],
+        tool_calls=["generate_draft", "validate_seed"],
         suggestions=suggestions,
         suggested_stories=suggested_stories,
     )
 
 
 async def _chat_turn(state: SessionState, user_message: str) -> AgentResult:
-    """Handle a chat message — converse, maybe update charter sections."""
-    charter_before = state.charter.model_dump()
+    """Handle a chat message — converse, maybe update seed sections."""
+    seed_before = state.seed.model_dump()
 
     # Get response from Claude
     raw_text, chat_calls = await call_conversational_turn(state, user_message)
 
     # Parse structured blocks from the response
-    update_data, text = parse_charter_update(raw_text)
+    update_data, text = parse_seed_update(raw_text)
     suggestions, suggested_stories, text = parse_suggestions(text)
     text = text.strip() or "What else would you like to refine?"
 
-    # Apply charter update if present
+    # Apply seed update if present
     if update_data:
-        _apply_charter_update(state, update_data)
-        validation, val_calls = await call_validate_charter(state)
+        _apply_seed_update(state, update_data)
+        validation, val_calls = await call_validate_seed(state)
         state.validation = validation
         chat_calls.extend(val_calls)
 
@@ -329,9 +329,9 @@ async def _chat_turn(state: SessionState, user_message: str) -> AgentResult:
     await create_turn(
         session_id=state.session_id,
         turn_type="chat",
-        input_snapshot={"user_message": user_message, "charter_before": charter_before},
+        input_snapshot={"user_message": user_message, "seed_before": seed_before},
         llm_calls=chat_calls,
-        parsed_output={"charter_update": update_data} if update_data else None,
+        parsed_output={"seed_update": update_data} if update_data else None,
         agent_message=text,
         suggestions={"suggestions": [s.model_dump() for s in suggestions], "stories": [s.model_dump() for s in suggested_stories]} if suggestions else None,
     )
@@ -345,41 +345,41 @@ async def _chat_turn(state: SessionState, user_message: str) -> AgentResult:
 
 # --- State helpers (no LLM calls) ---
 
-def _apply_charter_update(state: SessionState, update_data: dict) -> None:
-    """Apply a partial charter update from a conversational turn."""
+def _apply_seed_update(state: SessionState, update_data: dict) -> None:
+    """Apply a partial seed update from a conversational turn."""
     if "coverage" in update_data:
         cov = update_data["coverage"]
         if isinstance(cov, dict):
             if "criteria" in cov:
-                state.charter.coverage.criteria = cov["criteria"]
+                state.seed.coverage.criteria = cov["criteria"]
             if "negative_criteria" in cov:
-                state.charter.coverage.negative_criteria = cov["negative_criteria"]
+                state.seed.coverage.negative_criteria = cov["negative_criteria"]
         elif isinstance(cov, list):
-            state.charter.coverage.criteria = cov
+            state.seed.coverage.criteria = cov
 
     if "balance" in update_data:
         bal = update_data["balance"]
         if isinstance(bal, dict) and "criteria" in bal:
-            state.charter.balance.criteria = bal["criteria"]
+            state.seed.balance.criteria = bal["criteria"]
         elif isinstance(bal, list):
-            state.charter.balance.criteria = bal
+            state.seed.balance.criteria = bal
 
     if "rot" in update_data:
         rot = update_data["rot"]
         if isinstance(rot, dict) and "criteria" in rot:
-            state.charter.rot.criteria = rot["criteria"]
+            state.seed.rot.criteria = rot["criteria"]
         elif isinstance(rot, list):
-            state.charter.rot.criteria = rot
+            state.seed.rot.criteria = rot
 
     if "safety" in update_data:
         saf = update_data["safety"]
         if isinstance(saf, dict) and "criteria" in saf:
-            state.charter.safety.criteria = saf["criteria"]
+            state.seed.safety.criteria = saf["criteria"]
         elif isinstance(saf, list):
-            state.charter.safety.criteria = saf
+            state.seed.safety.criteria = saf
 
     if "alignment" in update_data:
-        state.charter.alignment = [
+        state.seed.alignment = [
             AlignmentEntry(
                 feature_area=a.get("feature_area", ""),
                 good=a.get("good", ""),
@@ -391,7 +391,7 @@ def _apply_charter_update(state: SessionState, update_data: dict) -> None:
 
 
 def _summarize_weak(state: SessionState) -> str:
-    """Summarize which parts of the charter are weak."""
+    """Summarize which parts of the seed are weak."""
     weak = []
     v = state.validation
     if v.coverage in (ValidationStatus.weak, ValidationStatus.fail):
@@ -422,10 +422,10 @@ async def run_dataset_chat(
         "content": user_message,
     })
 
-    charter = state.charter.model_dump()
+    seed = state.seed.model_dump()
     with set_trace_meta(session_id=state.session_id, phase="dataset"):
         raw_text, chat_calls = await call_dataset_chat(
-            charter, dataset_stats, user_message, state.input.conversation_history,
+            seed, dataset_stats, user_message, state.input.conversation_history,
         )
 
     # Check for dataset-action blocks (can have multiple)
@@ -505,8 +505,8 @@ async def run_polaris_chat(
         phase=context.get("phase"),
     )
 
-    charter_summary = state.charter.model_dump() if state else None
-    system = build_polaris_system_prompt(context, charter_summary)
+    seed_summary = state.seed.model_dump() if state else None
+    system = build_polaris_system_prompt(context, seed_summary)
 
     # Conversation history — only user/assistant text, no tool blocks. We
     # persist text-only turns to keep the JSONB column bounded; the full

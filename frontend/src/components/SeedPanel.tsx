@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import type { ReactNode } from "react";
 import { ArrowRight, ChevronDown, Loader2, Sparkles } from "lucide-react";
 import type {
-  Charter,
+  Seed,
   Validation,
   DimensionStatus,
   AlignmentEntry,
@@ -25,7 +25,7 @@ import {
 } from "./ui/Icons";
 
 interface Props {
-  charter: Charter;
+  seed: Seed;
   validation: Validation;
   activeCriteria: string[];
   onEditCriterion?: (dimension: string, index: number, value: string) => void;
@@ -53,8 +53,8 @@ interface Props {
   /** When set, expands bottom section to fill and caps Suggestions height. */
   rightBottomExpanded?: ReactNode;
 
-  // Shortcuts — kick off downstream generation directly from the charter
-  // page. Each ensures the charter is finalised and then fans out to the
+  // Shortcuts — kick off downstream generation directly from the seed
+  // page. Each ensures the seed is finalised and then fans out to the
   // dataset / scorers pages with generation already in flight. The parent
   // handler short-circuits to navigation when the artifact is already fresh,
   // so the same callback serves all three tri-state paths.
@@ -66,7 +66,7 @@ interface Props {
   generatingBoth?: boolean;
   /** Tri-state readiness for the Dataset CTA:
    *  - "missing": never generated → "Generate dataset" (primary)
-   *  - "stale":   generated but charter changed → "Regenerate dataset" (primary)
+   *  - "stale":   generated but seed changed → "Regenerate dataset" (primary)
    *  - "fresh":   up to date → "Go to dataset" (neutral, navigation only)
    *  Defaults to "missing" so older callers keep their existing behaviour. */
   datasetState?: "missing" | "stale" | "fresh";
@@ -84,20 +84,20 @@ interface Props {
   isPromptEval?: boolean;
   /** Click handler for the "Generate skill" / "Generate prompt" CTA. */
   onGenerateSkill?: () => void;
-  /** Whether a charter has already been generated. Drives the empty-state
+  /** Whether a seed has already been generated. Drives the empty-state
    *  title-row "Generate from goals and skill" button visibility — we only
    *  surface it when there's nothing to overwrite. */
-  hasCharter?: boolean;
-  /** Fires the intake pass that drafts a charter from goals + stories.
+  hasSeed?: boolean;
+  /** Fires the intake pass that drafts a seed from goals + stories.
    *  Rendered as a title-row action when the panel is empty AND the
    *  project has a skill (or is a prompt-eval). */
-  onGenerateCharter?: () => void;
+  onGenerateSeed?: () => void;
 }
 
-type CharterTab = "task" | "coverage" | "balance" | "alignment" | "rot" | "safety";
+type SeedTab = "task" | "coverage" | "balance" | "alignment" | "rot" | "safety";
 
-export default function CharterPanel({
-  charter,
+export default function SeedPanel({
+  seed,
   validation,
   activeCriteria,
   onEditCriterion: rawOnEditCriterion,
@@ -130,8 +130,8 @@ export default function CharterPanel({
   skillReady = true,
   isPromptEval = false,
   onGenerateSkill,
-  hasCharter = true,
-  onGenerateCharter,
+  hasSeed = true,
+  onGenerateSeed,
 }: Props) {
   // Strip every edit handler when canEdit is false so the inner sub-components
   // (CriteriaEditor, AlignmentEditor, TaskEditor, suggestion cards, shortcut
@@ -152,11 +152,11 @@ export default function CharterPanel({
   const onGenerateDataset = canEdit ? rawOnGenerateDataset : undefined;
   const onGenerateScorers = canEdit ? rawOnGenerateScorers : undefined;
   const onGenerateBoth = canEdit ? rawOnGenerateBoth : undefined;
-  // Charter is presented as a tabbed view — one section at a time, so users
+  // Seed is presented as a tabbed view — one section at a time, so users
   // focus on one dimension without scrolling past the others. State persists
   // within the panel mount so switching back to a dimension restores the
   // last-viewed tab.
-  const [activeTab, setActiveTab] = useState<CharterTab>("task");
+  const [activeTab, setActiveTab] = useState<SeedTab>("task");
 
   // Cross-component focus signal: when another panel (e.g. the dataset
   // sidebar's "Add now →" CTA) asks us to focus the alignment editor, we
@@ -184,30 +184,30 @@ export default function CharterPanel({
   }, [onGenerateBoth, generatingBoth, generatingDataset, generatingScorers]);
 
   const isEmpty =
-    !charter.coverage.criteria.length &&
-    !charter.balance.criteria.length &&
-    !charter.alignment.length &&
-    !charter.rot.criteria.length;
+    !seed.coverage.criteria.length &&
+    !seed.balance.criteria.length &&
+    !seed.alignment.length &&
+    !seed.rot.criteria.length;
 
-  const radarDimensions = buildRadarDimensions(charter, validation);
+  const radarDimensions = buildRadarDimensions(seed, validation);
   const hasRadarData = radarDimensions.some((d) => d.value > 0);
 
   // Flat layout shows every suggestion — no per-tab filtering needed.
-  // Suggestions are write-side affordances ("accept this into the charter").
+  // Suggestions are write-side affordances ("accept this into the seed").
   // For viewers, hide them entirely rather than render dead-clickable cards.
   const tabSuggestions = canEdit ? suggestions : [];
 
   // Compute tab readiness scores (0–1)
-  const covScore = dimensionScore(charter.coverage.status, validation.coverage, charter.coverage.criteria.length).value;
-  const balScore = dimensionScore(charter.balance.status, validation.balance, charter.balance.criteria.length).value;
-  const rotScore = dimensionScore(charter.rot.status, validation.rot, charter.rot.criteria.length).value;
-  // Safety is optional on older charters — guard everywhere.
-  const safetyCriteria = charter.safety?.criteria ?? [];
+  const covScore = dimensionScore(seed.coverage.status, validation.coverage, seed.coverage.criteria.length).value;
+  const balScore = dimensionScore(seed.balance.status, validation.balance, seed.balance.criteria.length).value;
+  const rotScore = dimensionScore(seed.rot.status, validation.rot, seed.rot.criteria.length).value;
+  // Safety is optional on older seeds — guard everywhere.
+  const safetyCriteria = seed.safety?.criteria ?? [];
   const safetyScore = safetyCriteria.length > 0 ? Math.min(1, safetyCriteria.length / 3) : 0;
-  const isTriggered = !!charter.task.skill_body;
+  const isTriggered = !!seed.task.skill_body;
 
   // Alignment score
-  const alignTotal = charter.alignment.length;
+  const alignTotal = seed.alignment.length;
   const alignScore = alignTotal > 0
     ? validation.alignment.length > 0
       ? validation.alignment.filter((v) => v.status === "pass").length / alignTotal
@@ -215,43 +215,43 @@ export default function CharterPanel({
     : 0;
 
   // Task definition score
-  const taskFilled = [charter.task.input_description, charter.task.output_description].filter(Boolean).length;
+  const taskFilled = [seed.task.input_description, seed.task.output_description].filter(Boolean).length;
   const taskScore = taskFilled / 2;
 
 
   // Empty fallback only kicks in when there's truly nothing to show AND
   // we're not generating. While loading we fall through to the tabbed view
-  // so the user still sees the charter chrome (tabs + radar) under the
+  // so the user still sees the seed chrome (tabs + radar) under the
   // loading overlay — a blank centered spinner makes the page feel like it
   // navigated away.
   if (isEmpty && suggestions.length === 0 && !loading) {
     return (
       <PanelLayout
-        title="Charter"
+        title="Seed"
         subtitle="A formal rule set to keep your dataset in check"
         rightBottom={rightBottom}
         rightBottomExpanded={rightBottomExpanded}
       >
         <div className="flex items-center justify-center py-24">
           <p className="text-sm text-fg-dim">
-            No charter yet. Go back and generate one.
+            No seed yet. Go back and generate one.
           </p>
         </div>
       </PanelLayout>
     );
   }
 
-  // Empty-state action — when there's no charter yet but the project has
-  // a skill (or is a prompt-eval), let the user generate the charter
-  // directly from the Charter page header instead of jumping back to
-  // Skill. The handler navigates back to Charter + flips loading at the
+  // Empty-state action — when there's no seed yet but the project has
+  // a skill (or is a prompt-eval), let the user generate the seed
+  // directly from the Seed page header instead of jumping back to
+  // Skill. The handler navigates back to Seed + flips loading at the
   // parent level, so the existing in-progress overlay covers the wait.
-  const charterTitleAction =
-    canEdit && !hasCharter && skillReady && onGenerateCharter ? (
+  const seedTitleAction =
+    canEdit && !hasSeed && skillReady && onGenerateSeed ? (
       <Button
         size="small"
         variant="primary"
-        onClick={onGenerateCharter}
+        onClick={onGenerateSeed}
         disabled={!!loading}
       >
         {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
@@ -263,9 +263,9 @@ export default function CharterPanel({
 
   return (
     <PanelLayout
-      title="Charter"
+      title="Seed"
       subtitle="A formal rule set to keep your dataset in check"
-      titleAction={charterTitleAction}
+      titleAction={seedTitleAction}
       rightTop={
         hasRadarData ? (
           <div>
@@ -280,7 +280,7 @@ export default function CharterPanel({
         <SuggestionBox
           onRefresh={onRegenSuggestions}
           loading={suggestionsLoading}
-          emptyText="Charter suggestions will appear here."
+          emptyText="Seed suggestions will appear here."
         >
           {tabSuggestions.length > 0
             ? tabSuggestions.map((s, i) => (
@@ -313,7 +313,7 @@ export default function CharterPanel({
             {isPromptEval ? "Generate prompt" : "Generate skill"}
           </Button>
         ) : onGenerateDataset || onGenerateScorers || onGenerateBoth ? (
-          <ChartersGenerateSplitButton
+          <SeedsGenerateSplitButton
             datasetState={datasetState}
             scorersState={scorersState}
             generatingDataset={!!generatingDataset}
@@ -333,7 +333,7 @@ export default function CharterPanel({
         // session is triggered-mode (skill body present) or it already has
         // safety criteria from a prior seed.
         const tabs: Array<{
-          id: CharterTab;
+          id: SeedTab;
           label: string;
           score: number;
           helpTitle: string;
@@ -433,22 +433,22 @@ export default function CharterPanel({
                 <div className="flex items-center gap-2 px-4 py-2 bg-surface-raised border border-border shadow-lg">
                   <Loader2 className="w-4 h-4 text-fg-dim animate-spin" />
                   <span className="text-sm text-fg-contrast">
-                    {hasCharter ? "Regenerating charter…" : "Generating charter…"}
+                    {hasSeed ? "Regenerating seed…" : "Generating seed…"}
                   </span>
                 </div>
               </div>
             )}
             {current?.id === "task" && (
               <SchemaSection
-                task={charter.task}
+                task={seed.task}
                 onEdit={onEditTask}
                 score={taskScore}
               />
             )}
             {current?.id === "coverage" && (
               <CoverageBody
-                onTargetCriteria={charter.coverage.criteria}
-                offTargetCriteria={charter.coverage.negative_criteria ?? []}
+                onTargetCriteria={seed.coverage.criteria}
+                offTargetCriteria={seed.coverage.negative_criteria ?? []}
                 covScore={covScore}
                 onAddCriterion={onAddCriterion}
                 onEditCriterion={onEditCriterion}
@@ -464,7 +464,7 @@ export default function CharterPanel({
                   title="Balance"
                   helpTitle="How to distribute across scenarios"
                   helpText="Specify which scenarios deserve more weight in your dataset. Without balance criteria, your evals may over-represent easy cases and miss the hard ones."
-                  items={charter.balance.criteria}
+                  items={seed.balance.criteria}
                   onAdd={onAddCriterion ? (v) => onAddCriterion("balance", v) : undefined}
                   onEdit={onEditCriterion ? (i, v) => onEditCriterion("balance", i, v) : undefined}
                   onDelete={onDeleteCriterion ? (i) => onDeleteCriterion("balance", i) : undefined}
@@ -479,7 +479,7 @@ export default function CharterPanel({
             })()}
             {current?.id === "alignment" && (
               <AlignmentSection
-                entries={charter.alignment}
+                entries={seed.alignment}
                 validations={validation.alignment}
                 activeCriteria={activeCriteria}
                 onEdit={onEditAlignment}
@@ -496,7 +496,7 @@ export default function CharterPanel({
                   title="Rot"
                   helpTitle="Signals the dataset needs refreshing"
                   helpText="Define the conditions that would make your current dataset stale — new features, changed requirements, updated models. When these fire, it's time to regenerate."
-                  items={charter.rot.criteria}
+                  items={seed.rot.criteria}
                   onAdd={onAddCriterion ? (v) => onAddCriterion("rot", v) : undefined}
                   onEdit={onEditCriterion ? (i, v) => onEditCriterion("rot", i, v) : undefined}
                   onDelete={onDeleteCriterion ? (i) => onDeleteCriterion("rot", i) : undefined}
@@ -587,10 +587,10 @@ function labelForBothState(dataset: ArtifactState, scorers: ArtifactState): stri
   return "Go to evaluate";
 }
 
-/* ── ChartersGenerateSplitButton ── */
+/* ── SeedsGenerateSplitButton ── */
 
 /**
- * Combined main action + chevron menu for the charter footer.
+ * Combined main action + chevron menu for the seed footer.
  *
  *   [ Generate dataset and scorers  ⌘↵ ] [ ⌄ ]
  *                                          │
@@ -605,7 +605,7 @@ function labelForBothState(dataset: ArtifactState, scorers: ArtifactState): stri
  * The main button does the combined action; the dropdown lets the user pick
  * "only dataset" or "only scorers" when they don't want both regenerated.
  */
-function ChartersGenerateSplitButton({
+function SeedsGenerateSplitButton({
   datasetState,
   scorersState,
   generatingDataset,
@@ -761,7 +761,7 @@ function dimensionScore(
   return { value: contentScore, status: "pending" };
 }
 
-function buildRadarDimensions(charter: Charter, validation: Validation) {
+function buildRadarDimensions(seed: Seed, validation: Validation) {
   const dims: Array<{
     label: string;
     value: number;
@@ -770,8 +770,8 @@ function buildRadarDimensions(charter: Charter, validation: Validation) {
 
   // Schema (top vertex)
   const taskFilled = [
-    charter.task.input_description,
-    charter.task.output_description,
+    seed.task.input_description,
+    seed.task.output_description,
   ].filter(Boolean).length;
   dims.push({
     label: "Schema",
@@ -781,32 +781,32 @@ function buildRadarDimensions(charter: Charter, validation: Validation) {
 
   // Coverage (top-right)
   const cov = dimensionScore(
-    charter.coverage.status,
+    seed.coverage.status,
     validation.coverage,
-    charter.coverage.criteria.length,
+    seed.coverage.criteria.length,
   );
   dims.push({ label: "Coverage", ...cov });
 
   // Balance (bottom-right)
   const bal = dimensionScore(
-    charter.balance.status,
+    seed.balance.status,
     validation.balance,
-    charter.balance.criteria.length,
+    seed.balance.criteria.length,
   );
   dims.push({ label: "Balance", ...bal });
 
   // Alignment (bottom-left)
-  if (charter.alignment.length > 0) {
-    const contentScore = Math.min(1, charter.alignment.length / 4);
+  if (seed.alignment.length > 0) {
+    const contentScore = Math.min(1, seed.alignment.length / 4);
     const passCount = validation.alignment.filter(
       (v) => v.status === "pass" || (v.status as string) === "good",
     ).length;
     const hasValidation = validation.alignment.length > 0;
     if (hasValidation) {
-      const validationRatio = passCount / Math.max(1, charter.alignment.length);
+      const validationRatio = passCount / Math.max(1, seed.alignment.length);
       const value = Math.max(contentScore * 0.5, validationRatio);
       const status: "good" | "weak" | "pending" =
-        passCount === charter.alignment.length ? "good" : "weak";
+        passCount === seed.alignment.length ? "good" : "weak";
       dims.push({ label: "Alignment", value, status });
     } else {
       dims.push({ label: "Alignment", value: contentScore, status: "pending" });
@@ -817,9 +817,9 @@ function buildRadarDimensions(charter: Charter, validation: Validation) {
 
   // Rot (top-left)
   const rot = dimensionScore(
-    charter.rot.status,
+    seed.rot.status,
     validation.rot,
-    charter.rot.criteria.length,
+    seed.rot.criteria.length,
   );
   dims.push({ label: "Rot", ...rot });
 

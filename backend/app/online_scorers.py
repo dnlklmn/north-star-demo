@@ -20,12 +20,12 @@ CLI usage:
     python -m backend.app.online_scorers list
 
     # Print the full prompt body for one scorer (copy/paste into Braintrust UI)
-    python -m backend.app.online_scorers show charter_quality
+    python -m backend.app.online_scorers show seed_quality
 
     # Dry-run a scorer against arbitrary {input, output} JSON via stdin —
     # useful for iterating on prompt text before pushing.
     echo '{"input": "...", "output": "..."}' | \\
-        python -m backend.app.online_scorers test charter_quality
+        python -m backend.app.online_scorers test seed_quality
 
     # Convert a project's generated scorers (state.scorers in the DB) into
     # Braintrust online-scorer .md files. New /generate-scorers calls do this
@@ -52,11 +52,11 @@ from .eval_runner import _build_judge_client, make_judge
 
 SCORERS_DIR = Path(__file__).parent / "scorers"
 
-# Per-scorer model defaults — the doc's recommendation: Sonnet for charter
+# Per-scorer model defaults — the doc's recommendation: Sonnet for seed
 # quality (high stakes, low frequency), Haiku for the high-volume scorers.
 # Override via env var named ``<UPPER_SCORER_NAME>_MODEL``.
 DEFAULT_MODELS: dict[str, str] = {
-    "charter_quality": "claude-sonnet-4-5-20250929",
+    "seed_quality": "claude-sonnet-4-5-20250929",
     "goal_extraction_quality": "claude-haiku-4-5-20251001",
     "conversation_quality": "claude-haiku-4-5-20251001",
 }
@@ -170,7 +170,7 @@ def list_scorers() -> list[ScorerSpec]:
     """Discover all scorer .md files in the scorers/ directory.
 
     Picks up two layers:
-      * ``scorers/*.md`` — hand-curated scorers (charter quality, etc.)
+      * ``scorers/*.md`` — hand-curated scorers (seed quality, etc.)
       * ``scorers/generated/<scope>/*.md`` — emitted by /generate-scorers,
         one per project that has run scorer generation. Letting these
         appear in the same list means ``online_scorers.py list`` shows

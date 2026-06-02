@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 /**
  * Shared resize state for the right-rail sidebar. Used by both
- * PanelLayout (Charter / Goals / Stories / Scorers / Evaluate) and the
- * dataset workspace's CharterSidebar so resizing on any page persists
+ * PanelLayout (Seed / Goals / Stories / Scorers / Evaluate) and the
+ * dataset workspace's SeedSidebar so resizing on any page persists
  * to localStorage and is picked up by every other page on its next
  * mount — and live within the current tab via a custom event.
  *

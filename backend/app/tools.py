@@ -22,7 +22,7 @@ import braintrust
 from .models import (
     AlignmentEntry,
     AlignmentValidation,
-    Charter,
+    Seed,
     DimensionCriteria,
     DimensionStatus,
     SessionState,
@@ -35,8 +35,8 @@ from .models import (
 from .prompt import (
     build_discovery_turn_prompt,
     build_generate_draft_prompt,
-    build_retag_examples_against_charter_prompt,
-    build_validate_charter_prompt,
+    build_retag_examples_against_seed_prompt,
+    build_validate_seed_prompt,
     build_conversational_turn_prompt,
     build_generate_suggestions_prompt,
     build_synthesize_examples_prompt,
@@ -190,7 +190,7 @@ def _bubble_io_to_parent_span(prompt: str, output: str) -> None:
     (where filterable metadata lives) gets nothing by default, so Braintrust
     online scorers that resolve ``{{input}}`` and ``{{output}}`` against the
     trace root substitute empty strings — and the judge model rightly says
-    "no charter was provided" and picks ``bad``.
+    "no seed was provided" and picks ``bad``.
 
     We hold an explicit reference to the @traced span via a ContextVar (set in
     ``trace_call``) rather than reading ``braintrust.current_span()``, because
@@ -216,7 +216,7 @@ def trace_call(turn_type: str, **extra):
 
     Metadata = contextvar-set trace meta + ``extra`` kwargs + {turn_type, model_name}.
     Inside the block, wrap_anthropic API calls are recorded as child spans of
-    this one, so trace-level filters in Braintrust (e.g. ``phase = "charter"``)
+    this one, so trace-level filters in Braintrust (e.g. ``phase = "seed"``)
     match every leaf span underneath.
     """
     if not _ensure_braintrust_inited():
@@ -820,7 +820,7 @@ async def call_llm_with_tools(
 async def call_discovery_turn(state: SessionState, user_message: str | None) -> tuple[str, dict | None, list[dict]]:
     """Run a discovery turn. Returns (conversational_text, extraction_data, call metadata list).
 
-    extraction_data is a dict with keys: goals, stories, ready_for_charter
+    extraction_data is a dict with keys: goals, stories, ready_for_seed
     """
     await _refresh_settings()
     prompt = build_discovery_turn_prompt(state, user_message)
@@ -868,8 +868,8 @@ async def call_discovery_turn(state: SessionState, user_message: str | None) -> 
     return clean_text, extraction, [meta]
 
 
-def _build_charter_conversation_summary(state: SessionState) -> str:
-    """Distill SessionState into a clean conversation string for the charter
+def _build_seed_conversation_summary(state: SessionState) -> str:
+    """Distill SessionState into a clean conversation string for the seed
     scorer. The raw ``generate_draft`` prompt is mostly schema/instructions —
     the scorer's ``{{conversation}}`` placeholder needs the actual user-stated
     goals, users, and stories. Keep it short and unambiguous.
@@ -900,40 +900,40 @@ def _build_charter_conversation_summary(state: SessionState) -> str:
 
 
 @traced("generate_draft")
-async def call_generate_draft(state: SessionState) -> tuple[Charter, list[dict]]:
-    """Generate a charter draft. Returns (parsed Charter, call metadata list)."""
+async def call_generate_draft(state: SessionState) -> tuple[Seed, list[dict]]:
+    """Generate a seed draft. Returns (parsed Seed, call metadata list)."""
     await _refresh_settings()
     prompt = build_generate_draft_prompt(state, creativity=get_creativity())
     text, meta = await _call_llm(prompt, max_tokens=4096)
-    charter_data = _extract_json(text)
+    seed_data = _extract_json(text)
 
-    # Charter-specific scorer payload. The generic _call_llm bubble already
+    # Seed-specific scorer payload. The generic _call_llm bubble already
     # logged input=prompt / output=text on this span, but Braintrust online
     # scorers can be brittle about where they read input/output from. Logging
-    # the parsed charter + a distilled conversation onto explicit metadata
-    # fields lets charter_quality.md reference them via {{metadata.charter}} /
+    # the parsed seed + a distilled conversation onto explicit metadata
+    # fields lets seed_quality.md reference them via {{metadata.seed}} /
     # {{metadata.conversation}} — which Braintrust resolves directly from the
     # matched span's metadata bag, no inference involved.
     # Overwrite the generic prompt/raw-text that _call_llm bubbled onto this
-    # span with charter-specific clean values. Braintrust online scorers
+    # span with seed-specific clean values. Braintrust online scorers
     # accept {{input}}/{{output}} as first-class placeholders (custom
     # metadata keys are flagged as undefined in the prompt validator), so we
-    # put the conversation summary in input and the parsed charter JSON in
+    # put the conversation summary in input and the parsed seed JSON in
     # output. Subsequent span.log() calls merge/overwrite — last write wins.
     try:
         _bubble_io_to_parent_span(
-            _build_charter_conversation_summary(state),
-            json.dumps(charter_data, indent=2),
+            _build_seed_conversation_summary(state),
+            json.dumps(seed_data, indent=2),
         )
     except Exception as e:
-        logger.warning(f"Charter scorer payload bubble failed: {e}")
+        logger.warning(f"Seed scorer payload bubble failed: {e}")
 
-    task_data = charter_data.get("task", {})
+    task_data = seed_data.get("task", {})
     # Preserve skill metadata from the existing state — the generation prompt doesn't re-emit it.
-    existing_task = state.charter.task
-    coverage_data = charter_data.get("coverage", {})
-    safety_data = charter_data.get("safety", {}) or {}
-    charter = Charter(
+    existing_task = state.seed.task
+    coverage_data = seed_data.get("coverage", {})
+    safety_data = seed_data.get("safety", {}) or {}
+    seed = Seed(
         task=TaskDefinition(
             input_description=task_data.get("input_description", ""),
             output_description=task_data.get("output_description", ""),
@@ -949,7 +949,7 @@ async def call_generate_draft(state: SessionState) -> tuple[Charter, list[dict]]
             status=DimensionStatus.pending,
         ),
         balance=DimensionCriteria(
-            criteria=charter_data.get("balance", {}).get("criteria", []),
+            criteria=seed_data.get("balance", {}).get("criteria", []),
             status=DimensionStatus.pending,
         ),
         alignment=[
@@ -959,10 +959,10 @@ async def call_generate_draft(state: SessionState) -> tuple[Charter, list[dict]]
                 bad=a.get("bad", ""),
                 status=DimensionStatus.pending,
             )
-            for a in charter_data.get("alignment", [])
+            for a in seed_data.get("alignment", [])
         ],
         rot=DimensionCriteria(
-            criteria=charter_data.get("rot", {}).get("criteria", []),
+            criteria=seed_data.get("rot", {}).get("criteria", []),
             status=DimensionStatus.pending,
         ),
         safety=DimensionCriteria(
@@ -970,14 +970,14 @@ async def call_generate_draft(state: SessionState) -> tuple[Charter, list[dict]]
             status=DimensionStatus.pending,
         ),
     )
-    return charter, [meta]
+    return seed, [meta]
 
 
-@traced("validate_charter")
-async def call_validate_charter(state: SessionState) -> tuple[Validation, list[dict]]:
-    """Validate the current charter. Returns (parsed Validation, call metadata list)."""
+@traced("validate_seed")
+async def call_validate_seed(state: SessionState) -> tuple[Validation, list[dict]]:
+    """Validate the current seed. Returns (parsed Validation, call metadata list)."""
     await _refresh_settings()
-    prompt = build_validate_charter_prompt(state)
+    prompt = build_validate_seed_prompt(state)
     text, meta = await _call_llm(prompt, max_tokens=2048)
     val_data = _extract_json(text)
 
@@ -996,7 +996,7 @@ async def call_validate_charter(state: SessionState) -> tuple[Validation, list[d
         overall=_parse_validation_status(val_data.get("overall", "untested")),
     )
 
-    _update_charter_statuses(state.charter, validation)
+    _update_seed_statuses(state.seed, validation)
     return validation, [meta]
 
 
@@ -1019,7 +1019,7 @@ async def call_generate_suggestions(state: SessionState) -> tuple[tuple[list[Sug
 
     # Defensive: some providers/models occasionally emit entries missing
     # required fields. Drop those instead of 500-ing the whole turn — losing
-    # one suggestion is better than the user retrying the entire charter gen.
+    # one suggestion is better than the user retrying the entire seed gen.
     suggestions = [
         Suggestion(
             section=s.get("section", ""),
@@ -1114,14 +1114,14 @@ async def call_generate_skill_from_goals(
 
 @traced("suggest_scorer_ideas")
 async def call_suggest_scorer_ideas(
-    charter: dict,
+    seed: dict,
     existing_scorers: list[dict],
 ) -> tuple[list[dict], list[dict]]:
     """Suggest NEW scorer ideas (no code) for the user to refine. Returns
     (suggestions, call metadata list)."""
     from .prompt import build_suggest_scorer_ideas_prompt
     await _refresh_settings()
-    prompt = build_suggest_scorer_ideas_prompt(charter, existing_scorers)
+    prompt = build_suggest_scorer_ideas_prompt(seed, existing_scorers)
     text, meta = await _call_llm(prompt, max_tokens=512)
     data = _extract_json(text)
     suggestions: list[dict] = []
@@ -1237,21 +1237,21 @@ async def call_suggest_stories(goals: list[str], stories: list[dict]) -> tuple[l
 _SYNTH_CELL_CONCURRENCY = int(os.environ.get("NORTHSTAR_SYNTH_CONCURRENCY", "10"))
 
 
-def _has_off_target_or_safety(charter: dict) -> bool:
-    """Whether the charter requires off-target or safety rows in synthesis.
+def _has_off_target_or_safety(seed: dict) -> bool:
+    """Whether the seed requires off-target or safety rows in synthesis.
 
     Per-cell fan-out scopes generation to a single (criterion × feature_area)
     intersection, which doesn't accommodate the cross-cutting off-target and
     safety populations. When either is present we fall back to a single-call
     synth so those rows still get produced as the prompt expects.
     """
-    coverage = charter.get("coverage") or {}
+    coverage = seed.get("coverage") or {}
     if coverage.get("negative_criteria"):
         return True
-    safety = charter.get("safety") or {}
+    safety = seed.get("safety") or {}
     if safety.get("criteria"):
         return True
-    task = charter.get("task") or {}
+    task = seed.get("task") or {}
     # Triggered mode without explicit negatives is still single-call territory
     # because the prompt's TRIGGERED RULES generate two populations regardless.
     if task.get("skill_description"):
@@ -1283,20 +1283,20 @@ async def _synth_one_cell(
 
 @traced("synthesize_examples")
 async def call_synthesize_examples(
-    charter: dict,
+    seed: dict,
     feature_areas: list[str] | None = None,
     coverage_criteria: list[str] | None = None,
     count: int = 2,
     on_cell: Callable[[list[dict]], Awaitable[None]] | None = None,
 ) -> tuple[list[dict], list[dict]]:
-    """Generate synthetic examples from charter. Returns (examples, call metadata list).
+    """Generate synthetic examples from seed. Returns (examples, call metadata list).
 
     Strategy:
     - Default path: fan out one LLM call per (criterion × area) cell so the
       grid is filled evenly. The previous single-call approach asked the LLM
       to fill the whole grid in one response, which clipped at the token cap
       and led to ratty coverage (some cells with many examples, others with 0).
-    - Fallback path: when the charter has off-target or safety rows, do one
+    - Fallback path: when the seed has off-target or safety rows, do one
       single call. Those populations cut across the grid and don't slot into
       a per-cell scope cleanly.
 
@@ -1308,24 +1308,24 @@ async def call_synthesize_examples(
     """
     await _refresh_settings()
 
-    target_areas = feature_areas or [a.get("feature_area", "") for a in charter.get("alignment", [])]
+    target_areas = feature_areas or [a.get("feature_area", "") for a in seed.get("alignment", [])]
     target_areas = [a for a in target_areas if a]
-    target_coverage = coverage_criteria or (charter.get("coverage") or {}).get("criteria") or []
+    target_coverage = coverage_criteria or (seed.get("coverage") or {}).get("criteria") or []
     target_coverage = [c for c in target_coverage if c]
 
     cell_count = len(target_areas) * len(target_coverage)
-    falls_back = _has_off_target_or_safety(charter) or cell_count <= 1
+    falls_back = _has_off_target_or_safety(seed) or cell_count <= 1
 
     if falls_back:
-        prompt = build_synthesize_examples_prompt(charter, feature_areas, coverage_criteria, count)
-        # 8192 was too low — a full-grid charter (positive grid + off-target
+        prompt = build_synthesize_examples_prompt(seed, feature_areas, coverage_criteria, count)
+        # 8192 was too low — a full-grid seed (positive grid + off-target
         # + safety rows) routinely blew past it and the response truncated
         # mid-JSON, yielding zero examples. The single-call fallback has to
         # emit the entire dataset in one shot, so give it real headroom
         # (32k). That much output can't go through a non-streaming request
         # — the SDK rejects it with a 10-minute-timeout guard — so this
         # path streams. `_extract_json` still salvages the tail if a
-        # pathologically large charter clips even 32k.
+        # pathologically large seed clips even 32k.
         text, meta = await _call_llm_streaming(prompt, max_tokens=32000)
         data = _extract_json(text)
         examples = data.get("examples", [])
@@ -1345,7 +1345,7 @@ async def call_synthesize_examples(
     # Per-cell fan-out. Build the cacheable prefix once and reuse — Anthropic
     # caches it on the first call, and every subsequent call reads from the
     # cache for ~10x cheaper input tokens.
-    prefix = build_synthesize_examples_cell_prefix(charter)
+    prefix = build_synthesize_examples_cell_prefix(seed)
     semaphore = asyncio.Semaphore(_SYNTH_CELL_CONCURRENCY)
     tasks = [
         asyncio.create_task(_synth_one_cell(prefix, fa, crit, count, semaphore))
@@ -1401,28 +1401,28 @@ async def call_synthesize_examples(
 
 
 @traced("review_examples")
-async def call_review_examples(charter: dict, examples: list[dict]) -> tuple[list[dict], list[dict]]:
-    """Auto-review examples against charter. Returns (reviews, call metadata list)."""
+async def call_review_examples(seed: dict, examples: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Auto-review examples against seed. Returns (reviews, call metadata list)."""
     await _refresh_settings()
-    prompt = build_review_examples_prompt(charter, examples)
+    prompt = build_review_examples_prompt(seed, examples)
     text, meta = await _call_llm(prompt, max_tokens=4096)
     data = _extract_json(text)
     return data.get("reviews", []), [meta]
 
 
 @traced("retag_examples")
-async def call_retag_examples_against_charter(
-    charter: dict, examples: list[dict],
+async def call_retag_examples_against_seed(
+    seed: dict, examples: list[dict],
 ) -> tuple[list[dict], list[dict]]:
-    """Re-tag examples (feature_area + coverage_tags) against the charter.
+    """Re-tag examples (feature_area + coverage_tags) against the seed.
 
     Returns (retags, call metadata list). Each retag is
     {example_id, feature_area, coverage_tags}. Used by prompt-eval to align
-    the auto-seeded dataset with the just-generated charter so the Coverage
+    the auto-seeded dataset with the just-generated seed so the Coverage
     Map matrix becomes useful.
     """
     await _refresh_settings()
-    prompt = build_retag_examples_against_charter_prompt(charter, examples)
+    prompt = build_retag_examples_against_seed_prompt(seed, examples)
     text, meta = await _call_llm(prompt, max_tokens=4096)
     data = _extract_json(text)
     return data.get("retags", []), [meta]
@@ -1430,21 +1430,21 @@ async def call_retag_examples_against_charter(
 
 @traced("dataset_chat")
 async def call_dataset_chat(
-    charter: dict,
+    seed: dict,
     dataset_stats: dict,
     user_message: str,
     conversation_history: list[dict],
 ) -> tuple[str, list[dict]]:
     """Chat turn in dataset phase. Returns (response text, call metadata list)."""
     await _refresh_settings()
-    prompt = build_dataset_chat_prompt(charter, dataset_stats, user_message, conversation_history)
+    prompt = build_dataset_chat_prompt(seed, dataset_stats, user_message, conversation_history)
     text, meta = await _call_llm(prompt, max_tokens=2048)
     return text, [meta]
 
 
 @traced("gap_analysis")
-async def call_gap_analysis(charter: dict, dataset_stats: dict, examples: list[dict]) -> tuple[dict, list[dict]]:
-    """Analyze dataset gaps against charter. Returns (gap analysis, call metadata list).
+async def call_gap_analysis(seed: dict, dataset_stats: dict, examples: list[dict]) -> tuple[dict, list[dict]]:
+    """Analyze dataset gaps against seed. Returns (gap analysis, call metadata list).
 
     The coverage matrix is computed in code (deterministic), not delegated to
     the LLM. The LLM's role is the textual analysis — gaps, balance issues,
@@ -1452,11 +1452,11 @@ async def call_gap_analysis(charter: dict, dataset_stats: dict, examples: list[d
     rows would silently zero out cells that actually have examples.
     """
     await _refresh_settings()
-    prompt = build_gap_analysis_prompt(charter, dataset_stats, examples)
+    prompt = build_gap_analysis_prompt(seed, dataset_stats, examples)
     text, meta = await _call_llm(prompt, max_tokens=2048)
     data = _extract_json(text)
     # Override whatever matrix the LLM produced with the deterministic count.
-    data["coverage_matrix"] = _build_coverage_matrix(charter, examples)
+    data["coverage_matrix"] = _build_coverage_matrix(seed, examples)
     return data, [meta]
 
 
@@ -1464,10 +1464,10 @@ async def call_gap_analysis(charter: dict, dataset_stats: dict, examples: list[d
 
 @traced("generate_scorers")
 async def call_generate_scorers(
-    charter: dict,
+    seed: dict,
     agent_contract: str | None = None,
 ) -> tuple[list[dict], list[dict]]:
-    """Generate evaluation scorers from charter. Returns (scorers, call metadata list).
+    """Generate evaluation scorers from seed. Returns (scorers, call metadata list).
 
     ``agent_contract`` is the verbatim prompt / SKILL.md the system being
     scored operates under. See build_generate_scorers_prompt for why this
@@ -1475,7 +1475,7 @@ async def call_generate_scorers(
     can never satisfy because the LLM has to guess what the agent does.
     """
     await _refresh_settings()
-    prompt = build_generate_scorers_prompt(charter, agent_contract=agent_contract)
+    prompt = build_generate_scorers_prompt(seed, agent_contract=agent_contract)
     text, meta = await _call_llm(prompt, max_tokens=8192)
     data = _extract_json(text)
     return data.get("scorers", []), [meta]
@@ -1484,10 +1484,10 @@ async def call_generate_scorers(
 # --- Revision suggestion tools ---
 
 @traced("revise_examples")
-async def call_revise_examples(charter: dict, examples_with_verdicts: list[dict]) -> tuple[list[dict], list[dict]]:
+async def call_revise_examples(seed: dict, examples_with_verdicts: list[dict]) -> tuple[list[dict], list[dict]]:
     """Suggest revisions for examples that failed review. Returns (revisions, call metadata list)."""
     await _refresh_settings()
-    prompt = build_revise_examples_prompt(charter, examples_with_verdicts)
+    prompt = build_revise_examples_prompt(seed, examples_with_verdicts)
     text, meta = await _call_llm(prompt, max_tokens=8192)
     data = _extract_json(text)
     return data.get("revisions", []), [meta]
@@ -1506,10 +1506,10 @@ async def call_detect_schema(content: str, content_type: str = "auto") -> tuple[
 
 
 @traced("infer_schema")
-async def call_infer_schema(examples: list[dict], charter: dict) -> tuple[dict, list[dict]]:
+async def call_infer_schema(examples: list[dict], seed: dict) -> tuple[dict, list[dict]]:
     """Infer schema from existing examples. Returns (inferred schema, call metadata list)."""
     await _refresh_settings()
-    prompt = build_infer_schema_prompt(examples, charter)
+    prompt = build_infer_schema_prompt(examples, seed)
     text, meta = await _call_llm(prompt, max_tokens=2048)
     data = _extract_json(text)
     return data, [meta]
@@ -1529,7 +1529,7 @@ async def call_import_from_url(content: str, url: str, detected_type: str) -> tu
 async def call_suggest_improvements(
     skill_body: str,
     eval_run: dict,
-    charter: dict,
+    seed: dict,
     clusters: list[dict] | None = None,
 ) -> tuple[dict, list[dict]]:
     """Analyze eval failures + current SKILL.md, propose targeted edits.
@@ -1543,7 +1543,7 @@ async def call_suggest_improvements(
     """
     from .prompt import build_suggest_improvements_prompt
     await _refresh_settings()
-    prompt = build_suggest_improvements_prompt(skill_body, eval_run, charter, clusters)
+    prompt = build_suggest_improvements_prompt(skill_body, eval_run, seed, clusters)
     text, meta = await _call_llm(prompt, max_tokens=4096)
     data = _extract_json(text)
     return data, [meta]
@@ -1569,8 +1569,8 @@ async def call_cluster_notes(
     return data, [meta]
 
 
-@traced("skill_seed")
-async def call_skill_seed(
+@traced("skill_import")
+async def call_skill_import(
     skill_body: str,
     skill_name: str | None,
     skill_description: str | None,
@@ -1581,9 +1581,9 @@ async def call_skill_seed(
     task, summary. Used in triggered mode to bootstrap a session from the skill
     the user wants to evaluate.
     """
-    from .prompt import build_skill_seed_prompt
+    from .prompt import build_skill_import_prompt
     await _refresh_settings()
-    prompt = build_skill_seed_prompt(skill_body, skill_name, skill_description)
+    prompt = build_skill_import_prompt(skill_body, skill_name, skill_description)
     text, meta = await _call_llm(prompt, max_tokens=4096)
     data = _extract_json(text)
     # Scorer payload: SKILL.md content (with name/description header) as
@@ -1599,27 +1599,27 @@ async def call_skill_seed(
         bubble_output = json.dumps(data, indent=2)
         _bubble_io_to_parent_span(bubble_input, bubble_output)
     except Exception as e:
-        logger.warning(f"skill_seed scorer payload bubble failed: {e}")
+        logger.warning(f"skill_import scorer payload bubble failed: {e}")
     return data, [meta]
 
 
 # --- Response parsing helpers ---
 
-def parse_charter_update(text: str) -> tuple[dict | None, str]:
-    """Extract ```charter-update``` block from response text.
+def parse_seed_update(text: str) -> tuple[dict | None, str]:
+    """Extract ```seed-update``` block from response text.
     Returns (update_data, remaining_text)."""
-    if "```charter-update" not in text:
+    if "```seed-update" not in text:
         return None, text
 
     try:
-        start = text.index("```charter-update") + len("```charter-update")
+        start = text.index("```seed-update") + len("```seed-update")
         end = text.index("```", start)
         update_json = text[start:end].strip()
         update_data = json.loads(update_json)
-        remaining = text[:text.index("```charter-update")] + text[end + 3:]
+        remaining = text[:text.index("```seed-update")] + text[end + 3:]
         return update_data, remaining
     except (ValueError, json.JSONDecodeError) as e:
-        logger.warning(f"Failed to parse charter update: {e}")
+        logger.warning(f"Failed to parse seed update: {e}")
         return None, text
 
 
@@ -1689,14 +1689,14 @@ def parse_suggestions(text: str) -> tuple[list[Suggestion], list[SuggestedStory]
 
 # --- Internal helpers ---
 
-def _update_charter_statuses(charter: Charter, validation: Validation) -> None:
-    """Update charter dimension statuses based on validation results."""
-    charter.coverage.status = _val_to_dim_status(validation.coverage)
-    charter.balance.status = _val_to_dim_status(validation.balance)
-    charter.rot.status = _val_to_dim_status(validation.rot)
+def _update_seed_statuses(seed: Seed, validation: Validation) -> None:
+    """Update seed dimension statuses based on validation results."""
+    seed.coverage.status = _val_to_dim_status(validation.coverage)
+    seed.balance.status = _val_to_dim_status(validation.balance)
+    seed.rot.status = _val_to_dim_status(validation.rot)
 
     for av in validation.alignment:
-        for ae in charter.alignment:
+        for ae in seed.alignment:
             if ae.feature_area == av.feature_area:
                 ae.status = _val_to_dim_status(av.status)
 

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Check, ChevronDown, ChevronUp } from 'lucide-react'
-type Screen = 'goals' | 'users' | 'stories' | 'charter' | 'dataset'
-type Phase = 'goals' | 'users' | 'stories' | 'charter' | 'dataset'
+type Screen = 'goals' | 'users' | 'stories' | 'seed' | 'dataset'
+type Phase = 'goals' | 'users' | 'stories' | 'seed' | 'dataset'
 
 interface Props {
   currentScreen: Screen
@@ -16,11 +16,11 @@ const STEPS: { screen: Screen; label: string; description: string }[] = [
   { screen: 'goals', label: 'Goals', description: 'Define the business goals your AI feature should achieve.' },
   { screen: 'users', label: 'Users', description: 'Identify the user types who will interact with this feature.' },
   { screen: 'stories', label: 'Stories', description: 'Describe what each user type needs to accomplish and why.' },
-  { screen: 'charter', label: 'Charter', description: 'Review and refine the evaluation criteria, quality rubric, and staleness triggers.' },
+  { screen: 'seed', label: 'Seed', description: 'Review and refine the evaluation criteria, quality rubric, and staleness triggers.' },
   { screen: 'dataset', label: 'Dataset', description: 'Build, review, and export your evaluation dataset.' },
 ]
 
-const ORDER: Screen[] = ['goals', 'users', 'stories', 'charter', 'dataset']
+const ORDER: Screen[] = ['goals', 'users', 'stories', 'seed', 'dataset']
 
 function getStepState(step: Screen, phase: Phase): 'upcoming' | 'active' | 'complete' {
   const phaseIndex = ORDER.indexOf(phase)

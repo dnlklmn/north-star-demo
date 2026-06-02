@@ -1,4 +1,4 @@
-"""FastAPI application — charter generation agent backend.
+"""FastAPI application — seed generation agent backend.
 
 Core endpoints:
 - GET  /sessions — list all sessions (project list)
@@ -8,8 +8,8 @@ Core endpoints:
 - PATCH /sessions/{id}/input — save goals/stories without running agent
 - POST /sessions/{id}/message — send a user message
 - POST /sessions/{id}/proceed — user-initiated proceed to review
-- PATCH /sessions/{id}/charter — user edits during review
-- POST /sessions/{id}/finalize — mark charter as final
+- PATCH /sessions/{id}/seed — user edits during review
+- POST /sessions/{id}/finalize — mark seed as final
 - GET  /sessions/{id}/turns — get all turns for a session
 - POST /judge/run — run judge scoring on unjudged turns
 - GET  /judge/results — get judgement results
@@ -64,7 +64,7 @@ from .models import (
     FetchSkillFromUrlRequest,
     FetchSkillFromUrlResponse,
     GithubSource,
-    PatchCharterRequest,
+    PatchSeedRequest,
     ProceedResponse,
     ProjectSummary,
     PromptTargetInfo,
@@ -82,8 +82,8 @@ from .models import (
     SetModeRequest,
     ShareTokenSummary,
     Settings,
-    SkillSeedRequest,
-    SkillSeedResponse,
+    SkillImportRequest,
+    SkillImportResponse,
     SkillVersion,
     SuggestGoalsRequest,
     SuggestGoalsResponse,
@@ -116,17 +116,17 @@ from .tools import (
     call_suggest_skill,
     call_generate_skill_from_goals,
     call_suggest_scorer_ideas,
-    call_validate_charter,
+    call_validate_seed,
     call_generate_suggestions,
     call_synthesize_examples,
-    call_retag_examples_against_charter,
+    call_retag_examples_against_seed,
     call_review_examples,
     call_generate_scorers,
     call_revise_examples,
     call_detect_schema,
     call_infer_schema,
     call_import_from_url,
-    call_skill_seed,
+    call_skill_import,
     set_request_api_key,
 )
 
@@ -206,7 +206,7 @@ async def _braintrust_trace_meta_middleware(request: Request, call_next):
     Every ``call_*`` tool inside the request — whether invoked through the
     agent or directly by a handler — picks this up when opening its
     Braintrust span. Agent-level wrappers in agent.py refine ``phase`` with
-    something more specific (goals/users/stories/charter/dataset) when known.
+    something more specific (goals/users/stories/seed/dataset) when known.
 
     Cheap when prod monitoring is off — set_trace_meta is a contextvar push.
     """
@@ -227,8 +227,8 @@ async def _braintrust_trace_meta_middleware(request: Request, call_next):
         phase = "dataset"
     elif "/generate-scorers" in path or "/scorers" in path:
         phase = "scorers"
-    elif "/skill-seed" in path:
-        phase = "charter"
+    elif "/skill-import" in path:
+        phase = "seed"
     elif "/suggest-improvements" in path or "/eval" in path:
         phase = "eval_feedback"
 
@@ -359,7 +359,7 @@ def _append_skill_version(
     candidate flow lets the user run an eval on the proposed body before
     committing, so a regressing change doesn't quietly become the new active.
 
-    Caller is responsible for also updating charter.task.skill_body if this
+    Caller is responsible for also updating seed.task.skill_body if this
     version should become the live body the next eval runs against.
     """
     from datetime import datetime, timezone
@@ -581,14 +581,14 @@ async def generate_skill_from_goals(
 
     name, description, stripped_body = _parse_skill_frontmatter(raw_body)
     # Persist on the session so reload + SSE refetches see the body. We
-    # store the stripped body so it matches the seedFromSkill convention
+    # store the stripped body so it matches the importFromSkill convention
     # (skill_body never carries frontmatter); name/description sit
     # alongside on the task object.
-    state.charter.task.skill_body = stripped_body
+    state.seed.task.skill_body = stripped_body
     if name:
-        state.charter.task.skill_name = name
+        state.seed.task.skill_name = name
     if description:
-        state.charter.task.skill_description = description
+        state.seed.task.skill_description = description
     await _save_state(session_id, state, conversation)
 
     try:
@@ -617,15 +617,15 @@ async def suggest_scorer_ideas(
     session_id: str,
     access: Access = Depends(resolve_access),
 ):
-    """Suggest NEW scorer ideas based on the session's charter + existing
+    """Suggest NEW scorer ideas based on the session's seed + existing
     scorers. Returns short pitches; the user later promotes interesting
     ones into real scorers via the existing generate-scorers flow."""
     require_writer(access)
     state, _ = await _load_state(session_id)
-    charter = state.charter.model_dump() if state.charter else {}
+    seed = state.seed.model_dump() if state.seed else {}
     existing = state.scorers or []
     try:
-        suggestions, call_meta = await call_suggest_scorer_ideas(charter, existing)
+        suggestions, call_meta = await call_suggest_scorer_ideas(seed, existing)
     except Exception as e:
         logger.exception("Failed to suggest scorer ideas")
         raise HTTPException(status_code=500, detail=str(e))
@@ -692,7 +692,7 @@ async def list_sessions():
             created_at=r["created_at"],
             updated_at=r["updated_at"],
             agent_status=r["agent_status"],
-            has_charter=r.get("has_charter", False),
+            has_seed=r.get("has_seed", False),
             has_dataset=r.get("has_dataset", False),
             kind=r.get("kind", "skill"),
             prompt_target=r.get("prompt_target"),
@@ -762,60 +762,60 @@ async def set_session_mode(
     return {"eval_mode": state.eval_mode.value, "state": state.model_dump()}
 
 
-@app.post("/sessions/{session_id}/skill-seed", response_model=SkillSeedResponse)
-async def seed_from_skill(
+@app.post("/sessions/{session_id}/skill-import", response_model=SkillImportResponse)
+async def import_from_skill(
     session_id: str,
-    req: SkillSeedRequest,
+    req: SkillImportRequest,
     access: Access = Depends(resolve_access),
 ):
     """Seed goals/users/stories/task from a pasted SKILL.md body.
 
     Switches the session to triggered mode and populates extracted state. The
-    user can review and edit before the charter is generated.
+    user can review and edit before the seed is generated.
     """
     require_writer(access)
     state, conversation = await _load_state(session_id)
 
     # Idempotency: if this session already has a seed version pointing at
     # the same body, skip the whole flow. The user shows up here twice
-    # when they retry a stuck request, when /skill-seed double-fires from
+    # when they retry a stuck request, when /skill-import double-fires from
     # the home-page modal, or when an SSE reconnect re-issues the POST.
     # Without this guard, every retry re-runs the LLM AND appends another
-    # v2/v3/etc. with `created_from="seed"` — exactly the duplicate-v1
+    # v2/v3/etc. with `created_from="import"` — exactly the duplicate-v1
     # the user reported.
-    existing_seed = next(
+    existing_import = next(
         (
             v for v in state.skill_versions
-            if v.get("created_from") == "seed" and (v.get("body") or "") == (req.skill_body or "")
+            if v.get("created_from") == "import" and (v.get("body") or "") == (req.skill_body or "")
         ),
         None,
     )
-    if existing_seed is not None:
+    if existing_import is not None:
         # Frontend reads `state` to repopulate goals/users/stories on the
         # success path. Returning the in-memory state here matches that
         # shape, so the second-call client gets the same payload as the
         # first-call client without re-running the LLM or appending a
         # duplicate v1.
-        return SkillSeedResponse(
+        return SkillImportResponse(
             state=state,
             message="Skill already seeded; returning the existing snapshot.",
         )
 
-    data, call_meta = await call_skill_seed(
+    data, call_meta = await call_skill_import(
         req.skill_body, req.skill_name, req.skill_description,
     )
 
     # Switch to triggered mode and stamp skill metadata onto the task def.
     state.eval_mode = EvalMode.triggered
-    state.charter.task.skill_name = req.skill_name or state.charter.task.skill_name
-    state.charter.task.skill_description = req.skill_description or state.charter.task.skill_description
-    state.charter.task.skill_body = req.skill_body
+    state.seed.task.skill_name = req.skill_name or state.seed.task.skill_name
+    state.seed.task.skill_description = req.skill_description or state.seed.task.skill_description
+    state.seed.task.skill_body = req.skill_body
 
     # Snapshot this seeded body as v1 so we can diff against future edits.
     _append_skill_version(
         state,
         body=req.skill_body,
-        created_from="seed",
+        created_from="import",
         notes="Seeded from SKILL.md paste.",
     )
     # Stamp lineage so the UI knows these artifacts were generated against v1.
@@ -823,13 +823,13 @@ async def seed_from_skill(
 
     task_data = data.get("task") or {}
     if task_data.get("input_description"):
-        state.charter.task.input_description = task_data["input_description"]
+        state.seed.task.input_description = task_data["input_description"]
     if task_data.get("output_description"):
-        state.charter.task.output_description = task_data["output_description"]
+        state.seed.task.output_description = task_data["output_description"]
     if task_data.get("sample_input"):
-        state.charter.task.sample_input = task_data["sample_input"]
+        state.seed.task.sample_input = task_data["sample_input"]
     if task_data.get("sample_output"):
-        state.charter.task.sample_output = task_data["sample_output"]
+        state.seed.task.sample_output = task_data["sample_output"]
 
     # Populate extracted state — dedup against any existing entries.
     goals_lower = {g.lower() for g in state.extracted_goals}
@@ -863,7 +863,7 @@ async def seed_from_skill(
 
     # Mirror extracted state into the structured input fields the UI reads.
     # Without this, the Goals/Users/Stories panels render empty after seeding
-    # even though skill-seed successfully pulled everything out of the SKILL.md.
+    # even though skill-import successfully pulled everything out of the SKILL.md.
     state.input.goals = list(state.extracted_goals)
     role_to_stories: dict[str, list[dict]] = {}
     for s in state.extracted_stories:
@@ -885,7 +885,7 @@ async def seed_from_skill(
 
     await db.create_turn(
         session_id=session_id,
-        turn_type="skill_seed",
+        turn_type="skill_import",
         # Keep the full SKILL.md body so prompt-eval can replay this turn.
         # Storing only `_len` (the prior shape) saved bytes but made the turn
         # unsamplable as a dataset row — the body is the input.
@@ -898,7 +898,7 @@ async def seed_from_skill(
         parsed_output=data,
     )
 
-    return SkillSeedResponse(
+    return SkillImportResponse(
         state=state,
         message=data.get("summary") or "Seeded from SKILL.md. Review goals/users/stories and advance when ready.",
     )
@@ -969,7 +969,7 @@ async def _sample_and_build_example_rows(
     for t in deduped:
         snap = t.get("input_snapshot") or {}
         # Historical agent_message lives on the turn but generate-style turns
-        # store the produced charter under parsed_output instead. Capture
+        # store the produced seed under parsed_output instead. Capture
         # whichever is present so the user can see what was produced before
         # — useful as a comparison even when scorers are reference-free.
         historical = t.get("agent_message") or ""
@@ -997,9 +997,9 @@ async def create_prompt_eval_session(req: CreatePromptEvalRequest):
 
     Creates a kind='prompt' session that mirrors a regular skill-eval workspace:
     a synthetic SKILL.md describing the prompt under test seeds goals/users/
-    stories via call_skill_seed; sampled turns of that prompt's turn_type land
+    stories via call_skill_import; sampled turns of that prompt's turn_type land
     in the dataset. The user reviews + advances through Goals → Users →
-    Charter → Scorers → Evaluate exactly like a skill eval. The eval runner
+    Seed → Scorers → Evaluate exactly like a skill eval. The eval runner
     diverges only at task time — instead of running skill_body as a system
     prompt, it rebuilds SessionState and re-invokes the prompt builder.
     """
@@ -1031,18 +1031,18 @@ async def create_prompt_eval_session(req: CreatePromptEvalRequest):
     )
     # User can paste/edit the prompt body in the create modal. When they do,
     # use that text for the seed pass + Skill panel. None / empty = registered.
-    seed_body = (req.prompt_body or "").strip() or pt.prompt_text
+    import_body = (req.prompt_body or "").strip() or pt.prompt_text
 
-    state.charter.task.skill_name = pt.label
-    state.charter.task.skill_description = pt.description
-    state.charter.task.skill_body = seed_body
+    state.seed.task.skill_name = pt.label
+    state.seed.task.skill_description = pt.description
+    state.seed.task.skill_body = import_body
 
     # Snapshot the prompt text as v1 so lineage banners + version diff
     # infrastructure work the same as in a regular skill eval.
     _append_skill_version(
         state,
-        body=seed_body,
-        created_from="seed",
+        body=import_body,
+        created_from="import",
         notes=f"Initial render of {pt.builder_name} with placeholder variables.",
     )
     _stamp_lineage(state, "goals", "users", "stories")
@@ -1050,47 +1050,47 @@ async def create_prompt_eval_session(req: CreatePromptEvalRequest):
     name = req.name or f"Prompt eval — {pt.label}"
     await db.create_session(session_id, state.model_dump(), name=name)
 
-    # Feed the rendered prompt straight into the skill-seed pipeline. This is
+    # Feed the rendered prompt straight into the skill-import pipeline. This is
     # the same LLM call the SKILL.md-paste flow makes — the only difference is
     # the body is the actual prompt under test, not a SKILL.md. ~5–15s but
     # gives us populated goals/users/stories instead of an empty workspace.
     try:
-        seed_data, seed_calls = await call_skill_seed(
-            seed_body, pt.label, pt.description,
+        import_data, import_calls = await call_skill_import(
+            import_body, pt.label, pt.description,
         )
     except Exception:  # noqa: BLE001
-        seed_data, seed_calls = {}, []
+        import_data, import_calls = {}, []
 
-    seed_task = seed_data.get("task") or {}
-    if seed_task.get("input_description"):
-        state.charter.task.input_description = seed_task["input_description"]
-    if seed_task.get("output_description"):
-        state.charter.task.output_description = seed_task["output_description"]
-    if seed_task.get("sample_input"):
-        state.charter.task.sample_input = seed_task["sample_input"]
-    if seed_task.get("sample_output"):
-        state.charter.task.sample_output = seed_task["sample_output"]
+    import_task = import_data.get("task") or {}
+    if import_task.get("input_description"):
+        state.seed.task.input_description = import_task["input_description"]
+    if import_task.get("output_description"):
+        state.seed.task.output_description = import_task["output_description"]
+    if import_task.get("sample_input"):
+        state.seed.task.sample_input = import_task["sample_input"]
+    if import_task.get("sample_output"):
+        state.seed.task.sample_output = import_task["sample_output"]
 
     goals_lower: set[str] = set()
-    for g in seed_data.get("goals", []) or []:
+    for g in import_data.get("goals", []) or []:
         if g and g.lower() not in goals_lower:
             state.extracted_goals.append(g)
             goals_lower.add(g.lower())
 
     users_lower: set[str] = set()
-    for u in seed_data.get("users", []) or []:
+    for u in import_data.get("users", []) or []:
         if u and u.lower() not in users_lower:
             state.extracted_users.append(u)
             users_lower.add(u.lower())
 
     story_keys: set[tuple[str, str]] = set()
-    for s in seed_data.get("positive_stories", []) or []:
+    for s in import_data.get("positive_stories", []) or []:
         if s.get("who") and s.get("what"):
             key = (s["who"].lower(), s["what"].lower().strip()[:40])
             if key not in story_keys:
                 state.extracted_stories.append({**s, "kind": "positive"})
                 story_keys.add(key)
-    for s in seed_data.get("off_target_stories", []) or []:
+    for s in import_data.get("off_target_stories", []) or []:
         if s.get("who") and s.get("what"):
             key = (s["who"].lower(), s["what"].lower().strip()[:40])
             if key not in story_keys:
@@ -1114,8 +1114,8 @@ async def create_prompt_eval_session(req: CreatePromptEvalRequest):
     ]
 
     # Also populate the free-form text fields that build_generate_draft_prompt
-    # reads from. Without this, "Generate charter" sees an empty input and
-    # produces an empty charter, which then breaks gap analysis downstream.
+    # reads from. Without this, "Generate seed" sees an empty input and
+    # produces an empty seed, which then breaks gap analysis downstream.
     # Mirrors agent._build_input_from_extractions exactly.
     if state.extracted_goals:
         state.input.business_goals = "\n".join(f"- {g}" for g in state.extracted_goals)
@@ -1130,18 +1130,18 @@ async def create_prompt_eval_session(req: CreatePromptEvalRequest):
 
     await _save_state(session_id, state, [])
 
-    if seed_calls:
+    if import_calls:
         await db.create_turn(
             session_id=session_id,
-            turn_type="skill_seed",
+            turn_type="skill_import",
             # Persist the full prompt body, not just length — prompt-eval
             # samples this snapshot as a dataset row and needs to replay it.
             input_snapshot={
                 "prompt_target": req.prompt_target,
-                "skill_body": seed_body,
+                "skill_body": import_body,
             },
-            llm_calls=seed_calls,
-            parsed_output=seed_data,
+            llm_calls=import_calls,
+            parsed_output=import_data,
         )
 
     # Sample turns + build example rows. Excluding self is moot at create
@@ -1156,7 +1156,7 @@ async def create_prompt_eval_session(req: CreatePromptEvalRequest):
     dataset = await db.create_dataset(
         session_id=session_id,
         name=f"{pt.label} — sampled turns",
-        charter_snapshot={},
+        seed_snapshot={},
     )
 
     if example_rows:
@@ -1172,7 +1172,7 @@ async def create_prompt_eval_session(req: CreatePromptEvalRequest):
         message=(
             f"Seeded goals/users/stories from synthetic description, sampled "
             f"{rows_sampled} turns, deduped to {rows_deduped}. Generate the "
-            f"charter and scorers next."
+            f"seed and scorers next."
         ),
     )
 
@@ -1185,7 +1185,7 @@ async def refresh_prompt_eval_dataset(session_id: str, req: RefreshDatasetReques
     creation goes stale as new production turns accumulate. This endpoint
     wipes the existing examples and replaces them with a fresh sample —
     the same logic ``create_prompt_eval_session`` uses, so a refresh is
-    indistinguishable from a re-spawn except it preserves the charter,
+    indistinguishable from a re-spawn except it preserves the seed,
     scorers, and any other downstream work attached to the session.
 
     **DESTRUCTIVE on user curation.** Any per-example labels, review
@@ -1293,7 +1293,7 @@ async def update_session_scorers(
 # Generated scorers land in backend/app/scorers/generated/<scope>/<name>.py
 # so they can be committed, diffed in PRs, and pushed to Braintrust by CI.
 # Scope keeps scorer-name collisions across prompt-eval targets (and skill
-# sessions) from overwriting each other — `completeness` from skill_seed
+# sessions) from overwriting each other — `completeness` from skill_import
 # and `completeness` from suggest_goals are different scorers.
 _GENERATED_SCORERS_DIR = Path(__file__).parent / "scorers" / "generated"
 
@@ -1413,33 +1413,33 @@ def _export_generated_scorers(state: SessionState, scorers: list[dict]) -> int:
 UNMAPPED_FEATURE_AREA = "(unmapped)"
 
 
-def _normalize_synthesized_coverage_tags(generated: list[dict], charter: dict) -> tuple[int, int]:
-    """Snap each synthesized row's `coverage_tags` to canonical charter
+def _normalize_synthesized_coverage_tags(generated: list[dict], seed: dict) -> tuple[int, int]:
+    """Snap each synthesized row's `coverage_tags` to canonical seed
     coverage criteria using the same fuzzy resolver as the coverage matrix.
 
     Why: the matrix in `_build_coverage_matrix` already fuzzy-matches tags at
     read time, but downstream consumers (filters, exports, eval gating, the
     sidebar's "Row covers" list) compare raw strings. Without snapping at
     write time, a row whose LLM paraphrased a criterion ("FAQ-style
-    responses" vs charter's "FAQ responses") shows the LLM's wording
+    responses" vs seed's "FAQ responses") shows the LLM's wording
     everywhere except the coverage matrix — inconsistent and confusing.
 
     Per-tag behavior:
-      1. exact match against a charter criterion → keep as-is.
+      1. exact match against a seed criterion → keep as-is.
       2. fuzzy resolve (>=12-char shared normalized prefix) → snap to the
          canonical form.
       3. otherwise → leave the tag alone. We don't drop unknowns: the LLM
-         occasionally adds useful descriptors the charter hasn't named yet,
+         occasionally adds useful descriptors the seed hasn't named yet,
          and the matrix will simply not credit them — same outcome as before
          this snap existed.
 
     Returns (tags_snapped, tags_left_alone). Both are useful for warning
     logs: lots of snaps means the LLM is paraphrasing the criteria; lots of
-    "left alone" means it's inventing categories not in the charter.
+    "left alone" means it's inventing categories not in the seed.
     """
-    from .prompt import _resolve_charter_string
+    from .prompt import _resolve_seed_string
 
-    coverage = (charter.get("coverage") or {}).get("criteria") or []
+    coverage = (seed.get("coverage") or {}).get("criteria") or []
     if not coverage:
         return 0, 0
     canonical_lookup = {c.casefold().strip(): c for c in coverage if isinstance(c, str)}
@@ -1465,7 +1465,7 @@ def _normalize_synthesized_coverage_tags(generated: list[dict], charter: dict) -
                 new_tags.append(exact)
                 snapped_total += 1
                 continue
-            fuzzy = _resolve_charter_string(tag, coverage)
+            fuzzy = _resolve_seed_string(tag, coverage)
             if fuzzy is not None:
                 new_tags.append(fuzzy)
                 snapped_total += 1
@@ -1485,11 +1485,11 @@ def _normalize_synthesized_coverage_tags(generated: list[dict], charter: dict) -
     return snapped_total, unmapped_total
 
 
-def _normalize_synthesized_feature_areas(generated: list[dict], charter: dict) -> int:
+def _normalize_synthesized_feature_areas(generated: list[dict], seed: dict) -> int:
     """Snap each synthesized row's `feature_area` to a known alignment entry,
     or to ``UNMAPPED_FEATURE_AREA`` when it doesn't match any.
 
-    Why: scorer gating compares row.feature_area to charter.alignment[*].
+    Why: scorer gating compares row.feature_area to seed.alignment[*].
     feature_area exactly. If the LLM emits a paraphrased or wrong-dimension
     string (a common synthesis bug — confusing alignment with coverage),
     the row's alignment scorers all silently gate out and the row scores
@@ -1507,12 +1507,12 @@ def _normalize_synthesized_feature_areas(generated: list[dict], charter: dict) -
     """
     alignment_areas = [
         a.get("feature_area", "")
-        for a in (charter.get("alignment") or [])
+        for a in (seed.get("alignment") or [])
         if isinstance(a, dict) and a.get("feature_area")
     ]
     if not alignment_areas:
         # No alignment dimensions defined → nothing to snap to. Leave rows
-        # alone so the user can decide whether to flesh out the charter.
+        # alone so the user can decide whether to flesh out the seed.
         return 0
     canonical = {a.casefold().strip(): a for a in alignment_areas}
     unmapped_count = 0
@@ -1541,34 +1541,34 @@ def _normalize_synthesized_feature_areas(generated: list[dict], charter: dict) -
 
 def _slugify_for_scorer_match(text: str) -> str:
     """Lowercase + strip non-alphanumerics. Used to match a generated scorer
-    name against the charter entry it grades, when the LLM-emitted
+    name against the seed entry it grades, when the LLM-emitted
     `target_tag` is missing or malformed.
 
-    Why this exists: the gating runner needs the EXACT charter text to
+    Why this exists: the gating runner needs the EXACT seed text to
     filter rows, but the LLM that emits scorers occasionally drops the
     `target_tag` field. The scorer name itself (e.g. `coverage_3p_updates`)
     is a slug of the criterion text the LLM picked, so we can recover the
-    gate by slugifying every charter entry the same way and finding the
+    gate by slugifying every seed entry the same way and finding the
     one whose slug appears in the scorer name.
     """
     return re.sub(r"[^a-z0-9]+", "", text.lower())
 
 
-def _ensure_scorer_target_tags(scorers: list[dict], charter: dict) -> None:
+def _ensure_scorer_target_tags(scorers: list[dict], seed: dict) -> None:
     """Mutate `scorers` in place: backfill missing target_tag fields by
-    slug-matching each scorer's name against charter entries.
+    slug-matching each scorer's name against seed entries.
 
     Coverage scorers map to `coverage.criteria` strings; alignment scorers
     map to `alignment[i].feature_area` strings. Safety scorers don't gate
-    so they're left alone. If we can't find a charter entry whose slug
+    so they're left alone. If we can't find a seed entry whose slug
     appears in the scorer name, we leave target_tag as None and the runner
     falls back to ungated execution with a stderr warning — same behavior
     as legacy sessions that pre-date the field, so nothing breaks.
     """
-    coverage_criteria = list(charter.get("coverage", {}).get("criteria") or [])
+    coverage_criteria = list(seed.get("coverage", {}).get("criteria") or [])
     alignment_areas = [
         a.get("feature_area", "")
-        for a in (charter.get("alignment") or [])
+        for a in (seed.get("alignment") or [])
         if isinstance(a, dict) and a.get("feature_area")
     ]
 
@@ -1590,8 +1590,8 @@ def _ensure_scorer_target_tags(scorers: list[dict], charter: dict) -> None:
         candidates = coverage_slugs if scorer_type == "coverage" else alignment_slugs
         # Pick the longest slug that appears in the scorer name. Longer
         # wins so ambiguous prefixes (e.g. "3p" vs "3p_update") resolve to
-        # the more specific charter entry; ties fall through to the first
-        # match in charter order.
+        # the more specific seed entry; ties fall through to the first
+        # match in seed order.
         best: tuple[str, str] | None = None
         for original, slug in candidates:
             if not slug or slug not in name_slug:
@@ -1612,9 +1612,9 @@ def _agent_contract_for_session(state: SessionState) -> str | None:
       * seeded a triggered skill-eval project from a SKILL.md (skill_body
         set at seeding time, gates the rest of the workspace),
       * walked through chat/discovery — in which case there is no separate
-        agent prompt at all and the charter IS the contract. We return None
+        agent prompt at all and the seed IS the contract. We return None
         and the scorer-generation prompt omits the section, falling back to
-        the historic charter-only behavior for that one mode.
+        the historic seed-only behavior for that one mode.
 
     Branches are dispatched on ``state.kind`` exclusively, not on the
     presence of skill_body — prompt-eval sessions seed a synthetic
@@ -1624,8 +1624,8 @@ def _agent_contract_for_session(state: SessionState) -> str | None:
     if state.kind == SessionKind.prompt:
         target = get_prompt_target(state.prompt_target) if state.prompt_target else None
         return target.prompt_text if target else None
-    if state.kind == SessionKind.skill and state.charter.task.skill_body:
-        return state.charter.task.skill_body
+    if state.kind == SessionKind.skill and state.seed.task.skill_body:
+        return state.seed.task.skill_body
     return None
 
 
@@ -1634,7 +1634,7 @@ async def generate_scorers_endpoint(
     session_id: str,
     access: Access = Depends(resolve_access),
 ):
-    """Generate evaluation scorers from charter via LLM.
+    """Generate evaluation scorers from seed via LLM.
 
     Writes each generated scorer to ``backend/app/scorers/generated/<scope>/``
     as a side effect — gives downstream CI / `braintrust push` a canonical
@@ -1643,26 +1643,26 @@ async def generate_scorers_endpoint(
     the versioned one. File-write failures don't block the response.
 
     The agent contract (the prompt / SKILL.md the scorers will grade outputs
-    of) is passed alongside the charter so the LLM doesn't fabricate criteria
+    of) is passed alongside the seed so the LLM doesn't fabricate criteria
     the agent can't satisfy — see build_generate_scorers_prompt's docstring.
     """
     require_writer(access)
     state, conversation = await _load_state(session_id)
-    charter = state.charter.model_dump()
+    seed = state.seed.model_dump()
     agent_contract = _agent_contract_for_session(state)
-    scorers, call_meta = await call_generate_scorers(charter, agent_contract=agent_contract)
+    scorers, call_meta = await call_generate_scorers(seed, agent_contract=agent_contract)
     # Backstop for the LLM occasionally forgetting `target_tag`. Each
-    # scorer maps 1:1 to a charter entry; we can recover the gate from
+    # scorer maps 1:1 to a seed entry; we can recover the gate from
     # the scorer name alone — no LLM judgment, just slug matching against
-    # the charter we know.
-    _ensure_scorer_target_tags(scorers, charter)
+    # the seed we know.
+    _ensure_scorer_target_tags(scorers, seed)
     state.scorers = scorers
     _stamp_lineage(state, "scorers")
     await _save_state(session_id, state, conversation)
     await db.create_turn(
         session_id=session_id,
         turn_type="generate_scorers",
-        input_snapshot={"charter": charter},
+        input_snapshot={"seed": seed},
         llm_calls=call_meta,
         parsed_output={"scorers": scorers},
     )
@@ -1947,9 +1947,9 @@ async def metrics():
 _RETAG_IN_FLIGHT: set[str] = set()
 
 
-async def _retag_dataset_after_charter(session_id: str, charter: dict) -> None:
+async def _retag_dataset_after_seed(session_id: str, seed: dict) -> None:
     """Background: re-tag a prompt-eval dataset against a freshly-generated
-    charter so the Coverage Map matrix lines up with the charter's axes.
+    seed so the Coverage Map matrix lines up with the seed's axes.
 
     Safe to fire-and-forget — failures are logged but don't surface to the
     user. The user can also re-run manually via the dataset endpoint.
@@ -1967,22 +1967,22 @@ async def _retag_dataset_after_charter(session_id: str, charter: dict) -> None:
         dataset = await db.get_dataset_by_session(session_id)
         if dataset is None:
             return
-        # Refresh the charter_snapshot first — gap_analysis and scorers read
+        # Refresh the seed_snapshot first — gap_analysis and scorers read
         # from there, and it was set to {} at session-create time (before the
-        # charter existed).
-        await db.update_dataset_charter_snapshot(dataset["id"], charter)
+        # seed existed).
+        await db.update_dataset_seed_snapshot(dataset["id"], seed)
         examples = await db.get_examples(dataset["id"])
         if not examples:
             return
         batch_size = 10
         for i in range(0, len(examples), batch_size):
             batch = examples[i:i + batch_size]
-            retags, call_meta = await call_retag_examples_against_charter(charter, batch)
+            retags, call_meta = await call_retag_examples_against_seed(seed, batch)
             # Apply the same canonical-snap passes as synth so the retag
-            # writes consistent charter strings even when the LLM
+            # writes consistent seed strings even when the LLM
             # paraphrased.
-            _normalize_synthesized_feature_areas(retags, charter)
-            _normalize_synthesized_coverage_tags(retags, charter)
+            _normalize_synthesized_feature_areas(retags, seed)
+            _normalize_synthesized_coverage_tags(retags, seed)
             for r in retags:
                 eid = r.get("example_id")
                 if not eid:
@@ -1999,13 +1999,13 @@ async def _retag_dataset_after_charter(session_id: str, charter: dict) -> None:
             await db.create_turn(
                 session_id=session_id,
                 turn_type="retag",
-                input_snapshot={"charter": charter, "example_count": len(batch), "auto": True},
+                input_snapshot={"seed": seed, "example_count": len(batch), "auto": True},
                 llm_calls=call_meta,
                 parsed_output={"retags": retags},
             )
         await db.update_dataset_stats(dataset["id"])
     except Exception:  # noqa: BLE001
-        logger.exception("Auto-retag after charter generation failed for session %s", session_id)
+        logger.exception("Auto-retag after seed generation failed for session %s", session_id)
     finally:
         _RETAG_IN_FLIGHT.discard(session_id)
 
@@ -2036,14 +2036,14 @@ async def send_message(
         )
 
         # For prompt-eval projects: when the agent just generated a fresh
-        # charter, re-tag the dataset (sampled from `turns`) against the
-        # charter's axes so the Coverage Map matrix becomes meaningful.
+        # seed, re-tag the dataset (sampled from `turns`) against the
+        # seed's axes so the Coverage Map matrix becomes meaningful.
         # Fire-and-forget so we don't add 5–15s to the message turn — the
         # user can refresh the dataset to see updated tags, or trigger
         # manually via the retag endpoint.
         if state.kind == SessionKind.prompt and "generate_draft" in result.tool_calls:
             asyncio.create_task(
-                _retag_dataset_after_charter(session_id, state.charter.model_dump())
+                _retag_dataset_after_seed(session_id, state.seed.model_dump())
             )
 
         return SendMessageResponse(
@@ -2101,25 +2101,25 @@ async def get_session(
     }
 
 
-@app.patch("/sessions/{session_id}/charter")
-async def patch_charter(
+@app.patch("/sessions/{session_id}/seed")
+async def patch_seed(
     session_id: str,
-    req: PatchCharterRequest,
+    req: PatchSeedRequest,
     access: Access = Depends(resolve_access),
 ):
     require_writer(access)
     state, conversation = await _load_state(session_id)
 
     if req.coverage is not None:
-        state.charter.coverage = req.coverage
+        state.seed.coverage = req.coverage
     if req.balance is not None:
-        state.charter.balance = req.balance
+        state.seed.balance = req.balance
     if req.alignment is not None:
-        state.charter.alignment = req.alignment
+        state.seed.alignment = req.alignment
     if req.rot is not None:
-        state.charter.rot = req.rot
+        state.seed.rot = req.rot
     if req.safety is not None:
-        state.charter.safety = req.safety
+        state.seed.safety = req.safety
 
     await _save_state(session_id, state, conversation)
 
@@ -2127,15 +2127,15 @@ async def patch_charter(
 
 
 @app.post("/sessions/{session_id}/validate", response_model=ValidateResponse)
-async def validate_charter(
+async def validate_seed(
     session_id: str,
     access: Access = Depends(resolve_access),
 ):
-    """Run validation on the current charter and return results."""
+    """Run validation on the current seed and return results."""
     require_writer(access)
     state, conversation = await _load_state(session_id)
 
-    validation, call_meta = await call_validate_charter(state)
+    validation, call_meta = await call_validate_seed(state)
     state.validation = validation
 
     await _save_state(session_id, state, conversation)
@@ -2144,7 +2144,7 @@ async def validate_charter(
     await db.create_turn(
         session_id=session_id,
         turn_type="validate",
-        input_snapshot=state.charter.model_dump(),
+        input_snapshot=state.seed.model_dump(),
         llm_calls=call_meta,
         parsed_output=validation.model_dump(),
     )
@@ -2153,11 +2153,11 @@ async def validate_charter(
 
 
 @app.post("/sessions/{session_id}/suggest", response_model=SuggestResponse)
-async def suggest_for_charter(
+async def suggest_for_seed(
     session_id: str,
     access: Access = Depends(resolve_access),
 ):
-    """Generate suggestions for weak/empty charter sections."""
+    """Generate suggestions for weak/empty seed sections."""
     require_writer(access)
     state, conversation = await _load_state(session_id)
 
@@ -2167,7 +2167,7 @@ async def suggest_for_charter(
     await db.create_turn(
         session_id=session_id,
         turn_type="suggest",
-        input_snapshot=state.charter.model_dump(),
+        input_snapshot=state.seed.model_dump(),
         llm_calls=call_meta,
         parsed_output={"suggestions": [s.model_dump() for s in suggestions], "stories": [s.model_dump() for s in stories]},
     )
@@ -2201,25 +2201,25 @@ async def finalize_session(
                 "reason": av.weak_reason,
             })
 
-    # Create charter record
-    charter_row = await db.create_charter(
+    # Create seed record
+    seed_row = await db.create_seed(
         session_id=session_id,
-        charter=state.charter.model_dump(),
+        seed=state.seed.model_dump(),
         weak_criteria=weak_criteria,
     )
 
     # Finalize it
-    await db.finalize_charter(charter_row["id"])
+    await db.finalize_seed(seed_row["id"])
 
-    _stamp_lineage(state, "charter")
+    _stamp_lineage(state, "seed")
 
     state.agent_status = AgentStatus.review
     await _save_state(session_id, state, conversation)
 
     return FinalizeResponse(
-        charter_id=charter_row["id"],
+        seed_id=seed_row["id"],
         session_id=session_id,
-        charter=state.charter,
+        seed=state.seed,
     )
 
 
@@ -2242,7 +2242,7 @@ def _summarize_turn(turn_type: str, parsed_output: dict | None) -> str | None:
         balance = len(parsed_output.get("balance", {}).get("criteria", []) or [])
         rot = len(parsed_output.get("rot", {}).get("criteria", []) or [])
         return (
-            f"Drafted charter · {coverage} coverage, {balance} balance, "
+            f"Drafted seed · {coverage} coverage, {balance} balance, "
             f"{alignment} alignment, {rot} rot"
         )
 
@@ -2435,12 +2435,12 @@ def _build_judge_prompt(turn: dict) -> str:
     agent_message = turn.get("agent_message")
 
     if turn_type == "generate":
-        return f"""You are a judge evaluating a charter generation agent. The agent was given user input and generated a charter draft.
+        return f"""You are a judge evaluating a seed generation agent. The agent was given user input and generated a seed draft.
 
 User input:
 {json.dumps(input_snapshot, indent=2)}
 
-Agent's generated charter:
+Agent's generated seed:
 {json.dumps(parsed_output, indent=2)}
 
 Score the agent on these dimensions (0.0 to 1.0):
@@ -2453,9 +2453,9 @@ Return ONLY JSON:
 {{"scores": {{"specificity": 0.0, "traceability": 0.0, "completeness": 0.0, "conciseness": 0.0}}, "reasoning": "brief explanation"}}"""
 
     elif turn_type == "validate":
-        return f"""You are a judge evaluating a charter validation step. The agent validated a charter and assigned pass/weak/fail statuses.
+        return f"""You are a judge evaluating a seed validation step. The agent validated a seed and assigned pass/weak/fail statuses.
 
-Charter being validated:
+Seed being validated:
 {json.dumps(input_snapshot, indent=2)}
 
 Validation result:
@@ -2470,7 +2470,7 @@ Return ONLY JSON:
 {{"scores": {{"accuracy": 0.0, "strictness": 0.0, "actionability": 0.0}}, "reasoning": "brief explanation"}}"""
 
     elif turn_type == "chat":
-        return f"""You are a judge evaluating a conversational turn from a charter-building agent.
+        return f"""You are a judge evaluating a conversational turn from a seed-building agent.
 
 Context:
 {json.dumps(input_snapshot, indent=2)}
@@ -2478,19 +2478,19 @@ Context:
 Agent's message to user:
 {agent_message or "(no message)"}
 
-Charter update applied: {json.dumps(parsed_output) if parsed_output else "None"}
+Seed update applied: {json.dumps(parsed_output) if parsed_output else "None"}
 
 Score the agent on these dimensions (0.0 to 1.0):
 - **relevance**: Does the response address what the user said?
 - **brevity**: Is the response concise and scannable?
 - **question_quality**: Are follow-up questions specific and useful?
-- **update_accuracy**: If a charter update was made, is it correct and minimal?
+- **update_accuracy**: If a seed update was made, is it correct and minimal?
 
 Return ONLY JSON:
 {{"scores": {{"relevance": 0.0, "brevity": 0.0, "question_quality": 0.0, "update_accuracy": 0.0}}, "reasoning": "brief explanation"}}"""
 
     elif turn_type == "suggest":
-        return f"""You are a judge evaluating suggestion generation from a charter-building agent.
+        return f"""You are a judge evaluating suggestion generation from a seed-building agent.
 
 Context:
 {json.dumps(input_snapshot, indent=2)}
@@ -2526,15 +2526,15 @@ async def create_dataset(
     req: CreateDatasetRequest,
     access: Access = Depends(resolve_access),
 ):
-    """Create a dataset for this session's charter."""
+    """Create a dataset for this session's seed."""
     require_writer(access)
     state, _ = await _load_state(session_id)
-    charter_snapshot = state.charter.model_dump()
+    seed_snapshot = state.seed.model_dump()
 
     dataset = await db.create_dataset(
         session_id=session_id,
         name=req.name or f"Dataset for {session_id[:8]}",
-        charter_snapshot=charter_snapshot,
+        seed_snapshot=seed_snapshot,
     )
     return dataset
 
@@ -2575,9 +2575,9 @@ async def create_dataset_version(
         raise HTTPException(status_code=404, detail="Dataset not found")
 
     state, _ = await _load_state(dataset["session_id"])
-    charter_snapshot = state.charter.model_dump()
+    seed_snapshot = state.seed.model_dump()
 
-    new_version = await db.create_dataset_version(dataset_id, charter_snapshot)
+    new_version = await db.create_dataset_version(dataset_id, seed_snapshot)
     return new_version
 
 
@@ -2622,7 +2622,7 @@ async def synthesize_examples(
     req: SynthesizeRequest,
     access: Access = Depends(resolve_dataset_access),
 ):
-    """Generate synthetic examples from the charter.
+    """Generate synthetic examples from the seed.
 
     Rows persist per-cell (rather than one bulk insert at the end) so each
     cell completion publishes a `synth_progress` SSE event with the running
@@ -2634,7 +2634,7 @@ async def synthesize_examples(
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    charter = dataset["charter_snapshot"]
+    seed = dataset["seed_snapshot"]
     session_id = dataset["session_id"]
 
     # Compute the cell total upfront so progress events have a denominator
@@ -2642,11 +2642,11 @@ async def synthesize_examples(
     # call_synthesize_examples — keep the two heuristics aligned.
     target_areas = req.feature_areas or [
         a.get("feature_area", "")
-        for a in (charter.get("alignment") or [])
+        for a in (seed.get("alignment") or [])
     ]
     target_areas = [a for a in target_areas if a]
     target_coverage = req.coverage_criteria or (
-        (charter.get("coverage") or {}).get("criteria") or []
+        (seed.get("coverage") or {}).get("criteria") or []
     )
     target_coverage = [c for c in target_coverage if c]
     cell_count = len(target_areas) * len(target_coverage)
@@ -2683,20 +2683,20 @@ async def synthesize_examples(
         # persisting. Per-cell synth makes this still a per-cell concern
         # (each cell can independently emit a coverage-name-in-alignment-
         # slot row); doing it here keeps the snap close to the LLM output.
-        unmapped = _normalize_synthesized_feature_areas(cell_examples, charter)
+        unmapped = _normalize_synthesized_feature_areas(cell_examples, seed)
         if unmapped:
             logger.warning(
                 "synthesize: %d/%d rows in this cell had out-of-range feature_area, snapped to %r",
                 unmapped, len(cell_examples), UNMAPPED_FEATURE_AREA,
             )
-        # Also snap paraphrased coverage_tags back to their canonical charter
+        # Also snap paraphrased coverage_tags back to their canonical seed
         # strings so the coverage matrix credits them and downstream
         # consumers see consistent tag values.
-        tag_snapped, tag_unmapped = _normalize_synthesized_coverage_tags(cell_examples, charter)
+        tag_snapped, tag_unmapped = _normalize_synthesized_coverage_tags(cell_examples, seed)
         if tag_snapped or tag_unmapped:
             logger.info(
                 "synthesize: cell coverage_tag snap — %d paraphrases canonicalized, "
-                "%d tags left as-is (not in charter)",
+                "%d tags left as-is (not in seed)",
                 tag_snapped, tag_unmapped,
             )
         for ex in cell_examples:
@@ -2731,7 +2731,7 @@ async def synthesize_examples(
         )
 
     _, call_meta = await call_synthesize_examples(
-        charter,
+        seed,
         feature_areas=req.feature_areas,
         coverage_criteria=req.coverage_criteria,
         count=req.count_per_scenario,
@@ -2758,7 +2758,7 @@ async def synthesize_examples(
     await db.create_turn(
         session_id=session_id,
         turn_type="synthesize",
-        input_snapshot={"charter": charter, "request": req.model_dump()},
+        input_snapshot={"seed": seed, "request": req.model_dump()},
         llm_calls=call_meta,
         parsed_output={"examples_generated": len(all_created)},
     )
@@ -2870,7 +2870,7 @@ async def auto_review_examples(
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    charter = dataset["charter_snapshot"]
+    seed = dataset["seed_snapshot"]
     examples = await db.get_examples(dataset_id, review_status="pending")
 
     if not examples:
@@ -2889,7 +2889,7 @@ async def auto_review_examples(
                  or ("adversarial" if ex.get("is_adversarial") else None)}
             for ex in batch
         ]
-        reviews, call_meta = await call_review_examples(charter, batch_for_review)
+        reviews, call_meta = await call_review_examples(seed, batch_for_review)
 
         # Apply verdicts — triggered-mode reviews carry trigger_verdict + execution_verdict.
         for review in reviews:
@@ -2912,7 +2912,7 @@ async def auto_review_examples(
         await db.create_turn(
             session_id=dataset["session_id"],
             turn_type="review",
-            input_snapshot={"charter": charter, "example_count": len(batch)},
+            input_snapshot={"seed": seed, "example_count": len(batch)},
             llm_calls=call_meta,
             parsed_output={"reviews": reviews},
         )
@@ -3010,17 +3010,17 @@ async def refresh_dataset_from_turns(
     }
 
 
-@app.post("/datasets/{dataset_id}/retag-against-charter")
-async def retag_examples_against_charter(
+@app.post("/datasets/{dataset_id}/retag-against-seed")
+async def retag_examples_against_seed(
     dataset_id: str,
     access: Access = Depends(resolve_dataset_access),
 ):
     """Re-tag every example's feature_area + coverage_tags against the current
-    charter. Built for prompt-eval (where the dataset is sampled from `turns`
-    before the charter exists, so the seeded `feature_area` buckets don't
-    align with the charter's alignment areas), but works for any dataset.
+    seed. Built for prompt-eval (where the dataset is sampled from `turns`
+    before the seed exists, so the seeded `feature_area` buckets don't
+    align with the seed's alignment areas), but works for any dataset.
 
-    Idempotent — re-running just refreshes tags against the latest charter.
+    Idempotent — re-running just refreshes tags against the latest seed.
     """
     require_writer(access)
     dataset = await db.get_dataset(dataset_id)
@@ -3028,19 +3028,19 @@ async def retag_examples_against_charter(
         raise HTTPException(status_code=404, detail="Dataset not found")
 
     state, _ = await _load_state(dataset["session_id"])
-    charter = state.charter.model_dump()
+    seed = state.seed.model_dump()
 
-    coverage = (charter.get("coverage") or {}).get("criteria") or []
-    alignment = charter.get("alignment") or []
+    coverage = (seed.get("coverage") or {}).get("criteria") or []
+    alignment = seed.get("alignment") or []
     if not coverage and not alignment:
         raise HTTPException(
             status_code=400,
-            detail="Charter has no coverage criteria or alignment entries to tag against. Generate the charter first.",
+            detail="Seed has no coverage criteria or alignment entries to tag against. Generate the seed first.",
         )
 
-    # Keep charter_snapshot in sync so /gaps and any scorer-side reads see
-    # today's charter, not whatever was on the dataset at create time.
-    await db.update_dataset_charter_snapshot(dataset_id, charter)
+    # Keep seed_snapshot in sync so /gaps and any scorer-side reads see
+    # today's seed, not whatever was on the dataset at create time.
+    await db.update_dataset_seed_snapshot(dataset_id, seed)
 
     examples = await db.get_examples(dataset_id)
     if not examples:
@@ -3051,9 +3051,9 @@ async def retag_examples_against_charter(
     all_retags: list[dict] = []
     for i in range(0, len(examples), batch_size):
         batch = examples[i:i + batch_size]
-        retags, call_meta = await call_retag_examples_against_charter(charter, batch)
-        _normalize_synthesized_feature_areas(retags, charter)
-        _normalize_synthesized_coverage_tags(retags, charter)
+        retags, call_meta = await call_retag_examples_against_seed(seed, batch)
+        _normalize_synthesized_feature_areas(retags, seed)
+        _normalize_synthesized_coverage_tags(retags, seed)
         for r in retags:
             eid = r.get("example_id")
             if not eid:
@@ -3072,7 +3072,7 @@ async def retag_examples_against_charter(
         await db.create_turn(
             session_id=dataset["session_id"],
             turn_type="retag",
-            input_snapshot={"charter": charter, "example_count": len(batch)},
+            input_snapshot={"seed": seed, "example_count": len(batch)},
             llm_calls=call_meta,
             parsed_output={"retags": retags},
         )
@@ -3093,7 +3093,7 @@ async def suggest_revisions(
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    charter = dataset["charter_snapshot"]
+    seed = dataset["seed_snapshot"]
 
     if req.example_ids:
         # Fetch specific examples
@@ -3121,7 +3121,7 @@ async def suggest_revisions(
              "label": ex["label"], "judge_verdict": ex.get("judge_verdict")}
             for ex in batch
         ]
-        revisions, call_meta = await call_revise_examples(charter, batch_for_revision)
+        revisions, call_meta = await call_revise_examples(seed, batch_for_revision)
 
         # Store revision suggestions
         for rev in revisions:
@@ -3139,7 +3139,7 @@ async def suggest_revisions(
         await db.create_turn(
             session_id=dataset["session_id"],
             turn_type="suggest_revisions",
-            input_snapshot={"charter": charter, "example_count": len(batch)},
+            input_snapshot={"seed": seed, "example_count": len(batch)},
             llm_calls=call_meta,
             parsed_output={"revisions": revisions},
         )
@@ -3172,17 +3172,17 @@ async def analyze_gaps(dataset_id: str):
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    charter = dataset["charter_snapshot"]
+    seed = dataset["seed_snapshot"]
     examples = await db.get_examples(dataset_id)
     stats = await db.update_dataset_stats(dataset_id)
 
-    coverage_criteria = list(charter.get("coverage", {}).get("criteria") or [])
+    coverage_criteria = list(seed.get("coverage", {}).get("criteria") or [])
     feature_areas = [
         a.get("feature_area", "")
-        for a in (charter.get("alignment") or [])
+        for a in (seed.get("alignment") or [])
         if isinstance(a, dict) and a.get("feature_area")
     ]
-    matrix = _build_coverage_matrix(charter, examples)
+    matrix = _build_coverage_matrix(seed, examples)
 
     coverage_gaps = [
         c for c in coverage_criteria
@@ -3219,7 +3219,7 @@ async def analyze_gaps(dataset_id: str):
             label_gaps.append({"feature_area": fa, "missing": "bad"})
 
     # `balance_issues` is hard to derive purely structurally — it's
-    # really "is the distribution close to what the charter's balance
+    # really "is the distribution close to what the seed's balance
     # criteria asked for?". Without the LLM we don't have a free-text
     # interpreter, so leave it empty rather than fabricate. The summary
     # below covers the high-level signal.
@@ -3331,30 +3331,30 @@ async def enrich_dataset(
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    charter = dataset["charter_snapshot"]
+    seed = dataset["seed_snapshot"]
 
     if req.gap_type == "coverage":
         generated, call_meta = await call_synthesize_examples(
-            charter, coverage_criteria=req.targets, count=req.count,
+            seed, coverage_criteria=req.targets, count=req.count,
         )
     elif req.gap_type in ("feature_area", "label"):
         generated, call_meta = await call_synthesize_examples(
-            charter, feature_areas=req.targets, count=req.count,
+            seed, feature_areas=req.targets, count=req.count,
         )
     else:
         raise HTTPException(status_code=400, detail=f"Unknown gap type: {req.gap_type}")
 
-    unmapped = _normalize_synthesized_feature_areas(generated, charter)
+    unmapped = _normalize_synthesized_feature_areas(generated, seed)
     if unmapped:
         logger.warning(
             "enrich (%s): %d/%d rows had out-of-range feature_area, snapped to %r",
             req.gap_type, unmapped, len(generated), UNMAPPED_FEATURE_AREA,
         )
-    tag_snapped, tag_unmapped = _normalize_synthesized_coverage_tags(generated, charter)
+    tag_snapped, tag_unmapped = _normalize_synthesized_coverage_tags(generated, seed)
     if tag_snapped or tag_unmapped:
         logger.info(
             "enrich (%s): coverage_tag snap — %d paraphrases canonicalized, "
-            "%d tags left as-is (not in charter)",
+            "%d tags left as-is (not in seed)",
             req.gap_type, tag_snapped, tag_unmapped,
         )
 
@@ -3366,7 +3366,7 @@ async def enrich_dataset(
     await db.create_turn(
         session_id=dataset["session_id"],
         turn_type="enrich",
-        input_snapshot={"charter": charter, "gap_type": req.gap_type, "targets": req.targets},
+        input_snapshot={"seed": seed, "gap_type": req.gap_type, "targets": req.targets},
         llm_calls=call_meta,
         parsed_output={"examples_generated": len(created)},
     )
@@ -3540,8 +3540,8 @@ async def export_for_skill_creator(dataset_id: str):
         if ex.get("should_trigger") is not None
     ]
 
-    charter = dataset.get("charter_snapshot", {}) or {}
-    task = charter.get("task", {}) or {}
+    seed = dataset.get("seed_snapshot", {}) or {}
+    task = seed.get("task", {}) or {}
 
     return {
         "dataset_id": dataset_id,
@@ -3578,7 +3578,7 @@ def _eval_run_to_summary(run: dict) -> EvalRunSummary:
         skill_version_id=run.get("skill_version_id"),
         skill_version_number=run.get("skill_version_number"),
         judge_model_used=run.get("judge_model_used"),
-        charter_snapshot=run.get("charter_snapshot"),
+        seed_snapshot=run.get("seed_snapshot"),
         improvement_suggestions=run.get("improvement_suggestions"),
         improvement_summary=run.get("improvement_summary"),
         notes_updated_at=run.get("notes_updated_at"),
@@ -3743,11 +3743,11 @@ async def run_eval_for_session(
 
     state, conversation = await _load_state(session_id)
     is_prompt_eval = state.kind == SessionKind.prompt
-    skill_body = state.charter.task.skill_body or ""
+    skill_body = state.seed.task.skill_body or ""
     if not is_prompt_eval and not skill_body.strip():
         raise HTTPException(
             status_code=400,
-            detail="Session has no skill_body on its charter. Seed from a SKILL.md first.",
+            detail="Session has no skill_body on its seed. Seed from a SKILL.md first.",
         )
 
     # Drop scorers the user has toggled off in the UI. ``enabled`` is an
@@ -3759,10 +3759,10 @@ async def run_eval_for_session(
     ]
     # Backfill target_tag on the in-memory copy for sessions whose scorers
     # were generated before the gating field existed (or whose LLM dropped
-    # it). Pure slug match against the charter — no LLM. Mutates the local
+    # it). Pure slug match against the seed — no LLM. Mutates the local
     # copy only; the persisted scorers stay as-is until the user
     # regenerates, so this is safe to run on every eval.
-    _ensure_scorer_target_tags(scorer_defs, state.charter.model_dump())
+    _ensure_scorer_target_tags(scorer_defs, state.seed.model_dump())
     if not scorer_defs:
         total = len(state.scorers or [])
         if total == 0:
@@ -3786,7 +3786,7 @@ async def run_eval_for_session(
     anthropic_key = request.headers.get("x-anthropic-key") or None
 
     # Tag the run with whatever SKILL.md version is *actually* being
-    # evaluated. When a candidate exists, charter.task.skill_body mirrors
+    # evaluated. When a candidate exists, seed.task.skill_body mirrors
     # the candidate (set when the candidate was created), and the eval
     # below sends that exact body to Braintrust — so the run's
     # skill_version_id has to be the candidate's id, not the active's.
@@ -3802,7 +3802,7 @@ async def run_eval_for_session(
             record = _append_skill_version(
                 state,
                 body=skill_body,
-                created_from="seed",
+                created_from="import",
                 notes="Backfilled v1 from existing SKILL.md body.",
             )
             eval_ver_id = record["id"]
@@ -3829,7 +3829,7 @@ async def run_eval_for_session(
         rows_total=len(examples),
         skill_version_id=eval_ver_id,
         skill_version_number=eval_ver_num,
-        charter_snapshot=state.charter.model_dump(),
+        seed_snapshot=state.seed.model_dump(),
         judge_model_used=judge_model_resolved,
     )
 
@@ -3965,7 +3965,7 @@ async def create_skill_version(
     the new active. Manual edits and other sources promote immediately —
     they're explicit user-typed changes, not LLM proposals to validate.
 
-    Either way, charter.task.skill_body updates so subsequent evals use the
+    Either way, seed.task.skill_body updates so subsequent evals use the
     new body and the user can re-run on the candidate before committing.
     """
     require_writer(access)
@@ -3973,11 +3973,11 @@ async def create_skill_version(
 
     # If this is the first version on a legacy session, backfill v1 from the
     # current body so the new one doesn't land as v1 with history missing.
-    if not state.skill_versions and (state.charter.task.skill_body or "").strip():
+    if not state.skill_versions and (state.seed.task.skill_body or "").strip():
         _append_skill_version(
             state,
-            body=state.charter.task.skill_body or "",
-            created_from="seed",
+            body=state.seed.task.skill_body or "",
+            created_from="import",
             notes="Backfilled v1 from existing SKILL.md body.",
         )
 
@@ -3991,7 +3991,7 @@ async def create_skill_version(
         applied_suggestion_ids=req.applied_suggestion_ids,
         as_candidate=as_candidate,
     )
-    state.charter.task.skill_body = req.body
+    state.seed.task.skill_body = req.body
     await _save_state(session_id, state, conversation)
     return SkillVersion(**record)
 
@@ -4024,7 +4024,7 @@ async def promote_skill_version(
         raise HTTPException(status_code=404, detail="Skill version not found")
     state.active_skill_version_id = version_id
     state.candidate_skill_version_id = None
-    state.charter.task.skill_body = target["body"]
+    state.seed.task.skill_body = target["body"]
     await _save_state(session_id, state, conversation)
     return SkillVersion(**target)
 
@@ -4051,7 +4051,7 @@ async def discard_skill_version(
         None,
     )
     if active is not None:
-        state.charter.task.skill_body = active["body"]
+        state.seed.task.skill_body = active["body"]
     state.candidate_skill_version_id = None
     await _save_state(session_id, state, conversation)
     return SkillVersion(**target)
@@ -4092,7 +4092,7 @@ async def restore_skill_version(
         created_from="restore",
         notes=f"Restored from v{target.get('version')}",
     )
-    state.charter.task.skill_body = target["body"]
+    state.seed.task.skill_body = target["body"]
     await _save_state(session_id, state, conversation)
     return SkillVersion(**new_record)
 
@@ -4139,7 +4139,7 @@ async def suggest_skill_improvements(
         )
 
     state, _ = await _load_state(session_id)
-    skill_body = state.charter.task.skill_body or ""
+    skill_body = state.seed.task.skill_body or ""
     if not skill_body.strip():
         raise HTTPException(status_code=400, detail="Session has no active SKILL.md to improve.")
 
@@ -4236,7 +4236,7 @@ async def suggest_skill_improvements(
     data, call_meta = await call_suggest_improvements(
         skill_body,
         run_after_cluster,
-        state.charter.model_dump(),
+        state.seed.model_dump(),
         clusters,
     )
 
@@ -4466,7 +4466,7 @@ def _parse_skill_frontmatter(raw: str) -> tuple[str | None, str | None, str]:
 async def fetch_skill_from_url(req: FetchSkillFromUrlRequest, request: Request):
     """Fetch a SKILL.md from a public GitHub URL + validate it looks like a
     skill (frontmatter with `name` and `description`). Returns the parsed
-    body and source metadata the frontend can hand back to `skill-seed`.
+    body and source metadata the frontend can hand back to `skill-import`.
 
     Strategy:
       * No token → fetch the raw file via raw.githubusercontent.com. CDN-
@@ -4590,7 +4590,7 @@ async def infer_schema_from_examples(
             detail=f"Need at least 3 examples to infer schema (have {len(examples)})"
         )
 
-    charter = dataset["charter_snapshot"]
+    seed = dataset["seed_snapshot"]
 
     # Prepare examples for inference (just input/output)
     examples_for_inference = [
@@ -4598,7 +4598,7 @@ async def infer_schema_from_examples(
         for ex in examples
     ]
 
-    result, call_meta = await call_infer_schema(examples_for_inference, charter)
+    result, call_meta = await call_infer_schema(examples_for_inference, seed)
 
     # Parse task definition from result
     task_data = result.get("task", {})

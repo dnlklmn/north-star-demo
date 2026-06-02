@@ -5,7 +5,7 @@
  * Shared between SkillPanel (manual paste / Analyze button) and Home (the
  * "new skill eval" modal) so both code paths populate skill metadata
  * identically. Without this, pasting via Home left skill_name/description
- * empty because Home wasn't parsing frontmatter before calling seedFromSkill.
+ * empty because Home wasn't parsing frontmatter before calling importFromSkill.
  */
 export function parseSkillFrontmatter(raw: string): {
   name?: string;

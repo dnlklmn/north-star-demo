@@ -1,4 +1,4 @@
-import type { ActivityEvent, CreateSessionResponse, CreateSkillVersionRequest, CreatedShareToken, EvalMode, EvalRunSummary, RunEvalRequest, SendMessageResponse, SessionState, ShareTokenSummary, SkillVersion, SuggestImprovementsResponse, Charter, Dataset, Example, GapAnalysis, JudgeAgreement, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse, ProjectSummary, StoryGroup, ScorerDef } from './types'
+import type { ActivityEvent, CreateSessionResponse, CreateSkillVersionRequest, CreatedShareToken, EvalMode, EvalRunSummary, RunEvalRequest, SendMessageResponse, SessionState, ShareTokenSummary, SkillVersion, SuggestImprovementsResponse, Seed, Dataset, Example, GapAnalysis, JudgeAgreement, Settings, DetectSchemaResponse, ImportFromUrlResponse, InferSchemaResponse, ProjectSummary, StoryGroup, ScorerDef } from './types'
 import { getShareToken, setAccessRole } from './shareToken'
 
 export const API_BASE = import.meta.env.VITE_API_URL || '/api'
@@ -499,11 +499,11 @@ export async function createPromptEvalSession(input: {
   return res.json()
 }
 
-export async function seedFromSkill(
+export async function importFromSkill(
   sessionId: string,
   body: { skill_body: string; skill_name?: string; skill_description?: string }
 ): Promise<{ state: SessionState; message: string }> {
-  const res = await apiFetch(`${BASE}/sessions/${sessionId}/skill-seed`, {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/skill-import`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -526,7 +526,7 @@ export interface FetchSkillFromUrlResponse {
 }
 
 /** Fetch + validate a SKILL.md from a public GitHub URL. Does not mutate the
- *  session — caller hands the body back to `seedFromSkill` to run Analyze. */
+ *  session — caller hands the body back to `importFromSkill` to run Analyze. */
 export async function fetchSkillFromUrl(url: string): Promise<FetchSkillFromUrlResponse> {
   const token = getGithubToken()
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -725,20 +725,20 @@ export async function proceedToReview(
   return res.json()
 }
 
-export async function patchCharter(
+export async function patchSeed(
   sessionId: string,
-  patch: Partial<Charter>
+  patch: Partial<Seed>
 ): Promise<{ state: SessionState }> {
-  const res = await apiFetch(`${BASE}/sessions/${sessionId}/charter`, {
+  const res = await apiFetch(`${BASE}/sessions/${sessionId}/seed`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(patch),
   })
-  if (!res.ok) throw new Error(`Failed to patch charter: ${res.status}`)
+  if (!res.ok) throw new Error(`Failed to patch seed: ${res.status}`)
   return res.json()
 }
 
-export async function validateCharter(
+export async function validateSeed(
   sessionId: string
 ): Promise<{ validation: import('./types').Validation; state: SessionState }> {
   const res = await apiFetch(`${BASE}/sessions/${sessionId}/validate`, {
@@ -748,7 +748,7 @@ export async function validateCharter(
   return res.json()
 }
 
-export async function suggestForCharter(
+export async function suggestForSeed(
   sessionId: string
 ): Promise<{ suggestions: import('./types').Suggestion[]; suggested_stories: import('./types').SuggestedStory[] }> {
   const res = await apiFetch(`${BASE}/sessions/${sessionId}/suggest`, {
@@ -871,9 +871,9 @@ export async function suggestSkill(
   return res.json()
 }
 
-export async function finalizeCharter(
+export async function finalizeSeed(
   sessionId: string
-): Promise<{ charter_id: string; session_id: string; charter: Charter }> {
+): Promise<{ seed_id: string; session_id: string; seed: Seed }> {
   const res = await apiFetch(`${BASE}/sessions/${sessionId}/finalize`, {
     method: 'POST',
   })
@@ -999,13 +999,13 @@ export async function refreshDatasetFromTurns(
   return res.json()
 }
 
-export async function retagExamplesAgainstCharter(
+export async function retagExamplesAgainstSeed(
   datasetId: string,
 ): Promise<{
   retagged: number
   retags: Array<{ example_id: string; feature_area: string; coverage_tags: string[] }>
 }> {
-  const res = await apiFetch(`${BASE}/datasets/${datasetId}/retag-against-charter`, {
+  const res = await apiFetch(`${BASE}/datasets/${datasetId}/retag-against-seed`, {
     method: 'POST',
   })
   if (!res.ok) {

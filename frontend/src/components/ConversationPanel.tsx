@@ -3,7 +3,7 @@ import { Send, ChevronDown, ChevronRight } from 'lucide-react'
 import type { Message, AgentStatus, Validation } from '../types'
 import { StarIcon } from './ui/Icons'
 
-type Phase = 'goals' | 'users' | 'stories' | 'charter' | 'dataset'
+type Phase = 'goals' | 'users' | 'stories' | 'seed' | 'dataset'
 type ExtractedStory = { who: string; what: string; why: string }
 import SoftOkBanner from './SoftOkBanner'
 
@@ -15,22 +15,22 @@ const STATUS_SEQUENCES: Record<string, string[]> = {
   goals: ['Thinking about your goals...'],
   users: ['Thinking about your users...'],
   stories: ['Thinking about user scenarios...'],
-  charter_generating: [
+  seed_generating: [
     'Generating draft from your input',
     'Validating criteria',
     'Generating suggestions',
   ],
-  charter: ['Thinking...'],
+  seed: ['Thinking...'],
   dataset: ['Thinking...'],
 }
 
-function getStatusKey(phase: Phase, hasCharter: boolean, isInit: boolean): string {
+function getStatusKey(phase: Phase, hasSeed: boolean, isInit: boolean): string {
   if (isInit) return 'init'
   if (phase === 'goals') return 'goals'
   if (phase === 'users') return 'users'
   if (phase === 'stories') return 'stories'
-  if (phase === 'charter' && !hasCharter) return 'charter_generating'
-  if (phase === 'charter') return 'charter'
+  if (phase === 'seed' && !hasSeed) return 'seed_generating'
+  if (phase === 'seed') return 'seed'
   return 'dataset'
 }
 
@@ -54,7 +54,7 @@ interface Props {
   onChatInputChange?: (value: string) => void
   placeholder?: string
   phase?: Phase
-  hasCharter?: boolean
+  hasSeed?: boolean
   isInit?: boolean
   suggestedGoals?: string[]
   suggestedUsers?: string[]
@@ -78,7 +78,7 @@ export default function ConversationPanel({
   onChatInputChange,
   placeholder = 'Type your response...',
   phase = 'goals',
-  hasCharter = false,
+  hasSeed = false,
   suggestedGoals = [],
   suggestedUsers = [],
   suggestedStoryOptions = [],
@@ -94,7 +94,7 @@ export default function ConversationPanel({
 
   // Cycling status label during loading
   const [statusIndex, setStatusIndex] = useState(0)
-  const statusKey = getStatusKey(phase, hasCharter, isInit)
+  const statusKey = getStatusKey(phase, hasSeed, isInit)
   const statusSequence = STATUS_SEQUENCES[statusKey] || ['Thinking...']
 
   // Reset the status index when loading flips off — track the transition
@@ -361,7 +361,7 @@ export default function ConversationPanel({
             <Send className="w-4 h-4" />
           </button>
         </form>
-        {phase === 'charter' && (
+        {phase === 'seed' && (
           <button
             onClick={onProceed}
             className="mt-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
