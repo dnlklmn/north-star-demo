@@ -7,6 +7,8 @@ import ApiKeyBanner from './components/ApiKeyBanner'
 import LLMBillingBanner from './components/LLMBillingBanner'
 import { PolarisProvider } from './polaris/PolarisProvider'
 import PolarisSidebar from './polaris/PolarisSidebar'
+import { ConfigProvider } from './playground/useConfig'
+import PlaygroundLimitBanner from './playground/PlaygroundLimitBanner'
 
 export default function App() {
   const [needsKey, setNeedsKey] = useState(() => !hasApiKey())
@@ -23,10 +25,12 @@ export default function App() {
   }, [])
 
   return (
+    <ConfigProvider>
     <PolarisProvider>
       <div className="flex flex-col h-screen">
         {needsKey && <ApiKeyBanner onDismiss={() => setNeedsKey(false)} />}
         <LLMBillingBanner />
+        <PlaygroundLimitBanner />
         {/* Page + sidebar in a flex row — opening the Polaris sidebar
             shrinks the routes column rather than overlaying it. */}
         <div className="flex-1 min-h-0 flex flex-row">
@@ -41,5 +45,6 @@ export default function App() {
         </div>
       </div>
     </PolarisProvider>
+    </ConfigProvider>
   )
 }

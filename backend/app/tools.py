@@ -14,7 +14,7 @@ import re
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 import anthropic
 import braintrust
@@ -450,6 +450,63 @@ def _first_text(content: list | None) -> str:
     return ""
 
 
+# --- LLM call middleware chain ---
+#
+# Every LLM call goes through a chain of registered middlewares before
+# reaching the real Anthropic SDK call. Each middleware receives a
+# *descriptor* (a normalised dict describing the call) plus a `call_next`
+# callable that continues the chain. Middlewares can:
+#   - short-circuit (return cached result without calling next)
+#   - pass through (await call_next() and return its result)
+#   - wrap (do work before/after the next call)
+#
+# Default chain is empty — behaviour is identical to a direct SDK call.
+# Modules like `llm_cache` and `spend_cap` register themselves via
+# `register_llm_middleware()` in their own `setup()` functions, invoked
+# from `main.lifespan`.
+
+LLMMiddleware = Callable[
+    [dict, Callable[[], Awaitable[tuple[str, dict]]]],
+    Awaitable[tuple[str, dict]],
+]
+
+_llm_middlewares: list[LLMMiddleware] = []
+
+
+def register_llm_middleware(fn: LLMMiddleware) -> None:
+    """Add a middleware to the LLM call chain. Order = registration order;
+    the first registered wraps everything else (outermost layer)."""
+    _llm_middlewares.append(fn)
+
+
+def clear_llm_middlewares() -> None:
+    """Test helper — wipe registered middlewares. Production code should not
+    call this; the chain is built once at startup."""
+    _llm_middlewares.clear()
+
+
+async def _dispatch_llm(
+    descriptor: dict[str, Any],
+    terminal: Callable[[], Awaitable[tuple[str, dict]]],
+) -> tuple[str, dict]:
+    """Run the middleware chain around the terminal SDK call.
+
+    `descriptor` is a content hash-able view of the call (kind, model,
+    prompt-shape, max_tokens, temperature). `terminal` is the async callable
+    that actually invokes the Anthropic SDK on a worker thread.
+    """
+    idx = -1
+
+    async def call_next() -> tuple[str, dict]:
+        nonlocal idx
+        idx += 1
+        if idx < len(_llm_middlewares):
+            return await _llm_middlewares[idx](descriptor, call_next)
+        return await terminal()
+
+    return await call_next()
+
+
 async def _call_llm(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
     """Async-safe wrapper. The Anthropic SDK is sync, so we have to run
     the blocking call on a worker thread or the event loop freezes for
@@ -457,10 +514,21 @@ async def _call_llm(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
     endpoints (e.g. scorers gen stalls dataset synth that's running in
     parallel). All async call sites should `await` this.
 
-    Implementation lives in `_call_llm_sync`; this function is just the
-    `asyncio.to_thread` shim. Keep both signatures aligned.
+    Runs through the registered middleware chain (cache, spend cap, etc.)
+    before reaching the real SDK call in `_call_llm_sync`.
     """
-    return await asyncio.to_thread(_call_llm_sync, prompt, max_tokens)
+    descriptor = {
+        "kind": "single",
+        "model": get_model(),
+        "prompt": prompt,
+        "max_tokens": max_tokens,
+        "temperature": get_creativity(),
+    }
+
+    async def terminal() -> tuple[str, dict]:
+        return await asyncio.to_thread(_call_llm_sync, prompt, max_tokens)
+
+    return await _dispatch_llm(descriptor, terminal)
 
 
 def _call_llm_sync(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
@@ -519,8 +587,26 @@ async def _call_llm_streaming(prompt: str, max_tokens: int = 4096) -> tuple[str,
     a high `max_tokens` (>~8k): the SDK refuses a *non-streaming* request
     whose `max_tokens` could exceed a 10-minute timeout, so the only way to
     ask for a large completion is to stream it. Same return shape as
-    `_call_llm`."""
-    return await asyncio.to_thread(_call_llm_streaming_sync, prompt, max_tokens)
+    `_call_llm`.
+
+    Note on caching: this returns the *final* accumulated text, not a
+    chunk stream. On a cache hit, the middleware returns the same shape
+    immediately — callers see the assembled text. The streaming is purely
+    a transport detail of the upstream API, not part of this function's
+    contract.
+    """
+    descriptor = {
+        "kind": "streaming",
+        "model": get_model(),
+        "prompt": prompt,
+        "max_tokens": max_tokens,
+        "temperature": get_creativity(),
+    }
+
+    async def terminal() -> tuple[str, dict]:
+        return await asyncio.to_thread(_call_llm_streaming_sync, prompt, max_tokens)
+
+    return await _dispatch_llm(descriptor, terminal)
 
 
 def _call_llm_streaming_sync(prompt: str, max_tokens: int = 4096) -> tuple[str, dict]:
@@ -652,6 +738,29 @@ def _call_llm_cached(prefix: str, suffix: str, max_tokens: int = 4096) -> tuple[
         "temperature": temperature,
     }
     return text, metadata
+
+
+async def _call_llm_cached_async(
+    prefix: str, suffix: str, max_tokens: int = 4096
+) -> tuple[str, dict]:
+    """Async-safe wrapper around `_call_llm_cached` that runs through the
+    middleware chain (response cache, spend cap, etc.). Prefer this from
+    async call sites; the sync version stays available for backwards
+    compatibility but bypasses the chain.
+    """
+    descriptor = {
+        "kind": "cached_prefix",
+        "model": get_model(),
+        "prefix": prefix,
+        "suffix": suffix,
+        "max_tokens": max_tokens,
+        "temperature": get_creativity(),
+    }
+
+    async def terminal() -> tuple[str, dict]:
+        return await asyncio.to_thread(_call_llm_cached, prefix, suffix, max_tokens)
+
+    return await _dispatch_llm(descriptor, terminal)
 
 
 # --- Tool-use loop (Polaris) ---
@@ -1274,9 +1383,10 @@ async def _synth_one_cell(
     """
     suffix = build_synthesize_examples_cell_suffix(coverage_criterion, feature_area, count)
     async with semaphore:
-        # _call_llm_cached is sync (blocking SDK). Run it in a worker thread
-        # so asyncio.gather can actually parallelize across cells.
-        text, meta = await asyncio.to_thread(_call_llm_cached, prefix, suffix, 4096)
+        # Async wrapper routes through the middleware chain (cache, spend cap),
+        # and the terminal call still runs the sync SDK on a worker thread so
+        # asyncio.gather can actually parallelize across cells.
+        text, meta = await _call_llm_cached_async(prefix, suffix, 4096)
     data = _extract_json(text)
     return data.get("examples", []), meta
 

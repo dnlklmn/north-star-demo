@@ -360,6 +360,17 @@ async def _create_tables() -> None:
                AND state -> 'skill_versions' @> '[{"created_from": "seed"}]';
         """)
 
+        # Tables owned by self-contained app modules — they manage their own
+        # schema, we just ensure it exists at startup. Import locally to keep
+        # the dependency arrow one-way (db.py knows about these modules at
+        # init time; the modules don't import db.py at import time).
+        from . import llm_cache
+        await llm_cache.create_table(conn)
+        from . import quota
+        await quota.create_table(conn)
+        from . import spend_cap
+        await spend_cap.create_table(conn)
+
 
 # --- Session CRUD ---
 

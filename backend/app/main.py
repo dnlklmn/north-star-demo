@@ -33,7 +33,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from . import db
+from . import db, feature_flags
 from .agent import run_agent_turn, run_dataset_chat, run_polaris_chat
 from .eval_runner import EvalResult, run_eval_sync
 from .sharing import Access, broadcaster, capacity, require_writer, resolve_access
@@ -106,6 +106,7 @@ from .models import (
     ValidateResponse,
 )
 from .prompt_eval import get_prompt_target, list_prompt_targets
+from .quota import enforce_quota
 from .tools import (
     LLMAuthError,
     LLMBillingError,
@@ -139,11 +140,35 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     database_url = os.environ.get("DATABASE_URL", "postgresql://localhost:5432/northstar")
     await db.init_db(database_url)
+
+    # Self-contained app modules register themselves into the LLM-call
+    # middleware chain. Each module's `setup()` reads its own env flags and
+    # is a no-op when disabled. Order matters: outermost layer runs first,
+    # so register cheapest gates (cache) before policy gates (spend cap).
+    from . import llm_cache
+    llm_cache.setup()
+
+    # Spend cap runs INSIDE the cache (registered second → inner layer), so
+    # cache hits short-circuit before the cap counts them. Only real provider
+    # spend ticks the daily total.
+    from . import spend_cap
+    spend_cap.setup()
+
+    from . import feature_flags
+    feature_flags.setup()
+
     yield
     await db.close_db()
 
 
 app = FastAPI(title="North Star", version="0.1.0", lifespan=lifespan)
+
+# Quota needs to register an ASGI middleware on the app, which Starlette
+# forbids after startup — so it has to happen at app construction time,
+# NOT in lifespan. The module reads its own env flag and is a no-op when
+# disabled, so this call is safe regardless of deployment.
+from . import quota  # noqa: E402
+quota.setup(app)
 
 
 @app.exception_handler(LLMBillingError)
@@ -393,8 +418,68 @@ async def health_check():
     return {"status": "ok", "has_default_api_key": has_key}
 
 
+@app.get("/config")
+async def get_config(request: Request):
+    """Public, read-only deployment configuration the frontend reads once on
+    mount. Tells the UI which surfaces to disable (Polaris) and what quota
+    headroom the visitor has — without exposing secrets or env values.
+
+    Not rate-limited: this is the metadata the rate limiter itself reports.
+    Quota fields degrade to None when the quota module isn't installed
+    (PR 2 may land after this one — order-independent rollout).
+    """
+    from .tools import get_model
+
+    daily_limit: int | None = None
+    runs_remaining: int | None = None
+    try:
+        from . import quota  # type: ignore[attr-defined]
+        status = await quota.get_quota_status(request)
+        daily_limit = status.get("daily_limit")
+        runs_remaining = status.get("runs_remaining")
+    except (ImportError, AttributeError):
+        # quota module not installed in this deployment — leave both None.
+        pass
+
+    return {
+        "polaris_enabled": feature_flags.is_polaris_enabled(),
+        "daily_run_limit": daily_limit,
+        "runs_remaining": runs_remaining,
+        "model": get_model(),
+    }
+
+
+@app.get("/admin/spend")
+async def admin_spend(request: Request):
+    """Debug view of today's spend-cap accounting. Requires the X-Admin-Token
+    header to match the ADMIN_TOKEN env var. Returns 404 when no token is
+    configured so the endpoint is indistinguishable from missing routes on
+    deployments that never opted in.
+
+    Useful for verifying that the spend cap is wiring tokens correctly in a
+    public-playground deployment without having to shell into the DB.
+    """
+    expected = os.environ.get("ADMIN_TOKEN")
+    if not expected:
+        raise HTTPException(status_code=404, detail="Not found")
+    presented = request.headers.get("X-Admin-Token")
+    if not presented or presented != expected:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    from . import spend_cap
+    pool = await db.get_pool()
+    stats = await spend_cap.get_today_stats(pool)
+    # Surface the configured cap alongside today's running total so the
+    # caller can compute headroom without having to read env themselves.
+    stats["cap_cents"] = spend_cap._cap_cents or None
+    return stats
+
+
 @app.post("/suggest-goals", response_model=SuggestGoalsResponse)
-async def suggest_goals(req: SuggestGoalsRequest):
+async def suggest_goals(
+    req: SuggestGoalsRequest,
+    _quota: None = Depends(enforce_quota),
+):
     """Suggest additional business goals based on current goals.
 
     If ``session_id`` is provided the call is persisted as a turn so
@@ -419,13 +504,21 @@ async def suggest_goals(req: SuggestGoalsRequest):
             except Exception:
                 logger.warning("suggest_goals turn-log failed", exc_info=True)
         return SuggestGoalsResponse(suggestions=suggestions)
+    except (HTTPException, LLMBillingError, LLMAuthError, LLMModelError):
+        # Pass intentional HTTP statuses (e.g. 503 from spend_cap middleware,
+        # 429 from quota) and provider-typed errors through to their
+        # dedicated handlers, instead of clobbering them as 500.
+        raise
     except Exception as e:
         logger.exception("Failed to suggest goals")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/evaluate-goals", response_model=EvaluateGoalsResponse)
-async def evaluate_goals(req: EvaluateGoalsRequest):
+async def evaluate_goals(
+    req: EvaluateGoalsRequest,
+    _quota: None = Depends(enforce_quota),
+):
     """Evaluate business goal quality — check if goals are specific, measurable, independent.
 
     Persists a turn when ``session_id`` is provided (see suggest_goals).
@@ -456,13 +549,18 @@ async def evaluate_goals(req: EvaluateGoalsRequest):
             except Exception:
                 logger.warning("evaluate_goals turn-log failed", exc_info=True)
         return EvaluateGoalsResponse(feedback=feedback)
+    except (HTTPException, LLMBillingError, LLMAuthError, LLMModelError):
+        raise
     except Exception as e:
         logger.exception("Failed to evaluate goals")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/suggest-stories", response_model=SuggestStoriesResponse)
-async def suggest_stories(req: SuggestStoriesRequest):
+async def suggest_stories(
+    req: SuggestStoriesRequest,
+    _quota: None = Depends(enforce_quota),
+):
     """Suggest additional user stories based on goals and existing stories.
 
     Persists a turn when ``session_id`` is provided (see suggest_goals).
@@ -486,13 +584,18 @@ async def suggest_stories(req: SuggestStoriesRequest):
             except Exception:
                 logger.warning("suggest_stories turn-log failed", exc_info=True)
         return SuggestStoriesResponse(suggestions=suggestions)
+    except (HTTPException, LLMBillingError, LLMAuthError, LLMModelError):
+        raise
     except Exception as e:
         logger.exception("Failed to suggest stories")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/suggest-skill", response_model=SuggestSkillResponse)
-async def suggest_skill(req: SuggestSkillRequest):
+async def suggest_skill(
+    req: SuggestSkillRequest,
+    _quota: None = Depends(enforce_quota),
+):
     """Suggest SKILL.md content ideas given goals + stories + current draft.
 
     Powers the right-rail SuggestionBox on the Skill tab. Returns an empty
@@ -528,6 +631,8 @@ async def suggest_skill(req: SuggestSkillRequest):
             except Exception:
                 logger.warning("suggest_skill turn-log failed", exc_info=True)
         return SuggestSkillResponse(suggestions=suggestions)
+    except (HTTPException, LLMBillingError, LLMAuthError, LLMModelError):
+        raise
     except Exception as e:
         logger.exception("Failed to suggest skill")
         raise HTTPException(status_code=500, detail=str(e))
@@ -541,6 +646,7 @@ async def generate_skill_from_goals(
     session_id: str,
     _req: GenerateSkillFromGoalsRequest,
     access: Access = Depends(resolve_access),
+    _quota: None = Depends(enforce_quota),
 ):
     """Generate a full SKILL.md body from the session's goals + stories.
 
@@ -575,6 +681,8 @@ async def generate_skill_from_goals(
         raw_body, call_meta = await call_generate_skill_from_goals(
             goals, stories, project_name
         )
+    except (HTTPException, LLMBillingError, LLMAuthError, LLMModelError):
+        raise
     except Exception as e:
         logger.exception("Failed to generate skill from goals")
         raise HTTPException(status_code=500, detail=str(e))
@@ -616,6 +724,7 @@ async def generate_skill_from_goals(
 async def suggest_scorer_ideas(
     session_id: str,
     access: Access = Depends(resolve_access),
+    _quota: None = Depends(enforce_quota),
 ):
     """Suggest NEW scorer ideas based on the session's seed + existing
     scorers. Returns short pitches; the user later promotes interesting
@@ -626,6 +735,8 @@ async def suggest_scorer_ideas(
     existing = state.scorers or []
     try:
         suggestions, call_meta = await call_suggest_scorer_ideas(seed, existing)
+    except (HTTPException, LLMBillingError, LLMAuthError, LLMModelError):
+        raise
     except Exception as e:
         logger.exception("Failed to suggest scorer ideas")
         raise HTTPException(status_code=500, detail=str(e))
@@ -643,7 +754,10 @@ async def suggest_scorer_ideas(
 
 
 @app.post("/sessions", response_model=CreateSessionResponse)
-async def create_session(req: CreateSessionRequest):
+async def create_session(
+    req: CreateSessionRequest,
+    _quota: None = Depends(enforce_quota),
+):
     session_id = str(uuid.uuid4())
 
     state = SessionState(
@@ -767,6 +881,7 @@ async def import_from_skill(
     session_id: str,
     req: SkillImportRequest,
     access: Access = Depends(resolve_access),
+    _quota: None = Depends(enforce_quota),
 ):
     """Seed goals/users/stories/task from a pasted SKILL.md body.
 
@@ -992,7 +1107,10 @@ async def _sample_and_build_example_rows(
 
 
 @app.post("/sessions/prompt-eval", response_model=CreatePromptEvalResponse)
-async def create_prompt_eval_session(req: CreatePromptEvalRequest):
+async def create_prompt_eval_session(
+    req: CreatePromptEvalRequest,
+    _quota: None = Depends(enforce_quota),
+):
     """Spin up a prompt-eval project end-to-end.
 
     Creates a kind='prompt' session that mirrors a regular skill-eval workspace:
@@ -1178,7 +1296,11 @@ async def create_prompt_eval_session(req: CreatePromptEvalRequest):
 
 
 @app.post("/sessions/{session_id}/refresh-dataset", response_model=RefreshDatasetResponse)
-async def refresh_prompt_eval_dataset(session_id: str, req: RefreshDatasetRequest):
+async def refresh_prompt_eval_dataset(
+    session_id: str,
+    req: RefreshDatasetRequest,
+    _quota: None = Depends(enforce_quota),
+):
     """Re-sample the latest turns into a prompt-eval session's dataset.
 
     The rolling-window pattern: the dataset that was sampled at session
@@ -1633,6 +1755,7 @@ def _agent_contract_for_session(state: SessionState) -> str | None:
 async def generate_scorers_endpoint(
     session_id: str,
     access: Access = Depends(resolve_access),
+    _quota: None = Depends(enforce_quota),
 ):
     """Generate evaluation scorers from seed via LLM.
 
@@ -2015,6 +2138,7 @@ async def send_message(
     session_id: str,
     req: SendMessageRequest,
     access: Access = Depends(resolve_access),
+    _quota: None = Depends(enforce_quota),
 ):
     require_writer(access)
 
@@ -2062,6 +2186,7 @@ async def send_message(
 async def proceed_to_review(
     session_id: str,
     access: Access = Depends(resolve_access),
+    _quota: None = Depends(enforce_quota),
 ):
     require_writer(access)
     state, conversation = await _load_state(session_id)
@@ -2130,6 +2255,7 @@ async def patch_seed(
 async def validate_seed(
     session_id: str,
     access: Access = Depends(resolve_access),
+    _quota: None = Depends(enforce_quota),
 ):
     """Run validation on the current seed and return results."""
     require_writer(access)
@@ -2156,6 +2282,7 @@ async def validate_seed(
 async def suggest_for_seed(
     session_id: str,
     access: Access = Depends(resolve_access),
+    _quota: None = Depends(enforce_quota),
 ):
     """Generate suggestions for weak/empty seed sections."""
     require_writer(access)
@@ -2363,6 +2490,7 @@ async def run_judge(
     request: Request,
     session_id: str | None = None,
     limit: int = 50,
+    _quota: None = Depends(enforce_quota),
 ):
     """Run judge scoring on unjudged turns.
 
@@ -2621,6 +2749,7 @@ async def synthesize_examples(
     dataset_id: str,
     req: SynthesizeRequest,
     access: Access = Depends(resolve_dataset_access),
+    _quota: None = Depends(enforce_quota),
 ):
     """Generate synthetic examples from the seed.
 
@@ -2863,6 +2992,7 @@ async def remove_example(
 async def auto_review_examples(
     dataset_id: str,
     access: Access = Depends(resolve_dataset_access),
+    _quota: None = Depends(enforce_quota),
 ):
     """Run auto-review on pending examples using the judge."""
     require_writer(access)
@@ -3014,6 +3144,7 @@ async def refresh_dataset_from_turns(
 async def retag_examples_against_seed(
     dataset_id: str,
     access: Access = Depends(resolve_dataset_access),
+    _quota: None = Depends(enforce_quota),
 ):
     """Re-tag every example's feature_area + coverage_tags against the current
     seed. Built for prompt-eval (where the dataset is sampled from `turns`
@@ -3086,6 +3217,7 @@ async def suggest_revisions(
     dataset_id: str,
     req: SuggestRevisionsRequest,
     access: Access = Depends(resolve_dataset_access),
+    _quota: None = Depends(enforce_quota),
 ):
     """Suggest revisions for examples that have review issues."""
     require_writer(access)
@@ -3250,7 +3382,10 @@ async def analyze_gaps(dataset_id: str):
 
 
 @app.get("/datasets/{dataset_id}/judge-agreement")
-async def judge_agreement(dataset_id: str):
+async def judge_agreement(
+    dataset_id: str,
+    _quota: None = Depends(enforce_quota),
+):
     """Cohen's kappa + raw agreement between the judge's suggested_label and
     the reviewer's final label, over rows the human has actually reviewed.
 
@@ -3324,6 +3459,7 @@ async def enrich_dataset(
     dataset_id: str,
     req: EnrichRequest,
     access: Access = Depends(resolve_dataset_access),
+    _quota: None = Depends(enforce_quota),
 ):
     """Generate examples to fill identified gaps."""
     require_writer(access)
@@ -3380,6 +3516,7 @@ async def dataset_chat(
     dataset_id: str,
     req: SendMessageRequest,
     access: Access = Depends(resolve_dataset_access),
+    _quota: None = Depends(enforce_quota),
 ):
     """Chat with the agent in dataset phase."""
     require_writer(access)
@@ -3432,7 +3569,13 @@ class PolarisChatRequest(BaseModel):
     confirm: PolarisConfirmPayload | None = None
 
 
-@app.post("/polaris/chat")
+@app.post(
+    "/polaris/chat",
+    dependencies=[
+        Depends(feature_flags.require_polaris_enabled),
+        Depends(enforce_quota),
+    ],
+)
 async def polaris_chat(req: PolarisChatRequest):
     """Run one Polaris turn — or one direct confirm if `confirm` is set.
 
@@ -3724,6 +3867,7 @@ async def run_eval_for_session(
     req: RunEvalRequest,
     request: Request,
     access: Access = Depends(resolve_access),
+    _quota: None = Depends(enforce_quota),
 ):
     """Trigger a Braintrust eval run for this session's dataset + scorers + skill.
 
@@ -4105,6 +4249,7 @@ async def suggest_skill_improvements(
     session_id: str,
     req: SuggestImprovementsRequest,
     access: Access = Depends(resolve_access),
+    _quota: None = Depends(enforce_quota),
 ):
     """Analyze a completed eval run and propose targeted SKILL.md edits.
 
@@ -4319,6 +4464,7 @@ async def detect_schema(
     session_id: str,
     req: DetectSchemaRequest,
     access: Access = Depends(resolve_access),
+    _quota: None = Depends(enforce_quota),
 ):
     """Detect schema from pasted sample data."""
     require_writer(access)
@@ -4360,6 +4506,7 @@ async def import_from_url(
     session_id: str,
     req: ImportFromUrlRequest,
     access: Access = Depends(resolve_access),
+    _quota: None = Depends(enforce_quota),
 ):
     """Import schema from a URL (JSON data, OpenAPI spec, or docs)."""
     require_writer(access)
@@ -4576,6 +4723,7 @@ async def fetch_skill_from_url(req: FetchSkillFromUrlRequest, request: Request):
 async def infer_schema_from_examples(
     dataset_id: str,
     access: Access = Depends(resolve_dataset_access),
+    _quota: None = Depends(enforce_quota),
 ):
     """Infer schema from existing dataset examples."""
     require_writer(access)
