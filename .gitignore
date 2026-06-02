@@ -61,3 +61,8 @@ tmp/eval-runs/
 # `git status` repo-wide).
 .claude/worktrees/
 /collaborative/
+
+# Local-only working content (private business docs; MCP server scratch DBs)
+# — kept on disk but never pushed to the (north-star-demo) remote.
+/business/
+.mcp/
