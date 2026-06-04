@@ -33,7 +33,6 @@ from .models import (
     ValidationStatus,
 )
 from .prompt import (
-    build_discovery_turn_prompt,
     build_generate_draft_prompt,
     build_retag_examples_against_seed_prompt,
     build_validate_seed_prompt,
@@ -924,57 +923,6 @@ async def call_llm_with_tools(
 
 
 # --- LLM call wrappers ---
-
-@traced("discovery")
-async def call_discovery_turn(state: SessionState, user_message: str | None) -> tuple[str, dict | None, list[dict]]:
-    """Run a discovery turn. Returns (conversational_text, extraction_data, call metadata list).
-
-    extraction_data is a dict with keys: goals, stories, ready_for_seed
-    """
-    await _refresh_settings()
-    prompt = build_discovery_turn_prompt(state, user_message)
-    text, meta = await _call_llm(prompt, max_tokens=2048)
-
-    # Parse extraction block
-    extraction = None
-    clean_text = text
-    if "```extraction" in text:
-        try:
-            start = text.index("```extraction") + len("```extraction")
-            end = text.index("```", start)
-            extraction_json = text[start:end].strip()
-            extraction = json.loads(extraction_json)
-            clean_text = text[:text.index("```extraction")] + text[end + 3:]
-        except (ValueError, json.JSONDecodeError) as e:
-            logger.warning(f"Failed to parse extraction block: {e}")
-
-    clean_text = clean_text.strip()
-
-    # Overwrite the generic prompt/raw-text bubble with discovery-specific
-    # clean values for the online scorers (goal_extraction_quality,
-    # conversation_quality). Both fire on this @traced("discovery") span:
-    #   * input  = formatted conversation history + a phase tag — gives
-    #              conversation_quality the phase it asks about, and gives
-    #              goal_extraction_quality the user statements it's checking
-    #              the extraction against.
-    #   * output = the agent's clean text question + the extraction block as
-    #              fenced JSON. conversation_quality reads the question;
-    #              goal_extraction_quality reads the extraction block.
-    try:
-        from .prompt import _format_conversation  # local import: avoid cycle at module load
-        convo = _format_conversation(state.input.conversation_history)
-        phase_tag = f"[Current discovery phase: {state.discovery_phase.value}]"
-        bubble_input = f"{phase_tag}\n\n{convo}"
-        if user_message:
-            bubble_input += f"\n\nuser (latest): {user_message}"
-        output_parts = [clean_text]
-        if extraction:
-            output_parts.append("```extraction\n" + json.dumps(extraction, indent=2) + "\n```")
-        _bubble_io_to_parent_span(bubble_input, "\n\n".join(output_parts))
-    except Exception as e:
-        logger.warning(f"Discovery scorer payload bubble failed: {e}")
-
-    return clean_text, extraction, [meta]
 
 
 def _build_seed_conversation_summary(state: SessionState) -> str:

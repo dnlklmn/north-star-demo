@@ -1234,7 +1234,6 @@ async def create_prompt_eval_session(
     # Also populate the free-form text fields that build_generate_draft_prompt
     # reads from. Without this, "Generate seed" sees an empty input and
     # produces an empty seed, which then breaks gap analysis downstream.
-    # Mirrors agent._build_input_from_extractions exactly.
     if state.extracted_goals:
         state.input.business_goals = "\n".join(f"- {g}" for g in state.extracted_goals)
     if state.extracted_stories:
