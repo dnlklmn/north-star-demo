@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Sparkles, ChevronRight, Copy, Download, Loader2, ArrowRight, Check, Upload } from 'lucide-react'
 import type { Seed, ScorerDef } from '../types'
 import {
@@ -10,6 +10,25 @@ import { AIIcon } from './ui/Icons'
 import PanelLayout from './PanelLayout'
 import SuggestionBox, { SuggestionCard } from './SuggestionBox'
 import { getAutoGenerateSuggestions } from '../utils/uiPrefs'
+
+/** True when a scorer runs deterministically (pure Python, no LLM call).
+ *
+ *  Mirrors the textual-fallback rule in
+ *  `backend/app/scorer_publish.py::_is_deterministic_scorer`: a scorer is
+ *  deterministic when its code neither assigns `judge_prompt` nor invokes
+ *  `call_judge(...)`. That matches what the backend uses to pick between
+ *  prompt-based and code-based Braintrust online-scorer markdown, so
+ *  classifying the same way client-side keeps the UI label and the export
+ *  shape in lockstep.
+ *
+ *  Substring matching (not AST) is intentionally cheap — a false positive
+ *  here just paints a label in the wrong group; it has no effect on actual
+ *  scoring, which is governed by the executed Python on the backend.
+ */
+function isDeterministic(code: string | null | undefined): boolean {
+  if (!code) return false
+  return !code.includes('judge_prompt') && !code.includes('call_judge(')
+}
 
 interface Props {
   seed: Seed
@@ -67,6 +86,37 @@ export default function ScorersPanel({ seed, hasDataset: _hasDataset, sessionId,
   })()
   const [expandedScorer, setExpandedScorer] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+
+  // Group scorers by scoring method so the user sees deterministic vs
+  // judge at a glance without having to expand each card. Order is fixed
+  // — deterministic first because that's the win the hybrid-scoring pass
+  // is meant to surface ("look, these N criteria need zero LLM calls"),
+  // judge after because those are the ones still paying per-row inference
+  // cost. The empty section is hidden by the render below, so a session
+  // with only judge scorers (e.g. pre-hybrid sessions) just shows the
+  // single "Judge" group as if nothing changed.
+  const scorerGroups = useMemo(() => {
+    const deterministic: ScorerDef[] = []
+    const judge: ScorerDef[] = []
+    for (const s of scorers) {
+      if (isDeterministic(s.code)) deterministic.push(s)
+      else judge.push(s)
+    }
+    return [
+      {
+        kind: 'deterministic' as const,
+        label: 'Deterministic',
+        subtitle: 'pure Python, no LLM call',
+        scorers: deterministic,
+      },
+      {
+        kind: 'judge' as const,
+        label: 'Judge',
+        subtitle: 'LLM-graded with rubric',
+        scorers: judge,
+      },
+    ]
+  }, [scorers])
   // Per-scorer ephemeral state for the Braintrust export button. The success
   // tick decays after a short delay so the button reverts to its idle label,
   // matching how the Copy button behaves elsewhere in the app.
@@ -366,9 +416,25 @@ export default function ScorersPanel({ seed, hasDataset: _hasDataset, sessionId,
     >
       {errorBanner}
       <div className="max-w-2xl space-y-2">
-            {scorers.map(scorer => {
-              const isEnabled = scorer.enabled !== false
-              return (
+            {scorerGroups.map(group => (
+              group.scorers.length === 0 ? null : (
+                <div key={group.kind} className="space-y-2">
+                  {/* Section header. Lives above each group so the user
+                      knows the scoring method without expanding a card.
+                      Headers are deliberately understated (uppercase
+                      muted text) so they don't compete visually with
+                      the scorer cards themselves. */}
+                  <div className="flex items-baseline gap-2 pt-2 first:pt-0">
+                    <span className="text-[10px] uppercase tracking-wide text-muted-foreground font-medium">
+                      {group.label}
+                    </span>
+                    <span className="text-[10px] text-muted-foreground">
+                      {group.scorers.length} · {group.subtitle}
+                    </span>
+                  </div>
+                  {group.scorers.map(scorer => {
+                    const isEnabled = scorer.enabled !== false
+                    return (
               <div
                 key={scorer.name}
                 className={`border border-border bg-surface-raised ${
@@ -461,7 +527,10 @@ export default function ScorersPanel({ seed, hasDataset: _hasDataset, sessionId,
                 )}
               </div>
               )
-            })}
+                  })}
+                </div>
+              )
+            ))}
       </div>
     </PanelLayout>
   )
