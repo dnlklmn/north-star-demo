@@ -42,6 +42,8 @@ import {
   suggestStories,
   suggestSkill,
   generateSkillFromGoals,
+  importFromSkill,
+  setSessionMode,
   createDataset,
   getDataset,
   synthesizeExamples,
@@ -1142,6 +1144,36 @@ export default function ProjectWorkspace() {
         },
       }));
       setGeneratedSkillSig(sigAtRequest);
+
+      // Auto-chain Analyze. The backend's generate-skill-from-goals endpoint
+      // only persists the body — it does NOT populate the extracted state
+      // (extracted_goals/users/stories, input.business_goals/user_stories,
+      // task.input/output_description) that seed-gen reads from. Without the
+      // chain the Seed tab stays empty and "Generate seed" silently does
+      // nothing, because handleSubmitIntake reads state that was never
+      // populated. Mirror the same two calls SkillPanel.handleAnalyze makes
+      // when the user pastes a skill manually.
+      //
+      // Errors here do NOT unwind the body — the user still has a usable
+      // skill draft and can click Analyze manually if they want to retry.
+      // We just surface the failure as a non-blocking message in the
+      // top-level skillError state so the Skill panel can show it.
+      try {
+        await setSessionMode(urlSessionId, "triggered");
+        await importFromSkill(urlSessionId, {
+          skill_body: res.body,
+          skill_name: res.name ?? undefined,
+          skill_description: res.description ?? undefined,
+        });
+      } catch (err) {
+        // Non-fatal: body is already saved. The next SSE state refetch will
+        // catch up; user can re-trigger Analyze from the Skill panel if the
+        // server-side state isn't where they want it.
+        console.error(
+          "Auto-analyze after generate-from-goals failed:",
+          err,
+        );
+      }
 
       // Rename the project to the skill name when the current name is still
       // a generic default. Dedupe against other projects with a " 2",
