@@ -154,6 +154,14 @@ async def lifespan(app: FastAPI):
     from . import spend_cap
     spend_cap.setup()
 
+    # Provider fallback runs INSIDE both — it only wraps the terminal SDK
+    # call, so cache hits and spend-cap rejects bypass it entirely, and
+    # whichever provider actually succeeds is the one spend_cap counts.
+    # When both ANTHROPIC_API_KEY and OPENROUTER_API_KEY are set, a billing
+    # error on the primary triggers a one-shot retry on the other.
+    from . import provider_fallback
+    provider_fallback.setup()
+
     from . import feature_flags
     feature_flags.setup()
 
