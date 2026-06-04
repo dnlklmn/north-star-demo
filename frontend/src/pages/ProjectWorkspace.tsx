@@ -18,7 +18,6 @@ import {
   ScorerIcon,
 } from "../components/ui/Icons";
 import type {
-  Message,
   SessionState,
   StoryGroup,
   Suggestion,
@@ -32,7 +31,6 @@ import type {
   TaskDefinition,
 } from "../types";
 import {
-  createSession,
   getSession,
   sendMessage,
   patchSeed,
@@ -53,7 +51,6 @@ import {
   getGapAnalysis,
   getJudgeAgreement,
   exportDataset,
-  datasetChat,
   updateSessionName,
   updateSessionInput,
   saveScorers,
@@ -179,13 +176,6 @@ export default function ProjectWorkspace() {
     urlSessionId || null,
   );
   const [state, setState] = useState<SessionState>(EMPTY_STATE);
-  // Legacy discovery-flow message log. Polaris (rail chat) owns its own
-  // transcript via the PolarisProvider — these writes feed the dead
-  // ConversationPanel that used to live in the rail. The underscore
-  // tells eslint we know it's unused; full removal happens when the
-  // discovery state machine is collapsed into Polaris tools.
-  const [_messages, setMessages] = useState<Message[]>([]);
-  void _messages;
   const [loading, setLoading] = useState(false);
   const [hydrating, setHydrating] = useState(!!urlSessionId);
 
@@ -238,7 +228,7 @@ export default function ProjectWorkspace() {
   // (the banner offer becomes moot once a skill/prompt is in place).
 
   // --- Seed phase state ---
-  const [activeCriteria, setActiveCriteria] = useState<string[]>([]);
+  const [activeCriteria] = useState<string[]>([]);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [suggestedStories, setSuggestedStories] = useState<SuggestedStory[]>(
     [],
@@ -268,13 +258,6 @@ export default function ProjectWorkspace() {
 
   // --- Dataset phase state ---
   const [dataset, setDataset] = useState<Dataset | null>(null);
-  // Legacy dataset-chat action suggestions. Polaris surfaces proposals
-  // inline in the rail chat now; this state is still written by the old
-  // datasetChat path until that's collapsed into Polaris tools.
-  const [_actionSuggestions, setActionSuggestions] = useState<
-    Array<{ action: string; label: string; reason: string }>
-  >([]);
-  void _actionSuggestions;
 
   // --- Scorers state (lifted up for persistence across tab switches) ---
   const [scorers, setScorers] = useState<ScorerDef[]>([]);
@@ -514,7 +497,6 @@ export default function ProjectWorkspace() {
           role: m.role as "user" | "assistant",
           content: m.content,
         })) || [];
-      setMessages(hydrated);
       // Polaris owns its own transcript (rail chat). Hydrate it from the
       // same conversation so the user sees one continuous thread no matter
       // which surface they used to chat.
@@ -1540,6 +1522,9 @@ export default function ProjectWorkspace() {
     const goalsText = nonEmptyGoals.join("\n");
     const storiesText = formatStoryGroups(storyGroups);
     if (!goalsText && !storiesText) return;
+    // The route is `/project/:sessionId`, so a session always exists by the
+    // time this runs; bail defensively rather than create one.
+    if (!sessionId) return;
 
     notePolarisActivity("generating seed");
     suppressNextTabActivityRef.current = true;
@@ -1547,194 +1532,20 @@ export default function ProjectWorkspace() {
     setLoading(true);
 
     try {
-      if (!sessionId) {
-        const res = await createSession({
-          business_goals: goalsText || undefined,
-          user_stories: storiesText || undefined,
-          goals: nonEmptyGoals,
-          story_groups: storyGroups.filter((g) => g.role.trim()),
-        });
-        setSessionId(res.session_id);
-        navigate(`/project/${res.session_id}`, { replace: true });
-        if (res.message) {
-          setMessages([{ role: "assistant", content: res.message }]);
-        }
-        const session = await getSession(res.session_id);
-        setState(session.state as SessionState);
-        setSuggestions(res.suggestions || []);
-        setSuggestedStories(res.suggested_stories || []);
-        setSavedInput({ goals: goalsText, stories: storiesText });
-      } else {
-        const updateMsg = `I've updated my input.\n\nBusiness goals:\n${goalsText}\n\nUser stories:\n${storiesText}\n\nPlease regenerate the document with this updated input.`;
-        const res = await sendMessage(sessionId, updateMsg, {
-          regenerate: true,
-        });
-        setMessages((prev) => [
-          ...prev,
-          { role: "user", content: "(Updated input)" },
-          { role: "assistant", content: res.message },
-        ]);
-        setState(res.state);
-        setSuggestions(res.suggestions || []);
-        setSuggestedStories(res.suggested_stories || []);
-        setSavedInput({ goals: goalsText, stories: storiesText });
-      }
+      const updateMsg = `I've updated my input.\n\nBusiness goals:\n${goalsText}\n\nUser stories:\n${storiesText}\n\nPlease regenerate the document with this updated input.`;
+      const res = await sendMessage(sessionId, updateMsg, {
+        regenerate: true,
+      });
+      setState(res.state);
+      setSuggestions(res.suggestions || []);
+      setSuggestedStories(res.suggested_stories || []);
+      setSavedInput({ goals: goalsText, stories: storiesText });
     } catch (err) {
       console.error("Failed:", err);
     } finally {
       setLoading(false);
     }
-  }, [nonEmptyGoals, storyGroups, sessionId, navigate]);
-
-  // Execute an action from the agent
-  const executeAgentAction = useCallback(
-    async (action: { action: string; count?: number; example_id?: string }) => {
-      if (!dataset) return;
-
-      switch (action.action) {
-        case "generate":
-          try {
-            const res = await synthesizeExamples(
-              dataset.id,
-              action.count ? { count_per_scenario: action.count } : undefined,
-            );
-            const fullDs = await getDataset(dataset.session_id);
-            setDataset(fullDs);
-            setMessages((prev) => [
-              ...prev,
-              {
-                role: "assistant",
-                content: `Generated ${res.generated} examples.`,
-              },
-            ]);
-          } catch (err) {
-            console.error("Failed to generate:", err);
-          }
-          break;
-        case "show_coverage":
-          try {
-            const gaps = await getGapAnalysis(dataset.id);
-            setGapAnalysis(gaps);
-            setShowCoverageMap(true);
-          } catch (err) {
-            console.error("Failed to get coverage:", err);
-          }
-          break;
-        case "auto_review":
-          try {
-            const res = await autoReviewExamples(dataset.id);
-            const fullDs = await getDataset(dataset.session_id);
-            setDataset(fullDs);
-            setMessages((prev) => [
-              ...prev,
-              {
-                role: "assistant",
-                content: `Reviewed ${res.reviewed} examples.`,
-              },
-            ]);
-          } catch (err) {
-            console.error("Failed to auto-review:", err);
-          }
-          break;
-        case "export":
-          try {
-            const data = await exportDataset(dataset.id);
-            const blob = new Blob([JSON.stringify(data, null, 2)], {
-              type: "application/json",
-            });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = `dataset-v${dataset.version}.json`;
-            a.click();
-            URL.revokeObjectURL(url);
-          } catch (err) {
-            console.error("Failed to export:", err);
-          }
-          break;
-        case "approve":
-          if (action.example_id) {
-            try {
-              await apiUpdateExample(dataset.id, action.example_id, {
-                review_status: "approved",
-              });
-              const fullDs = await getDataset(dataset.session_id);
-              setDataset(fullDs);
-            } catch (err) {
-              console.error("Failed to approve:", err);
-            }
-          }
-          break;
-        case "reject":
-          if (action.example_id) {
-            try {
-              await apiUpdateExample(dataset.id, action.example_id, {
-                review_status: "rejected",
-              });
-              const fullDs = await getDataset(dataset.session_id);
-              setDataset(fullDs);
-            } catch (err) {
-              console.error("Failed to reject:", err);
-            }
-          }
-          break;
-      }
-    },
-    [dataset],
-  );
-
-  // Legacy chat handler — the rail no longer uses it (Polaris handles its
-  // own send). Kept because the discovery state machine still emits
-  // sendMessage / datasetChat calls from other code paths; will be
-  // removed when those are collapsed into Polaris tools.
-  const _handleSend = useCallback(
-    async (message: string) => {
-      if (!sessionId) return;
-      setMessages((prev) => [...prev, { role: "user", content: message }]);
-      setLoading(true);
-      try {
-        if (dataset) {
-          const res = await datasetChat(dataset.id, message);
-          setMessages((prev) => [
-            ...prev,
-            { role: "assistant", content: res.message },
-          ]);
-          setState(res.state);
-          setActionSuggestions(res.action_suggestions || []);
-          if (res.actions && res.actions.length > 0) {
-            for (const action of res.actions) {
-              await executeAgentAction(action);
-            }
-            const fullDs = await getDataset(dataset.session_id);
-            setDataset(fullDs);
-          }
-        } else {
-          const res = await sendMessage(sessionId, message);
-          setMessages((prev) => [
-            ...prev,
-            { role: "assistant", content: res.message },
-          ]);
-          setState(res.state);
-          setActiveCriteria([]);
-          setSuggestions(res.suggestions || []);
-          setSuggestedStories(res.suggested_stories || []);
-        }
-      } catch (err) {
-        console.error("Failed to send message:", err);
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: "assistant",
-            content: "Something went wrong. Please try again.",
-          },
-        ]);
-      } finally {
-        setLoading(false);
-      }
-    },
-    [sessionId, dataset, executeAgentAction],
-  );
-  void _handleSend;
+  }, [nonEmptyGoals, storyGroups, sessionId]);
 
   const handleEditCriterion = useCallback(
     async (dimension: string, index: number, value: string) => {
