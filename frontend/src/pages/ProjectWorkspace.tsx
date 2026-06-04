@@ -43,7 +43,6 @@ import {
   suggestSkill,
   generateSkillFromGoals,
   importFromSkill,
-  setSessionMode,
   createDataset,
   getDataset,
   synthesizeExamples,
@@ -1151,15 +1150,18 @@ export default function ProjectWorkspace() {
       // task.input/output_description) that seed-gen reads from. Without the
       // chain the Seed tab stays empty and "Generate seed" silently does
       // nothing, because handleSubmitIntake reads state that was never
-      // populated. Mirror the same two calls SkillPanel.handleAnalyze makes
-      // when the user pastes a skill manually.
+      // populated.
+      //
+      // Only call importFromSkill — it sets `eval_mode = triggered` itself
+      // (see main.py::import_from_skill), so a separate setSessionMode call
+      // would be redundant. It's also idempotent on the body hash: a re-run
+      // with the same body returns the existing snapshot without re-running
+      // the LLM or appending a duplicate v1. So an SSE-triggered re-fire or
+      // a user double-click does no harm.
       //
       // Errors here do NOT unwind the body — the user still has a usable
       // skill draft and can click Analyze manually if they want to retry.
-      // We just surface the failure as a non-blocking message in the
-      // top-level skillError state so the Skill panel can show it.
       try {
-        await setSessionMode(urlSessionId, "triggered");
         await importFromSkill(urlSessionId, {
           skill_body: res.body,
           skill_name: res.name ?? undefined,
