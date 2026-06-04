@@ -5,11 +5,9 @@ No LLM calls live here (see tools.py).
 This file only manages state transitions and orchestrates calls.
 
 Flow:
-1. Discovery goals phase → elicit business goals one question at a time
-2. Discovery stories phase → elicit user stories one question at a time
-3. Generate (explicit trigger via /advance-phase) → generate + validate + suggest
-4. Regenerate → regenerate full seed + validate + suggest
-5. Chat turn (seed exists) → converse, maybe update sections, suggest
+1. Generate (no seed yet) → generate + validate + suggest
+2. Regenerate → regenerate full seed + validate + suggest
+3. Chat turn (seed exists) → converse, maybe update sections, suggest
 """
 
 from __future__ import annotations
@@ -20,7 +18,6 @@ import logging
 from .models import (
     AgentStatus,
     AlignmentEntry,
-    DiscoveryPhase,
     DimensionStatus,
     SessionState,
     Suggestion,
@@ -29,7 +26,6 @@ from .models import (
 )
 from .db import create_turn
 from .tools import (
-    call_discovery_turn,
     call_generate_draft,
     call_validate_seed,
     call_conversational_turn,
@@ -54,9 +50,6 @@ class AgentResult:
         suggested_stories: list[SuggestedStory] | None = None,
         actions: list[dict] | None = None,
         action_suggestions: list[dict] | None = None,
-        extracted_goals: list[str] | None = None,
-        extracted_users: list[str] | None = None,
-        extracted_stories: list[dict] | None = None,
     ):
         self.message = message
         self.tool_calls = tool_calls or []
@@ -64,15 +57,6 @@ class AgentResult:
         self.suggested_stories = suggested_stories or []
         self.actions = actions or []
         self.action_suggestions = action_suggestions or []
-        self.extracted_goals = extracted_goals or []
-        self.extracted_users = extracted_users or []
-        self.extracted_stories = extracted_stories or []
-        self.ready_for_users = False
-        self.ready_for_stories = False
-        self.ready_for_seed = False
-        self.suggested_goals: list[str] = []
-        self.suggested_users: list[str] = []
-        self.suggested_stories_options: list[dict] = []
 
 
 async def run_agent_turn(
@@ -83,9 +67,9 @@ async def run_agent_turn(
     """Run one turn of the agent loop.
 
     Modes:
-    1. No seed → discovery turn (goals or stories phase)
-    2. Seed exists + regenerate → regenerate seed
-    3. Seed exists + user message → chat turn to refine
+    1. regenerate → regenerate seed
+    2. Seed exists + user message → chat turn to refine
+    3. No seed → generate one from current input
     """
     # Append user message to conversation history
     if user_message:
@@ -95,13 +79,12 @@ async def run_agent_turn(
         })
 
     has_seed = bool(state.seed.coverage.criteria or state.seed.alignment)
-    phase = "seed" if has_seed else (state.discovery_phase.value if state.discovery_phase else None)
-    turn_number = state.rounds_of_questions if has_seed else state.discovery_rounds
+    phase = "seed" if has_seed else None
 
     with set_trace_meta(
         session_id=state.session_id,
         phase=phase,
-        turn_number=turn_number,
+        turn_number=state.rounds_of_questions,
     ):
         # --- Explicit regenerate (force seed generation, even if empty) ---
         if regenerate:
@@ -111,128 +94,8 @@ async def run_agent_turn(
         if has_seed and user_message:
             return await _chat_turn(state, user_message)
 
-        # --- No seed → discovery (goals or stories phase) ---
-        return await _discovery_turn(state, user_message)
-
-
-async def _discovery_turn(state: SessionState, user_message: str | None) -> AgentResult:
-    """Run a discovery turn — elicit goals, users, or stories depending on phase."""
-    state.agent_status = AgentStatus.discovery
-
-    text, extraction, calls = await call_discovery_turn(state, user_message)
-
-    # Apply extractions
-    ready_for_users = False
-    ready_for_stories = False
-    ready_for_seed = False
-
-    if extraction:
-        new_goals = extraction.get("goals", [])
-        new_users = extraction.get("users", [])
-        new_stories = extraction.get("stories", [])
-        ready_for_users = extraction.get("ready_for_users", False)
-        ready_for_stories = extraction.get("ready_for_stories", False)
-        ready_for_seed = extraction.get("ready_for_seed", False)
-
-        # Append new goals (deduplicate)
-        existing_goals_lower = {g.lower() for g in state.extracted_goals}
-        for g in new_goals:
-            if g and g.lower() not in existing_goals_lower:
-                state.extracted_goals.append(g)
-                existing_goals_lower.add(g.lower())
-
-        # Append new users (deduplicate)
-        existing_users_lower = {u.lower() for u in state.extracted_users}
-        for u in new_users:
-            if u and u.lower() not in existing_users_lower:
-                state.extracted_users.append(u)
-                existing_users_lower.add(u.lower())
-
-        # Append new stories (deduplicate by who+what similarity)
-        existing_story_keys = {
-            (s.get("who", "").lower(), s.get("what", "").lower().strip()[:40])
-            for s in state.extracted_stories
-        }
-        for s in new_stories:
-            if s.get("who") and s.get("what"):
-                key = (s["who"].lower(), s["what"].lower().strip()[:40])
-                if key not in existing_story_keys:
-                    state.extracted_stories.append(s)
-                    existing_story_keys.add(key)
-
-    state.discovery_rounds += 1
-    state.input.conversation_history.append({"role": "assistant", "content": text})
-
-    await create_turn(
-        session_id=state.session_id,
-        turn_type="discovery",
-        input_snapshot={
-            "user_message": user_message,
-            "round": state.discovery_rounds,
-            "phase": state.discovery_phase.value,
-        },
-        llm_calls=calls,
-        parsed_output=extraction,
-        agent_message=text,
-    )
-
-    result = AgentResult(
-        message=text,
-        extracted_goals=state.extracted_goals,
-        extracted_users=state.extracted_users,
-        extracted_stories=state.extracted_stories,
-    )
-    result.ready_for_users = ready_for_users
-    result.ready_for_stories = ready_for_stories
-    result.ready_for_seed = ready_for_seed
-
-    # Pass through suggested clickable options
-    if extraction:
-        result.suggested_goals = extraction.get("suggested_goals", [])
-        result.suggested_users = extraction.get("suggested_users", [])
-        result.suggested_stories_options = extraction.get("suggested_stories", [])
-
-    return result
-
-
-async def advance_phase(state: SessionState) -> AgentResult:
-    """Advance the discovery phase: goals→users→stories→seed generation."""
-    if state.discovery_phase == DiscoveryPhase.goals:
-        # Move to users phase
-        state.discovery_phase = DiscoveryPhase.users
-        with set_trace_meta(session_id=state.session_id, phase="users", turn_number=state.discovery_rounds):
-            return await _discovery_turn(state, None)
-
-    elif state.discovery_phase == DiscoveryPhase.users:
-        # Move to stories phase
-        state.discovery_phase = DiscoveryPhase.stories
-        with set_trace_meta(session_id=state.session_id, phase="stories", turn_number=state.discovery_rounds):
-            return await _discovery_turn(state, None)
-
-    elif state.discovery_phase == DiscoveryPhase.stories:
-        # Move to seed generation
-        _build_input_from_extractions(state)
-        with set_trace_meta(session_id=state.session_id, phase="seed", turn_number=state.rounds_of_questions):
-            result = await _generate_and_validate(state)
-        state.input.conversation_history.append({"role": "assistant", "content": result.message})
-        return result
-
-    # Fallback
-    return AgentResult(message="Already past discovery.")
-
-
-def _build_input_from_extractions(state: SessionState) -> None:
-    """Build business_goals and user_stories text from extracted data."""
-    if state.extracted_goals:
-        state.input.business_goals = "\n".join(f"- {g}" for g in state.extracted_goals)
-    if state.extracted_stories:
-        parts = []
-        for s in state.extracted_stories:
-            who = s.get("who", "user")
-            what = s.get("what", "")
-            why = s.get("why", "")
-            parts.append(f"As a {who}, I want to {what}" + (f", so that {why}" if why else ""))
-        state.input.user_stories = "\n".join(parts)
+        # --- No seed yet → generate one from current input ---
+        return await _generate_and_validate(state)
 
 
 async def _generate_and_validate(state: SessionState) -> AgentResult:

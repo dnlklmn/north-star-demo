@@ -34,13 +34,6 @@ class ValidationStatus(str, Enum):
     untested = "untested"
 
 
-class DiscoveryPhase(str, Enum):
-    goals = "goals"
-    users = "users"
-    stories = "stories"
-    seed = "seed"
-
-
 class EvalMode(str, Enum):
     """Whether the thing being evaluated has a routing/triggering decision.
 
@@ -148,8 +141,6 @@ class SessionState(BaseModel):
     validation: Validation = Field(default_factory=Validation)
     rounds_of_questions: int = 0
     agent_status: AgentStatus = AgentStatus.drafting
-    discovery_phase: DiscoveryPhase = DiscoveryPhase.goals
-    discovery_rounds: int = 0
     extracted_goals: list[str] = Field(default_factory=list)
     extracted_users: list[str] = Field(default_factory=list)
     # Stories are dicts with: who, what, why, kind ("positive" | "off_target").

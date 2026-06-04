@@ -187,7 +187,6 @@ async def _get_project(ctx: ToolCtx, args: dict) -> dict:
     return {
         "id": sid,
         "name": row.get("name"),
-        "discovery_phase": state.get("discovery_phase"),
         "agent_status": state.get("agent_status"),
         "n_goals": len(state.get("extracted_goals") or []),
         "n_users": len(state.get("extracted_users") or []),

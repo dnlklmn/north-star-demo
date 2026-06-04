@@ -2,7 +2,7 @@
 
 ## Project overview
 
-North Star is an eval-driven development platform. A charter generation agent helps product/business people define what good AI output looks like — before writing a single eval. Users describe their AI feature through guided conversation, and the agent builds a charter (Coverage, Balance, Alignment, Rot) then helps generate a labeled dataset.
+North Star is an eval-driven development platform. It helps product/business people define what good AI output looks like — before writing a single eval. Users work through six tabs — **Goals → Skill → Seed → Dataset → Scorers → Evaluate** — building a **seed** (the charter: task input/output plus Coverage, Balance, and Alignment criteria), then a labeled dataset and scorers to evaluate against it.
 
 ## Tech stack
 
@@ -25,9 +25,9 @@ backend/app/           FastAPI app
 
 ## Key patterns
 
-- **5-phase state machine:** goals → users → stories → charter → dataset. Phase advances via `/advance-phase` endpoint.
-- **Discovery phases:** One question per turn. Agent extracts goals/users/stories from conversation via `extraction` blocks in LLM responses.
-- **Debounced reevaluation:** Charter edits trigger a 3-second debounce timer, then background re-validation via the agent.
+- **Six-tab workflow:** Goals → Skill → Seed → Dataset → Scorers → Evaluate. Tabs are navigated manually — there is no automatic phase state machine.
+- **Seed (the charter):** Defines the task's input/output and the Coverage, Balance, and Alignment criteria that good output must satisfy. Pasting a SKILL.md pre-fills it by extracting goals/users/stories/task in one LLM call.
+- **Debounced reevaluation:** Seed edits trigger a 3-second debounce timer, then background re-validation via the agent.
 - **Optimistic UI updates:** Frontend updates state immediately, agent catches up asynchronously.
 - **Turn logging:** Every LLM interaction logged to `turns` table with full input/output/metadata for replay and judging.
 
@@ -95,5 +95,5 @@ npx tsc --noEmit     # Type check
 - Types are centralized in `frontend/src/types.ts`.
 - API client is in `frontend/src/api.ts` — all fetch calls go through here.
 - Backend uses Pydantic models for all request/response validation.
-- Agent extraction uses fenced code blocks (`\`\`\`extraction ... \`\`\``) parsed from LLM responses, not tool calls.
+- Agent extraction (e.g. from a pasted SKILL.md) parses a JSON object from the LLM response, not tool calls.
 - Deduplication of extracted items (goals, users, stories) uses first-40-chars matching (case-insensitive).
