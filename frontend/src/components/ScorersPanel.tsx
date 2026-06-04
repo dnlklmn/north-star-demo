@@ -154,8 +154,20 @@ export default function ScorersPanel({ seed, hasDataset: _hasDataset, sessionId,
     setError(null)
     try {
       const result = await getBraintrustScorerPrompt(sessionId, scorerName)
-      const clipboardText = result.filter
-        ? `${result.prompt}\n<!-- Braintrust trigger filter: ${result.filter} -->\n`
+      // Both shapes (judge prompt + code-based python) come back as a
+      // populated `prompt` string. The `kind` only affects WHICH Braintrust
+      // editor the user pastes into — we append a hint comment so they
+      // don't paste a python block into the prompt editor.
+      const targetHint =
+        result.kind === 'deterministic'
+          ? '<!-- Deterministic scorer — paste into Braintrust\'s CODE-BASED online-scorer editor (not the prompt editor). -->'
+          : null
+      const filterHint = result.filter
+        ? `<!-- Braintrust trigger filter: ${result.filter} -->`
+        : null
+      const trailers = [targetHint, filterHint].filter(Boolean).join('\n')
+      const clipboardText = trailers
+        ? `${result.prompt}\n${trailers}\n`
         : result.prompt
       await navigator.clipboard.writeText(clipboardText)
       setExportedName(scorerName)

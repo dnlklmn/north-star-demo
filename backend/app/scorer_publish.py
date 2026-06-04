@@ -1,22 +1,33 @@
 """Convert generated Python scorers into Braintrust online-scorer markdown.
 
-Generated scorers (the ones `call_generate_scorers` emits, persisted on
-``state.scorers``) are Python functions that wrap an LLM-as-judge prompt:
+Hybrid-scoring (see ``build_generate_scorers_prompt`` in ``prompt.py``)
+emits two scorer shapes:
 
-    def alignment_goals_extraction(output: str, input: str) -> float:
-        \"\"\"...\"\"\"
-        judge_prompt = f\"\"\"...{input}...{output}...\"\"\"
-        return call_judge(judge_prompt)
+  - **Judge scorers** wrap an LLM-as-judge prompt::
 
-That shape is what the offline eval harness ``evals/run_eval.py`` runs. It is
-NOT what Braintrust's online-scorer UI accepts — that wants a prompt template
-with Mustache placeholders ``{{input}}`` / ``{{output}}`` plus YAML
-frontmatter telling our ``online_scorers.py`` registry how to filter and
-which model to use.
+        def alignment_goals_extraction(output, input, metadata):
+            judge_prompt = f\"\"\"...{input}...{output}...\"\"\"
+            return call_judge(judge_prompt)
 
-This module bridges the two: read a scorer dict, find the ``judge_prompt``
-f-string in its code, rewrite ``{input}`` / ``{output}`` to ``{{input}}`` /
-``{{output}}``, wrap with frontmatter, return ready-to-write markdown.
+  - **Deterministic scorers** are pure-Python format/structure checks (no
+    ``call_judge``)::
+
+        def safety_valid_json(output, input, metadata):
+            try:
+                json.loads(output)
+            except Exception:
+                return 0.0
+            return 1.0
+
+Both shapes have a Braintrust online-scorer equivalent — Braintrust supports
+*prompt-based* (LLM-as-judge) and *code-based* (pure JS/Python) online
+scorers. This module bridges each shape to the matching markdown form:
+
+  - Judge scorer → prompt-based ``.md`` (Mustache ``{{input}}``/``{{output}}``
+    template + choice rubric tail).
+  - Deterministic scorer → code-based ``.md`` (fenced ``python`` block with
+    the function source + a note that the runtime provides ``re``, ``json``,
+    ``json_schema_ok``).
 
 Used by ``main._export_generated_scorers`` (live, on every /generate-scorers
 call) and by the ``online_scorers.py publish`` CLI (retroactive, for sessions
@@ -34,6 +45,53 @@ class ScorerPublishError(ValueError):
     """Raised when a generated scorer's code can't be converted to a Braintrust
     online-scorer prompt — usually because the LLM produced something that
     doesn't match the expected ``judge_prompt = f'...'`` shape."""
+
+
+# Note: a previous minimum-bar fix raised ``DeterministicScorerNotPublishable``
+# here for deterministic scorers, treating them as offline-only. That sentinel
+# is gone — ``scorer_to_online_md`` now emits a code-based markdown for the
+# deterministic shape and returns successfully, so callers no longer need a
+# separate skip path. Callers that want to know the rendered scoring method
+# can inspect the ``scoring_method`` field in the emitted frontmatter.
+
+
+def _is_deterministic_scorer(code: str) -> bool:
+    """Detect a deterministic scorer: pure Python, no LLM call.
+
+    A scorer is deterministic when its code contains neither a
+    ``judge_prompt = ...`` assignment nor a ``call_judge(...)`` invocation.
+    We check both because either alone is enough to make the scorer
+    LLM-based, and a deterministic scorer must have neither — there's no
+    in-between in the generator's contract (see
+    ``build_generate_scorers_prompt`` in ``prompt.py``).
+
+    Uses AST when the code parses (robust to strings that mention these
+    names in comments/docstrings), with a textual fallback for code that
+    doesn't parse — same fallback shape as ``_extract_judge_prompt``.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        # Conservative fallback: if either marker appears anywhere, treat
+        # as judge-based. False negatives (treating a deterministic scorer
+        # as judge-based here) only mean we'll hit the existing
+        # "no judge_prompt assignment" error path — same as today.
+        return ("judge_prompt" not in code) and ("call_judge(" not in code)
+
+    has_judge_prompt = False
+    has_call_judge = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name) and tgt.id == "judge_prompt":
+                    has_judge_prompt = True
+        elif isinstance(node, ast.Call):
+            fn = node.func
+            if isinstance(fn, ast.Name) and fn.id == "call_judge":
+                has_call_judge = True
+        if has_judge_prompt or has_call_judge:
+            return False
+    return True
 
 
 def _extract_judge_prompt(code: str) -> str:
@@ -227,6 +285,35 @@ def _yaml_escape(value: str) -> str:
     return f'"{escaped}"'
 
 
+def _render_deterministic_body(code: str) -> str:
+    """Wrap a deterministic scorer's function source in a fenced markdown
+    block + a note about what's in the runtime namespace.
+
+    Braintrust's code-based online scorer editor takes raw Python (or JS).
+    The fenced block makes it copy-pasteable verbatim from the rendered
+    markdown — same UX as the prompt-paste flow for judge scorers, just a
+    different paste target on the Braintrust side. The runtime-namespace
+    note matters because the generator deliberately strips ``import`` lines
+    (see ``compile_scorers`` in ``eval_runner.py``): a user pasting the
+    code into Braintrust will need to add the equivalent imports there, so
+    we name them explicitly here rather than letting the user guess from
+    bare ``re.search`` / ``json.loads`` calls.
+    """
+    body = (
+        "This scorer is **deterministic** (pure Python, no LLM judge). "
+        "Paste it into a Braintrust **code-based** online scorer, not a "
+        "prompt-based one.\n\n"
+        "Runtime namespace (must be importable in your Braintrust scorer): "
+        "`re`, `json`, and a minimal `json_schema_ok(obj, schema) -> bool` "
+        "helper — see `backend/app/eval_runner.py::json_schema_ok` for the "
+        "reference implementation if you need to inline it.\n\n"
+        "```python\n"
+        f"{code.strip()}\n"
+        "```\n"
+    )
+    return body
+
+
 def scorer_to_online_md(
     scorer: dict[str, Any],
     *,
@@ -239,6 +326,12 @@ def scorer_to_online_md(
 
     ``scorer`` is a dict with keys ``name``, ``description``, ``type``,
     ``code`` (matches what ``call_generate_scorers`` returns).
+
+    Routes by shape:
+      - Judge scorers (have ``judge_prompt = ...`` / ``call_judge``) →
+        prompt-based markdown with Mustache placeholders.
+      - Deterministic scorers (neither marker) → code-based markdown with
+        a fenced ``python`` block.
 
     ``turn_type`` is the Braintrust trace filter — for prompt-eval projects
     this is the ``prompt_target`` (e.g. ``"skill_import"``) so the scorer fires
@@ -253,8 +346,13 @@ def scorer_to_online_md(
     description = (scorer.get("description") or "").strip()
     scorer_type = (scorer.get("type") or "").strip()
 
-    raw_prompt = _extract_judge_prompt(code)
-    body = _normalize_response_tail(_to_mustache(raw_prompt)).strip()
+    if _is_deterministic_scorer(code):
+        scoring_method = "deterministic"
+        body = _render_deterministic_body(code)
+    else:
+        scoring_method = "judge"
+        raw_prompt = _extract_judge_prompt(code)
+        body = _normalize_response_tail(_to_mustache(raw_prompt)).strip()
 
     # Frontmatter: keep keys aligned with backend/app/scorers/*.md so the
     # online_scorers.py parser handles them without a special case.
@@ -265,6 +363,7 @@ def scorer_to_online_md(
         lines.append(f"description: {_yaml_escape(description)}")
     if scorer_type:
         lines.append(f"scorer_type: {scorer_type}")
+    lines.append(f"scoring_method: {scoring_method}")
     if session_id:
         lines.append(f"source_session: {session_id}")
     if scope:

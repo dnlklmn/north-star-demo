@@ -358,7 +358,22 @@ export async function generateScorers(sessionId: string): Promise<{ scorers: Sco
 export async function getBraintrustScorerPrompt(
   sessionId: string,
   scorerName: string,
-): Promise<{ name: string; prompt: string; filter: string | null }> {
+): Promise<{
+  name: string
+  /** Markdown body the user pastes into Braintrust. For `kind: "judge"` this
+   *  is a Mustache-templated prompt (paste into the prompt editor). For
+   *  `kind: "deterministic"` it's a fenced ``python`` code block (paste into
+   *  Braintrust's code-based online-scorer editor). Either way, always a
+   *  populated string — there is no offline-only skip path. */
+  prompt: string
+  /** Trigger filter expression for the Braintrust UI. Null for skill-eval
+   *  sessions where the user picks a filter manually. Applies to both
+   *  scorer kinds — Braintrust filters live above the scorer body. */
+  filter: string | null
+  /** Tells the frontend which Braintrust editor the body targets — useful
+   *  for the copy hint (e.g. "Paste into the code-based scorer editor"). */
+  kind: 'judge' | 'deterministic'
+}> {
   const res = await apiFetch(
     `${BASE}/sessions/${sessionId}/scorers/${encodeURIComponent(scorerName)}/braintrust-prompt`,
   )
