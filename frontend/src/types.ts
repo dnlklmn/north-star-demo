@@ -524,3 +524,112 @@ export interface AgentRowMetadata {
   halted: string | null
   workspace: string | null
 }
+
+// ---------------------------------------------------------------------------
+// PRD -> prod demo pipeline contracts. Mirrors backend/app/contracts.py.
+// See docs/quick-demo-plan.md. Keep the two in sync.
+// ---------------------------------------------------------------------------
+
+export type InputFieldType =
+  | 'text'
+  | 'longtext'
+  | 'number'
+  | 'boolean'
+  | 'enum'
+  | 'json'
+  | 'file'
+  | 'image'
+
+export interface InputField {
+  name: string
+  type: InputFieldType
+  required: boolean
+  description?: string
+  enum?: string[]
+  mime?: string | null
+}
+
+/** Typed description of a feature's input — drives the deploy form, dataset
+ *  synthesis, and RunFeature message assembly. One `text` field == today's
+ *  plain-string behavior. */
+export interface InputSchema {
+  fields: InputField[]
+}
+
+export interface ArtifactRef {
+  type: 'file' | 'image'
+  mime: string
+  ref: string
+  filename: string
+}
+
+/** A feature input: a bare string (single text field) or a field-name->value map. */
+export type FeatureInput = string | Record<string, unknown>
+
+/** Canonical trace = the frozen AgentRowMetadata rendering contract plus
+ *  additive, UI-optional fields. EvaluatePanel renders this unchanged whether
+ *  it came from the in-process loop, the SDK runner, or a production call. */
+export interface FeatureTrace extends AgentRowMetadata {
+  final_text?: string | null
+  model?: string | null
+  input_tokens?: number | null
+  output_tokens?: number | null
+  latency_ms?: number | null
+}
+
+export type RunMode = 'single_shot' | 'agent'
+
+export interface RunFeatureRequest {
+  skill_id: string
+  skill_body: string
+  input_schema: InputSchema
+  input: FeatureInput
+  mode?: RunMode
+  model?: string
+  max_iterations?: number
+  allow_bash?: boolean
+}
+
+export interface RunFeatureResult {
+  output: string
+  trace: FeatureTrace
+  error?: string | null
+}
+
+export type LoopTargetPolicy = 'feature_only' | 'feature_and_dataset'
+
+export interface LoopConfig {
+  pass_threshold: number
+  max_rounds: number
+  target_policy: LoopTargetPolicy
+}
+
+/** One round of the bounded self-improvement loop, surfaced to the UI. */
+export interface LoopRoundEvent {
+  round: number
+  changed: string
+  rationale: string
+  scorer_scores: Record<string, number>
+  pass_rate: number
+  delta?: number | null
+  passed: boolean
+}
+
+export interface ScorerResult {
+  scorer: string
+  score: number | null
+  error?: string | null
+}
+
+/** One production invocation of a deployed feature. */
+export interface ProdLogRecord {
+  id: string
+  skill_id: string
+  input: FeatureInput
+  output: string
+  trace: FeatureTrace
+  scores: ScorerResult[]
+  latency_ms?: number | null
+  error?: string | null
+  created_at?: string | null
+}

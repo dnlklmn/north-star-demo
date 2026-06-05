@@ -1,0 +1,21 @@
+# One-liner to run the RunFeature container locally.
+#   docker compose -f backend/runner_container/docker-compose.yml up --build
+#
+# After the container is up, set CONTAINER_URL=http://localhost:8088 and
+# RUNNER_BACKEND=container in the backend env to route run_feature() through
+# this service.
+services:
+  runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: northstar/runner-container:dev
+    container_name: northstar-runner
+    ports:
+      - "8088:8088"
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be set}
+      MODEL_NAME: ${MODEL_NAME:-claude-sonnet-4-20250514}
+      PORT: "8088"
+      HOST: "0.0.0.0"
+    restart: unless-stopped
