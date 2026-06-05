@@ -19,11 +19,8 @@ endpoint streams whatever shape this module produces.
 
 from __future__ import annotations
 
-import pytest
 
 from app.training_corpus import (
-    ParseResult,
-    SubCriterion,
     build_training_samples,
     parse_judge_response,
 )
