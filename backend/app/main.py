@@ -4059,6 +4059,43 @@ async def list_eval_runs_endpoint(session_id: str):
     return [_eval_run_to_summary(r) for r in runs]
 
 
+@app.get("/sessions/{session_id}/training-corpus")
+async def get_training_corpus_endpoint(
+    session_id: str,
+    eval_run_limit: int = 50,
+    include_skipped: bool = False,
+    include_deterministic: bool = False,
+):
+    """Stream the training-shape corpus for a session as JSONL.
+
+    Joins every eval run's per_row × dataset examples and yields one
+    training sample per (eval_run, dataset_row, scorer) pairing. Each line
+    is one JSON object matching the planning doc's
+    ``docs/tier3a-training-data-capture.md`` schema — input, output,
+    judge_score, judge_per_sub_criteria (parsed from the captured CoT),
+    human supervision fields when reviewed, and provenance.
+
+    Streamed line-by-line so a session with many large eval runs doesn't
+    blow the response buffer; consumers can stop reading mid-stream.
+
+    By default, gated-out scorers and deterministic scorers (no judge
+    text) are skipped — they don't carry CoT supervision signal. Override
+    with the query flags when doing accounting / debugging passes.
+    """
+    from .training_corpus import iter_training_samples_for_session
+
+    async def streamer():
+        async for sample in iter_training_samples_for_session(
+            session_id,
+            include_skipped=include_skipped,
+            include_deterministic=include_deterministic,
+            eval_run_limit=eval_run_limit,
+        ):
+            yield (json.dumps(sample, default=str) + "\n").encode("utf-8")
+
+    return StreamingResponse(streamer(), media_type="application/x-ndjson")
+
+
 @app.patch(
     "/sessions/{session_id}/eval-runs/{run_id}/rows/{example_id}/note",
     response_model=EvalRunSummary,
