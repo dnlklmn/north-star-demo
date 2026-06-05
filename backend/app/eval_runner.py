@@ -11,6 +11,7 @@ don't block the event loop.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -90,6 +91,70 @@ class EvalResult:
     per_row: list[dict[str, Any]] = field(default_factory=list)
 
 
+def json_schema_ok(obj: Any, schema: Any) -> bool:
+    """Validate ``obj`` against a minimal subset of JSON Schema.
+
+    Dependency-free (no ``jsonschema`` package). Injected into generated
+    scorer namespaces so deterministic format checks can run without
+    ``import``. Supports ``type`` (object/array/string/number/integer/
+    boolean/null), ``required`` (list of keys), ``properties`` (recurse),
+    and ``items`` (recurse for array elements). Unknown keywords are
+    ignored. Never raises — returns ``False`` on any mismatch or error.
+    """
+    try:
+        if not isinstance(schema, dict):
+            return False
+
+        expected_type = schema.get("type")
+        if expected_type is not None:
+            type_map = {
+                "object": dict,
+                "array": list,
+                "string": str,
+                "boolean": bool,
+                "null": type(None),
+            }
+            if expected_type == "integer":
+                # bool is a subclass of int — exclude it.
+                if isinstance(obj, bool) or not isinstance(obj, int):
+                    return False
+            elif expected_type == "number":
+                if isinstance(obj, bool) or not isinstance(obj, (int, float)):
+                    return False
+            elif expected_type in type_map:
+                if not isinstance(obj, type_map[expected_type]):
+                    return False
+            else:
+                # Unknown type keyword — can't validate, treat as failure.
+                return False
+
+        if "required" in schema:
+            required = schema.get("required")
+            if not isinstance(obj, dict) or not isinstance(required, list):
+                return False
+            for key in required:
+                if key not in obj:
+                    return False
+
+        if "properties" in schema:
+            properties = schema.get("properties")
+            if isinstance(properties, dict) and isinstance(obj, dict):
+                for key, subschema in properties.items():
+                    if key in obj and not json_schema_ok(obj[key], subschema):
+                        return False
+
+        if "items" in schema:
+            item_schema = schema.get("items")
+            if isinstance(obj, list) and isinstance(item_schema, dict):
+                for element in obj:
+                    if not json_schema_ok(element, item_schema):
+                        return False
+
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def make_judge(client: anthropic.Anthropic, model: str) -> Callable[[str], float]:
     """Build a `call_judge(prompt) -> float` helper for scorer bodies to call.
 
@@ -105,13 +170,16 @@ def make_judge(client: anthropic.Anthropic, model: str) -> Callable[[str], float
         framed = (
             prompt
             + "\n\n---\n"
-            "Respond with your reasoning (1-2 sentences), then on a NEW FINAL LINE write:\n"
+            "Work through each criterion in the rubric above one at a time. "
+            "For each, state whether the output satisfies it and why (one line each). "
+            "Then, on a NEW FINAL LINE, write:\n"
             "SCORE: <number between 0.0 and 1.0>\n"
-            "The SCORE: line must be the last line of your response."
+            "The SCORE: line must be the last line."
         )
         response = client.messages.create(
             model=model,
             max_tokens=512,
+            temperature=0,
             messages=[{"role": "user", "content": framed}],
         )
         text = response.content[0].text if response.content else ""
@@ -208,6 +276,11 @@ def compile_scorers(
 
         module = types.ModuleType(f"_northstar_scorer_{name}")
         module.call_judge = call_judge  # type: ignore[attr-defined]
+        # Generated scorers can't `import` — inject the deterministic
+        # helpers they're allowed to use directly into their namespace.
+        module.re = re  # type: ignore[attr-defined]
+        module.json = json  # type: ignore[attr-defined]
+        module.json_schema_ok = json_schema_ok  # type: ignore[attr-defined]
         try:
             exec(code, module.__dict__)
         except Exception as e:  # noqa: BLE001

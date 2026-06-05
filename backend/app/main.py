@@ -1812,7 +1812,7 @@ async def get_braintrust_prompt(session_id: str, scorer_name: str):
     if scorer is None:
         raise HTTPException(status_code=404, detail=f"No scorer named '{scorer_name}' on session {session_id}")
 
-    from .scorer_publish import scorer_to_online_md, ScorerPublishError
+    from .scorer_publish import scorer_to_online_md, ScorerPublishError, _is_deterministic_scorer
     turn_type = state.prompt_target if state.kind == SessionKind.prompt else None
     try:
         body = scorer_to_online_md(
@@ -1826,8 +1826,12 @@ async def get_braintrust_prompt(session_id: str, scorer_name: str):
             status_code=422,
             detail=f"Cannot convert scorer to Braintrust format: {e}",
         )
-    # Filter expression the user pastes into the Braintrust UI's trigger
-    # field. None for skill-eval projects (no live trace turn_type to filter on).
+    # Frontend distinguishes "paste into prompt editor" from "paste into
+    # code-scorer editor" via this field. ``filter`` only applies to judge
+    # scorers (it's the trace-trigger filter); deterministic code scorers
+    # in Braintrust attach via the same filter, but we keep it on the
+    # response either way so the same UI flow works for both shapes.
+    scoring_method = "deterministic" if _is_deterministic_scorer(scorer.get("code") or "") else "judge"
     filter_expression = (
         f'metadata.turn_type = "{turn_type}"' if turn_type else None
     )
@@ -1835,6 +1839,7 @@ async def get_braintrust_prompt(session_id: str, scorer_name: str):
         "name": scorer_name,
         "prompt": body,
         "filter": filter_expression,
+        "kind": scoring_method,
     }
 
 

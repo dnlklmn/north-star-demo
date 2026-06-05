@@ -21,7 +21,6 @@ Storage is an in-memory dict — fine for the demo, swap for the DB later.
 from __future__ import annotations
 
 import html
-import json
 import time
 import uuid
 from datetime import datetime, timezone
