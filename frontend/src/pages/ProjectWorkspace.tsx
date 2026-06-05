@@ -3427,6 +3427,7 @@ export default function ProjectWorkspace() {
               sessionId={urlSessionId}
               dataset={dataset}
               scorerCount={scorers.length}
+              scorers={scorers}
               hasSkillBody={!!state.seed.task.skill_body}
               isPromptEval={isPromptEval}
               skillBody={state.seed.task.skill_body || ""}
