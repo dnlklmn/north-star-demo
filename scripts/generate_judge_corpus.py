@@ -315,6 +315,12 @@ def parse_args() -> Config:
     p.add_argument("--project", default="north-star-corpus", help="Braintrust project name for the runs (default: %(default)s)")
     p.add_argument("--poll-interval", type=float, default=5.0, help="Seconds between eval-run status polls (default: %(default)s)")
     p.add_argument("--poll-timeout", type=float, default=600.0, help="Max seconds to wait per eval run (default: %(default)s)")
+    p.add_argument(
+        "--only-spec",
+        action="append",
+        default=None,
+        help="Restrict to a specific spec by name (repeat for multiple). Useful for targeted re-tests after a prompt change.",
+    )
     args = p.parse_args()
 
     # Resolve mode-aware defaults so callers can keep `--mode parsing` ergonomic.
@@ -322,6 +328,14 @@ def parse_args() -> Config:
         args.n_skills = 5 if args.mode == "parsing" else 50
     if args.n_rows_per_scenario is None:
         args.n_rows_per_scenario = 4 if args.mode == "parsing" else 1
+
+    if args.only_spec:
+        wanted = set(args.only_spec)
+        global SKILL_CATALOG
+        SKILL_CATALOG = [s for s in SKILL_CATALOG if s["name"] in wanted]
+        if not SKILL_CATALOG:
+            sys.exit(f"--only-spec {args.only_spec}: no matching specs in catalog")
+        args.n_skills = len(SKILL_CATALOG)
 
     return Config(
         base_url=args.base_url.rstrip("/"),

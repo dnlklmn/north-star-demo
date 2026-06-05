@@ -165,16 +165,36 @@ def make_judge(client: anthropic.Anthropic, model: str) -> Callable[[str], float
     import re
 
     def call_judge(prompt: str) -> float:
-        # Force a rigid output shape the parser can trust, regardless of what
-        # the generated scorer's inner prompt asks for.
+        # Mandate a single, parseable line shape per sub-criterion plus a
+        # final SCORE: line. The first version of this framing asked for
+        # "one line each" — which Haiku interpreted loosely, mixing
+        # `**N. Name**: MET (1.0)` (high-score cases) with
+        # `**N. Name (0):**` (low-score cases) and sometimes dropping the
+        # SCORE: line entirely. Measurement against a 68-sample corpus
+        # showed 56% parser hit rate under the loose framing
+        # (scripts/measure_parsing_hit_rate.py against
+        # /tmp/judge_corpus.jsonl). Tightening to ONE format with literal
+        # markers ([PASS]/[PARTIAL]/[FAIL], em-dash separator, mandatory
+        # numeric weight) pushes that into the green band by leaving no
+        # interpretive wiggle room. The Tier 3A parser at
+        # scripts/measure_parsing_hit_rate.py expects exactly this shape.
         framed = (
             prompt
             + "\n\n---\n"
-            "Work through each criterion in the rubric above one at a time. "
-            "For each, state whether the output satisfies it and why (one line each). "
-            "Then, on a NEW FINAL LINE, write:\n"
-            "SCORE: <number between 0.0 and 1.0>\n"
-            "The SCORE: line must be the last line."
+            "Output format — follow EXACTLY, no improvisation:\n\n"
+            "For EACH criterion in the rubric above, write ONE line in this exact format:\n"
+            "  **N. <criterion name>** [PASS|PARTIAL|FAIL|N/A] (weight) — <one-sentence reason>\n\n"
+            "Where:\n"
+            "  • N is the criterion number, starting at 1, no gaps\n"
+            "  • Replace [PASS|PARTIAL|FAIL|N/A] with one of those four literal labels in square brackets\n"
+            "  • (weight) is a number: 1.0 for PASS, 0.0 for FAIL, between 0 and 1 for PARTIAL,\n"
+            "    and 0.5 for N/A (use N/A only when the criterion genuinely doesn't apply to this\n"
+            "    output's situation — e.g. a 'must explain trade-offs' criterion when no trade-off exists)\n"
+            "  • The em-dash (—) is mandatory; do not use a regular dash\n"
+            "  • The reason is ONE sentence — no line breaks inside it\n\n"
+            "After every criterion line, write a NEW FINAL LINE:\n"
+            "  SCORE: <average of weights, between 0.0 and 1.0>\n\n"
+            "The SCORE: line MUST be the last line of your response. No prose after it."
         )
         response = client.messages.create(
             model=model,

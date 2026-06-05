@@ -68,7 +68,7 @@ _HEADER_RE = re.compile(
 # doesn't get half-eaten by "MET". Each maps to a coarse class for stats —
 # "pass" / "partial" / "fail" / "n/a" / "binary-pass" / "binary-fail" / "raw".
 _VERDICT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("not_applicable", re.compile(r"\bNOT APPLICABLE\b", re.IGNORECASE)),
+    ("not_applicable", re.compile(r"\bNOT APPLICABLE\b|\[N/?A\]|\bN/A\b", re.IGNORECASE)),
     ("partially_met", re.compile(r"\bPARTIALLY MET\b", re.IGNORECASE)),
     ("partial", re.compile(r"\bPARTIAL\b", re.IGNORECASE)),
     ("met", re.compile(r"\bMET\b", re.IGNORECASE)),
