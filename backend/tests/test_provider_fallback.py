@@ -13,7 +13,6 @@ and an exhausted Anthropic key meant a 402 even when OpenRouter was set.
 
 from __future__ import annotations
 
-import os
 
 import pytest
 
