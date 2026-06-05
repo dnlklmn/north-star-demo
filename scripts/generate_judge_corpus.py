@@ -327,7 +327,10 @@ def parse_args() -> Config:
         base_url=args.base_url.rstrip("/"),
         anthropic_key=os.environ.get("ANTHROPIC_API_KEY"),
         openrouter_key=os.environ.get("OPENROUTER_API_KEY"),
-        braintrust_key=os.environ.get("BRAINTRUST_API_KEY"),
+        # The repo's .env uses BRAINTRUST_PROD_API_KEY (matches what the
+        # backend's braintrust.wrap_anthropic() looks for). Accept either —
+        # don't make the user set a duplicate env var just for this script.
+        braintrust_key=os.environ.get("BRAINTRUST_API_KEY") or os.environ.get("BRAINTRUST_PROD_API_KEY"),
         mode=args.mode,
         n_skills=args.n_skills,
         n_rows_per_scenario=args.n_rows_per_scenario,
@@ -393,10 +396,12 @@ async def run_skill(
         )
         r.raise_for_status()
 
-        # 3. Generate skill from goals (LLM call)
+        # 3. Generate skill from goals (LLM call). Body requires session_id
+        # despite the path containing it — the model uses it to fetch the
+        # persisted goals/stories rather than re-sending them on the wire.
         r = await client.post(
             f"{cfg.base_url}/sessions/{session_id}/generate-skill-from-goals",
-            json={},
+            json={"session_id": session_id},
             timeout=120.0,
         )
         r.raise_for_status()
@@ -440,6 +445,21 @@ async def run_skill(
         generated = r.json().get("generated", 0)
         log(f"synth {generated} rows")
 
+        # 6b. Approve every synth row. Eval-run filters out anything that
+        # isn't None or "approved" (see eval_runner.build_rows), and synth
+        # rows ship as review_status="pending" by default. For a headless
+        # corpus run we don't care about reviewer judgment — we just want
+        # the judge to grade something — so blanket-approve.
+        r = await client.get(f"{cfg.base_url}/datasets/{dataset_id}/examples")
+        r.raise_for_status()
+        examples = r.json().get("examples", [])
+        for ex in examples:
+            await client.patch(
+                f"{cfg.base_url}/datasets/{dataset_id}/examples/{ex['id']}",
+                json={"review_status": "approved"},
+            )
+        log(f"approved {len(examples)}")
+
         # 7. Generate scorers (hybrid pass — deterministic + judge)
         r = await client.post(
             f"{cfg.base_url}/sessions/{session_id}/generate-scorers",
@@ -471,16 +491,23 @@ async def run_skill(
 
         # 10. Pull captured judge_response samples
         samples = _extract_judge_samples(eval_summary, spec_name=name, run_id=run_id)
-        log(f"done · {len(samples)} judge samples captured")
+        status = eval_summary.get("status", "unknown")
+        # Surface the actual failure reason — eval_runs.error carries the
+        # ValueError / exception message from run_eval_sync. Without this
+        # the SkillResult shows "(no detail)" and you have to grep uvicorn
+        # logs to find out why the run died.
+        err = eval_summary.get("error") if status in ("error", "failed") else None
+        log(f"done · status={status} · {len(samples)} judge samples captured")
 
         return SkillResult(
             spec_name=name,
             session_id=session_id,
             eval_run_id=run_id,
-            status=eval_summary.get("status", "unknown"),
+            status=status,
             rows_evaluated=eval_summary.get("rows_evaluated", 0),
             judge_response_count=len(samples),
             samples=samples,
+            error=err,
         )
 
     except httpx.HTTPStatusError as e:
