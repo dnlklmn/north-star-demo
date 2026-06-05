@@ -96,36 +96,30 @@ Postgres limit. If we hit pain on read latency later, the fix is to lift
 
 **This PR.**
 
-### Phase 2 — Structure the per-sub-criterion verdicts
+### Phase 2 — Structure the per-sub-criterion verdicts ✅
 
-**Goal:** make rubric decomposition extractable.
+**Path taken:** Phase 2a (parse-at-extract). Shipped via
+`backend/app/training_corpus.py::parse_judge_response`. ~100% hit rate on
+the strict-framed corpus (post-#51); gracefully handles the two legacy
+formats (Format A `**N. Name**: MET (1.0)` and Format B
+`**N. Name (0):**`) for historical eval runs.
 
-**Scope:** either
-- **(a) Parse-at-extract-time** — write a small parser that walks
-  `judge_response` and pulls out the numbered sub-criteria + per-criterion
-  verdict lines the CoT-rubric prompt asks for. Pure derived data; lives in
-  a corpus-export script, not the storage layer.
-- **(b) Richer scorer return shape** — have the scorer body return
-  `{score: float, sub_criteria_verdicts: list[dict]}` instead of a bare
-  float. Requires generator + runtime + scorer adapter changes. More
-  invasive; only worth it if (a) proves unreliable.
+Phase 2b (structured scorer return) was the escape valve — never needed.
 
-Recommend (a) first; escalate to (b) only if parser misclassification rate
-exceeds a threshold (TBD — set bar once we have ~100 reviewed samples to
-measure against).
+### Phase 3 — Training-shape view ✅
 
-### Phase 3 — Training-shape view
+Shipped in the same PR as Phase 2a. Python-layer materialisation rather
+than a Postgres VIEW — the parser regex is non-trivial and porting it to
+PL/pgSQL would fragment the test surface. The
+`build_training_samples` function produces exactly the row shape from
+the "What a training sample looks like" table above, and the
+`GET /sessions/{id}/training-corpus` endpoint streams the materialised
+join as NDJSON. `scripts/export_training_corpus.py` is the CLI wrapper
+for one-off exports.
 
-**Goal:** one query → all training data.
-
-**Scope:** a Postgres VIEW or materialized view that joins
-`eval_runs.per_row` (unnested) with `datasets.examples` on row id, with
-`scorer_metadata` unnested into one row per (eval_run, dataset_row,
-scorer_name). Each row of the view is one training sample matching the
-table above.
-
-No data migration — purely declarative. Iterate the view shape as the
-training requirements firm up.
+The shape is iterable: when reviewer-disagreement UX lands (open question
+below), `human_verdict` and `failure_modes` join here naturally with no
+schema migration.
 
 ### Phase 4 — Distillation (Tier 3B)
 
