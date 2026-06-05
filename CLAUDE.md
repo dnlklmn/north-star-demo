@@ -30,6 +30,7 @@ backend/app/           FastAPI app
 - **Debounced reevaluation:** Seed edits trigger a 3-second debounce timer, then background re-validation via the agent.
 - **Optimistic UI updates:** Frontend updates state immediately, agent catches up asynchronously.
 - **Turn logging:** Every LLM interaction logged to `turns` table with full input/output/metadata for replay and judging.
+- **Judge-trace capture for training data:** Every eval run stores the full judge response (CoT reasoning + score) on `eval_runs.per_row[i].scorer_metadata[scorer_name].judge_response`. This is intentionally untruncated — it's the canonical capture surface for the future distilled house judge corpus. See `docs/tier3a-training-data-capture.md` for the staged plan.
 
 ## Commands
 

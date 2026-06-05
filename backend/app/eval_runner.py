@@ -406,7 +406,18 @@ def compile_scorers(
             judge_text = getattr(_judge, "last_response", None)
             judge_parsed = getattr(_judge, "last_parsed", None)
             if judge_text:
-                metadata_out["judge_response"] = judge_text[:2000]  # cap to keep rows compact
+                # Store the full CoT reasoning, not a 2000-char prefix. The
+                # tail of a judge response is the part that carries the most
+                # signal — it's where the final per-sub-criterion verdict
+                # and SCORE: line live after a decomposed-rubric framing
+                # (see #40). Truncating here silently drops supervision
+                # signal we'll want later for training a distilled judge
+                # (see docs/tier3a-training-data-capture.md). The Evaluate
+                # panel already renders this through a wrapping <pre> in an
+                # expand-on-demand surface, so untruncated text doesn't
+                # bloat the default view; it just shows the full reasoning
+                # when the user opens a row's detail.
+                metadata_out["judge_response"] = judge_text
             if judge_parsed is None and judge_text:
                 # Scorer called the judge but we failed to parse a score.
                 metadata_out["parse_warning"] = "Judge response did not contain a SCORE: line or 0-1 number."
