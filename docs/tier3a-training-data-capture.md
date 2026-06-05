@@ -150,28 +150,39 @@ per-dimension once κ clears the bar.
 
 ## Open questions
 
-### Sub-criteria parsing reliability — how we'll actually measure
+### Sub-criteria parsing reliability — measured
 
-The Phase 2 path (a) vs (b) decision is empirical, not architectural.
-Concretely:
+Decided empirically against live judge responses produced by Haiku 4.5.
 
-1. Wait for ~50 full-CoT samples to accumulate post-#49 (uncapped).
-2. Define "correct parse": extracted sub-criteria count matches the
-   rubric's prompted count, each item has a recognisable verdict
-   (PASS / PARTIAL / FAIL or numeric), no false-positives.
-3. Write a v0 parser, run it on the sample, classify each result as
-   Correct / Partial / Missed / False-positive against a hand-review.
-4. Decide by hit-rate:
-   - **≥90%** → Phase 2a (parse-at-extract-time, pure derived data).
-   - **70-90%** → tighten the CoT-rubric generator prompt to enforce
-     a stricter line format (e.g. each sub-criterion ends with
-     `[PASS]` / `[PARTIAL]` / `[FAIL]`), re-test.
-   - **<70%** → Phase 2b (scorers return
-     `{score, sub_criteria_verdicts: [...]}` instead of a bare float).
+**v0 (loose framing — "one line each"):** 56% correct on a 68-sample
+corpus across 4 scorers / 2 specs. Failure modes were not parser bugs
+but real format inconsistency — Haiku used two distinct line shapes
+depending on the verdict (`**N. Name**: MET (1.0)` for high scores,
+`**N. Name (0):**` for low scores) and sometimes dropped the trailing
+`SCORE:` line entirely.
 
-The middle band's instinct — make parsing reliable by tightening the
-generator's output contract — is the cheapest fix and worth trying
-before any runtime/adapter changes.
+**After framing tightening:** 100% correct on a re-run of the same
+corpus (5 skills, 68 samples, 4 scorers). The framing change forces
+ONE format with literal `[PASS|PARTIAL|FAIL|N/A]` labels, mandatory
+`(weight)`, em-dash separator, and a required final `SCORE:` line.
+Score agreement (parser SCORE: vs runtime saved score) was 68/68 in
+both runs — when the SCORE: line is present, the parser never mis-reads
+the value.
+
+**Verdict: Phase 2a wins (parse-at-extract-time).** Reliability is
+high enough that a script can extract structured per-sub-criterion
+verdicts from existing `judge_response` strings without a runtime or
+scorer-adapter change. Phase 2b (structured scorer return) is no
+longer needed.
+
+**Followup (separate PR):** ship the actual extraction step — walk
+the captured corpus and produce a `judge_per_sub_criteria` shape that
+the Phase 3 training-shape view can join on.
+
+The measurement scripts live in `scripts/generate_judge_corpus.py`
+(corpus generator) and `scripts/measure_parsing_hit_rate.py` (v0
+parser + classifier). Rerun them whenever the generator prompt or
+the runtime framing changes to catch regressions early.
 
 ### Disagreement labeling + richer-than-good-bad verdicts
 
