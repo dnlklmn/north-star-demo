@@ -297,6 +297,11 @@ async function buildInput(
 // renderer, exported for tests / dev tools that want a string of markup.
 // ---------------------------------------------------------------------------
 
+// The file pairs the React form component above with the pure-function
+// describer below so they stay in lockstep. Splitting them across files is
+// the rule's preferred fix, but the two are a single conceptual unit
+// (field-type → control rendering) and they'd drift if separated.
+// eslint-disable-next-line react-refresh/only-export-components
 export function describeFieldControl(field: InputField): string {
   switch (field.type) {
     case 'longtext':

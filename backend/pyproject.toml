@@ -14,6 +14,17 @@ dependencies = [
     "braintrust>=0.0.180",
 ]
 
+[tool.setuptools.packages.find]
+# Without this, setuptools' flat-layout auto-discovery sees both ``app/``
+# (the Python service) and ``runner_container/`` (a sibling Docker service:
+# Dockerfile + server.ts) as top-level packages and refuses to build with
+# "Multiple top-level packages discovered in a flat-layout". Be explicit:
+# the published Python package is ``app`` (plus its subpackages), nothing
+# else. ``runner_container`` is not a Python module — it's just a service
+# sitting under ``backend/`` for proximity to the code that calls it.
+where = ["."]
+include = ["app*"]
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",

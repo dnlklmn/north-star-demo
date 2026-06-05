@@ -90,7 +90,10 @@ export function ProgressStream({
       if (status.get(s.id) === 'done') newlyDone.add(s.id)
     }
     if (newlyDone.size === 0) return
-    setJustDone(newlyDone)
+    // Transient 600ms "just done" highlight driven by completed stages. No
+    // cascade — the timeout below clears it and the effect only re-runs
+    // when `status` / `stages` change.
+    setJustDone(newlyDone) // eslint-disable-line react-hooks/set-state-in-effect
     const t = window.setTimeout(() => setJustDone(new Set()), 600)
     return () => window.clearTimeout(t)
     // We intentionally re-run whenever the status map identity changes;

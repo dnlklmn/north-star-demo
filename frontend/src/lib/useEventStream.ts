@@ -74,14 +74,26 @@ export function useEventStream<T>(
   const [resetTick, setResetTick] = useState(0)
 
   // Latest callback refs so we don't reopen the EventSource on each render.
+  // The assignments live in an effect because React 19's `react-hooks/refs`
+  // rule disallows mutating `ref.current` during render. The semantics
+  // ("update to the latest after every render") are unchanged — the effect
+  // runs after the commit, before the next EventSource event triggers a
+  // handler that reads through the ref.
   const parserRef = useRef(parser)
   const onEventRef = useRef(onEvent)
-  parserRef.current = parser
-  onEventRef.current = onEvent
+  useEffect(() => {
+    parserRef.current = parser
+    onEventRef.current = onEvent
+  })
 
+  // Effect-scoped setState calls below are derived from the `url` prop, not
+  // from external state — the lint rule's "this may cascade" concern doesn't
+  // apply (each effect returns immediately after setting state and only
+  // re-runs when `url` changes). Inline-disable rather than rewrite — the
+  // status transitions are the whole point of this hook.
   useEffect(() => {
     if (!url) {
-      setStatus('idle')
+      setStatus('idle') // eslint-disable-line react-hooks/set-state-in-effect
       return
     }
     if (typeof window === 'undefined' || typeof EventSource === 'undefined') {
