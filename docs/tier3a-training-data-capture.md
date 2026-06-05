@@ -150,14 +150,87 @@ per-dimension once κ clears the bar.
 
 ## Open questions
 
-- **Sub-criteria parsing reliability.** Do CoT-rubric responses
-  consistently use the numbered format the prompt asks for? Need to
-  sample 50 real responses post-merge to find out.
-- **Disagreement labeling UX.** Should reviewers be able to mark
-  "judge was wrong" as a distinct flag from "this output is bad"? The
-  former is the most informative training signal but isn't captured
-  today.
-- **PII in training samples.** If `input` / `output` contains user
-  PII, the corpus needs governance. Likely fine for skill-eval (synthetic
-  data) but not for prompt-eval on production traces. Add a per-session
-  opt-out before any export.
+### Sub-criteria parsing reliability — how we'll actually measure
+
+The Phase 2 path (a) vs (b) decision is empirical, not architectural.
+Concretely:
+
+1. Wait for ~50 full-CoT samples to accumulate post-#49 (uncapped).
+2. Define "correct parse": extracted sub-criteria count matches the
+   rubric's prompted count, each item has a recognisable verdict
+   (PASS / PARTIAL / FAIL or numeric), no false-positives.
+3. Write a v0 parser, run it on the sample, classify each result as
+   Correct / Partial / Missed / False-positive against a hand-review.
+4. Decide by hit-rate:
+   - **≥90%** → Phase 2a (parse-at-extract-time, pure derived data).
+   - **70-90%** → tighten the CoT-rubric generator prompt to enforce
+     a stricter line format (e.g. each sub-criterion ends with
+     `[PASS]` / `[PARTIAL]` / `[FAIL]`), re-test.
+   - **<70%** → Phase 2b (scorers return
+     `{score, sub_criteria_verdicts: [...]}` instead of a bare float).
+
+The middle band's instinct — make parsing reliable by tightening the
+generator's output contract — is the cheapest fix and worth trying
+before any runtime/adapter changes.
+
+### Disagreement labeling + richer-than-good-bad verdicts
+
+`good`/`bad` is a lossy supervision signal. The most informative
+training rows are the ones where the human and the judge **disagree**,
+and today the schema can't tell those apart from cases where they
+agree.
+
+**Proposal — three separable axes** on each reviewed row, all optional
+(any subset gives more signal than the binary today):
+
+1. **Output verdict** (richer scale)
+   - `excellent` (exceeds the bar)
+   - `good` (meets the bar)
+   - `partial` (meets some criteria, misses others)
+   - `bad` (fails the bar)
+   - `unsure` (reviewer can't tell)
+
+   The middle states (`partial`, `unsure`) carry the most product value
+   — they identify where coaching actually moves the needle, and where
+   reviewer training data is needed.
+
+2. **Judge agreement** (the training signal)
+   - `agree` — judge's score reflects reality
+   - `judge-too-harsh` — judge said worse than it actually is
+   - `judge-too-lenient` — judge said better than it actually is
+   - `judge-missed-the-point` — judge graded the wrong thing
+
+   This is the supervision signal that fuels Phase 4 distillation.
+   Disagreements are gold.
+
+3. **Failure-mode tags** (multi-select)
+   - `hallucination`, `wrong-tone`, `format`, `out-of-scope`,
+     `missing-required`, `safety`, `other`
+
+   Aggregate views ("how often does our judge mistake X for Y?")
+   become possible.
+
+**Storage shape:** add a `human_verdict` JSONB column to
+`eval_runs.per_row[i]` (or a sibling table keyed by `(eval_run_id,
+row_id)`) carrying
+`{output_verdict, judge_agreement, failure_modes: [...], notes}`. The
+legacy `examples.label` (good/bad) stays intact; this is additive. The
+Phase 3 training-shape view reads either or both — and joins
+preferentially on `human_verdict` when present, falling back to the
+binary label.
+
+**UX shape:** same row-detail panel that today has the notes field.
+Add three compact controls above the notes (verdict dropdown, judge
+agreement chips, failure-mode multi-select). Every field is optional;
+the reviewer can spend 2 seconds or 30 depending on the case.
+
+**Scope:** this is its own PR, not a follow-up of Tier 3A phase 1.
+Schedule once we have ~100 reviewed rows under the existing binary
+scheme, so the UX redesign can be measured against the current click
+cost.
+
+### PII in training samples
+
+If `input` / `output` contains user PII, the corpus needs governance.
+Likely fine for skill-eval (synthetic data) but not for prompt-eval on
+production traces. Add a per-session opt-out before any export.
