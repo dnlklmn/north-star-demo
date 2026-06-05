@@ -10,25 +10,7 @@ import { AIIcon } from './ui/Icons'
 import PanelLayout from './PanelLayout'
 import SuggestionBox, { SuggestionCard } from './SuggestionBox'
 import { getAutoGenerateSuggestions } from '../utils/uiPrefs'
-
-/** True when a scorer runs deterministically (pure Python, no LLM call).
- *
- *  Mirrors the textual-fallback rule in
- *  `backend/app/scorer_publish.py::_is_deterministic_scorer`: a scorer is
- *  deterministic when its code neither assigns `judge_prompt` nor invokes
- *  `call_judge(...)`. That matches what the backend uses to pick between
- *  prompt-based and code-based Braintrust online-scorer markdown, so
- *  classifying the same way client-side keeps the UI label and the export
- *  shape in lockstep.
- *
- *  Substring matching (not AST) is intentionally cheap — a false positive
- *  here just paints a label in the wrong group; it has no effect on actual
- *  scoring, which is governed by the executed Python on the backend.
- */
-function isDeterministic(code: string | null | undefined): boolean {
-  if (!code) return false
-  return !code.includes('judge_prompt') && !code.includes('call_judge(')
-}
+import { isDeterministicScorer } from '../utils/scorerKind'
 
 interface Props {
   seed: Seed
@@ -99,7 +81,7 @@ export default function ScorersPanel({ seed, hasDataset: _hasDataset, sessionId,
     const deterministic: ScorerDef[] = []
     const judge: ScorerDef[] = []
     for (const s of scorers) {
-      if (isDeterministic(s.code)) deterministic.push(s)
+      if (isDeterministicScorer(s.code)) deterministic.push(s)
       else judge.push(s)
     }
     return [

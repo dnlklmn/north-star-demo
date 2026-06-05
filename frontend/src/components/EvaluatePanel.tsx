@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronDown, ChevronUp, Eye, ExternalLink, FileText, KeyRound, Loader2, RotateCcw, Settings as SettingsIcon, Sparkles, X } from 'lucide-react'
-import type { Seed, Dataset, EvalRunSummary, ImprovementSuggestion, SkillVersion } from '../types'
+import type { Seed, Dataset, EvalRunSummary, ImprovementSuggestion, SkillVersion, ScorerDef } from '../types'
+import { countScorerKinds } from '../utils/scorerKind'
 import { notePolarisActivity } from '../polaris/activity'
 import SeedDocument from './SeedDocument'
 import DiffModal from './DiffModal'
@@ -31,6 +32,12 @@ interface Props {
   sessionId: string
   dataset: Dataset | null
   scorerCount: number
+  /** Full scorer list for this session. EvaluatePanel uses it only to count
+   *  judge vs deterministic so the run-config row can tell the user how many
+   *  scorers the judge-model picker actually affects. `scorerCount` stays as
+   *  the canonical "are there any?" check; this is purely for the hint. Pass
+   *  the same array the Scorers tab uses so the two pages can't drift. */
+  scorers?: ScorerDef[]
   hasSkillBody: boolean
   /** True for kind=prompt projects. Skips skill_body precondition + reframes
    *  copy ("the chosen prompt builder" instead of "your SKILL.md"). */
@@ -243,6 +250,7 @@ export default function EvaluatePanel({
   sessionId,
   dataset,
   scorerCount,
+  scorers,
   hasSkillBody,
   isPromptEval = false,
   skillBody,
@@ -264,6 +272,13 @@ export default function EvaluatePanel({
   onSessionChanged,
 }: Props) {
   const [inlineGenScorers, setInlineGenScorers] = useState(false)
+  // Judge-model picker only affects judge scorers — deterministic ones run
+  // pure Python and never invoke the judge client (see
+  // backend/app/eval_runner.py::compile_scorers — call_judge is injected but
+  // deterministic code doesn't reference it). Surface the split as a
+  // subtitle below the dropdown so the user knows the picker isn't gating
+  // their whole eval.
+  const scorerKinds = useMemo(() => countScorerKinds(scorers), [scorers])
   const exampleCount = dataset?.examples?.length || 0
   const approvedCount = (dataset?.examples || []).filter(
     (e) => e.review_status === 'approved',
@@ -1766,6 +1781,40 @@ export default function EvaluatePanel({
                     )
                   })}
                 </select>
+                {/* Honest hint about what the picker actually drives. Only
+                    judge scorers call the model; deterministic ones run as
+                    pure Python alongside (see
+                    backend/app/eval_runner.py::compile_scorers). Without
+                    this hint the picker reads like "the LLM that scores
+                    your eval", which over-states its role on hybrid
+                    sessions. Hidden when we don't yet know the scorer
+                    list (scorers prop undefined) — better silent than
+                    showing a misleading "0/0" before the parent loads. */}
+                {scorers !== undefined && scorerKinds.total > 0 && (
+                  <p className="text-[10px] text-fg-dim leading-snug">
+                    {scorerKinds.judge === 0 ? (
+                      <>
+                        No judge scorers — model unused. All{' '}
+                        {scorerKinds.deterministic} scorer
+                        {scorerKinds.deterministic === 1 ? '' : 's'} are
+                        deterministic.
+                      </>
+                    ) : scorerKinds.deterministic === 0 ? (
+                      <>
+                        Grades all {scorerKinds.judge} scorer
+                        {scorerKinds.judge === 1 ? '' : 's'}.
+                      </>
+                    ) : (
+                      <>
+                        Grades {scorerKinds.judge} judge scorer
+                        {scorerKinds.judge === 1 ? '' : 's'} ·{' '}
+                        {scorerKinds.deterministic} deterministic scorer
+                        {scorerKinds.deterministic === 1 ? '' : 's'} run
+                        without an LLM call
+                      </>
+                    )}
+                  </p>
+                )}
               </div>
 
               {!isPromptEval && (
