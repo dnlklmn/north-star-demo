@@ -56,13 +56,18 @@ class ScorerPublishError(ValueError):
 
 
 def _is_deterministic_scorer(code: str) -> bool:
-    """Detect a deterministic scorer: pure Python, no LLM call.
+    """Detect a deterministic scorer: pure Python, no LLM call, no embedding lookup.
 
-    A scorer is deterministic when its code contains neither a
-    ``judge_prompt = ...`` assignment nor a ``call_judge(...)`` invocation.
-    We check both because either alone is enough to make the scorer
-    LLM-based, and a deterministic scorer must have neither — there's no
-    in-between in the generator's contract (see
+    A scorer is deterministic when its code contains none of:
+    - ``judge_prompt = ...`` assignment
+    - ``call_judge(...)`` invocation
+    - ``knn_vote(...)`` invocation (Tier 2 B1)
+
+    Any one of these makes the scorer non-deterministic in the sense the
+    publish path cares about: it depends on a runtime helper (Anthropic API
+    or the embedded labeled pool) that doesn't exist in a self-contained
+    Braintrust scorer file. A deterministic scorer must have none of them
+    — there's no in-between in the generator's contract (see
     ``build_generate_scorers_prompt`` in ``prompt.py``).
 
     Uses AST when the code parses (robust to strings that mention these
@@ -72,14 +77,19 @@ def _is_deterministic_scorer(code: str) -> bool:
     try:
         tree = ast.parse(code)
     except SyntaxError:
-        # Conservative fallback: if either marker appears anywhere, treat
-        # as judge-based. False negatives (treating a deterministic scorer
-        # as judge-based here) only mean we'll hit the existing
-        # "no judge_prompt assignment" error path — same as today.
-        return ("judge_prompt" not in code) and ("call_judge(" not in code)
+        # Conservative fallback: if any marker appears anywhere, treat as
+        # non-deterministic. False negatives (treating a deterministic scorer
+        # as judge/kNN-based here) only mean we'll hit the existing error
+        # path on the next assertion — same shape as today.
+        return (
+            ("judge_prompt" not in code)
+            and ("call_judge(" not in code)
+            and ("knn_vote(" not in code)
+        )
 
     has_judge_prompt = False
     has_call_judge = False
+    has_knn_vote = False
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             for tgt in node.targets:
@@ -89,9 +99,36 @@ def _is_deterministic_scorer(code: str) -> bool:
             fn = node.func
             if isinstance(fn, ast.Name) and fn.id == "call_judge":
                 has_call_judge = True
-        if has_judge_prompt or has_call_judge:
+            elif isinstance(fn, ast.Name) and fn.id == "knn_vote":
+                has_knn_vote = True
+        if has_judge_prompt or has_call_judge or has_knn_vote:
             return False
     return True
+
+
+def _is_knn_scorer(code: str) -> bool:
+    """True iff the scorer's code reaches for ``knn_vote(...)``.
+
+    Used by the publish path to set ``scoring_method: knn`` in the
+    emitted markdown frontmatter, so downstream tools (Scorers panel
+    grouping, online_scorers registry, Braintrust monitoring filters)
+    can route on a single field rather than re-parsing each file.
+
+    AST first; textual fallback for unparseable code. A scorer that uses
+    BOTH ``knn_vote`` and ``call_judge`` (rare, not yet generated) is
+    classified as kNN — same precedence as ``classifyScorer`` in
+    ``frontend/src/utils/scorerKind.ts``.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return "knn_vote(" in code
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            if isinstance(fn, ast.Name) and fn.id == "knn_vote":
+                return True
+    return False
 
 
 def _extract_judge_prompt(code: str) -> str:
@@ -348,6 +385,14 @@ def scorer_to_online_md(
 
     if _is_deterministic_scorer(code):
         scoring_method = "deterministic"
+        body = _render_deterministic_body(code)
+    elif _is_knn_scorer(code):
+        # kNN scorers don't have a single judge prompt to emit — they
+        # call into the embedded labeled pool at runtime. The published
+        # body mirrors the deterministic shape (preserves the code) so
+        # the markdown is round-trippable, and online_scorers can detect
+        # the kNN method via the frontmatter without re-parsing.
+        scoring_method = "knn"
         body = _render_deterministic_body(code)
     else:
         scoring_method = "judge"

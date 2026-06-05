@@ -262,6 +262,29 @@ async def _create_tables() -> None:
         await conn.execute("""
             ALTER TABLE examples ADD COLUMN IF NOT EXISTS tier TEXT NOT NULL DEFAULT 'eval';
         """)
+        # Tier 2 B1: embedding column for the kNN-against-labels scorer.
+        # Stored as JSONB rather than pgvector — pre-prod scale (hundreds-to-
+        # thousands of examples per dataset) does fine with Python-side cosine,
+        # and JSONB keeps the schema portable. When a dataset crosses ~50K
+        # embeddings we'll add a pgvector column + index and swap the reader.
+        # ``embedding_model`` is co-stored so the kNN reader can refuse to
+        # match across providers — a mismatch is a routing bug, not a thing
+        # we want to silently retrieve through.
+        await conn.execute("""
+            ALTER TABLE examples ADD COLUMN IF NOT EXISTS embedding JSONB;
+        """)
+        await conn.execute("""
+            ALTER TABLE examples ADD COLUMN IF NOT EXISTS embedding_model TEXT;
+        """)
+        # Partial index on rows that actually have an embedding. The kNN
+        # reader filters on ``embedding IS NOT NULL AND label IN (...)``; the
+        # partial index keeps the seek cheap on datasets where most rows are
+        # still un-embedded (mid-backfill, or only-labeled-rows-embedded
+        # configurations).
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_examples_dataset_embedded
+            ON examples (dataset_id) WHERE embedding IS NOT NULL;
+        """)
 
         # eval_runs: persisted Braintrust execution-eval runs. Previously lived
         # in an in-memory dict, so runs were lost on server restart. Now each
@@ -1312,10 +1335,137 @@ async def export_dataset(dataset_id: str) -> dict:
 
 def _parse_example_row(row) -> dict:
     result = dict(row)
-    for key in ("coverage_tags", "judge_verdict", "revision_suggestion"):
+    for key in ("coverage_tags", "judge_verdict", "revision_suggestion", "embedding"):
         if key in result and isinstance(result[key], str):
             result[key] = json.loads(result[key])
     return result
+
+
+async def set_example_embedding(
+    example_id: str,
+    vector: list[float],
+    model: str,
+) -> None:
+    """Persist a row's embedding + which model produced it.
+
+    Kept narrow — no broadcast, no validation beyond the existence check.
+    The backfill endpoint may call this hundreds of times in a single
+    request; broadcasting on each write would flood the dataset SSE
+    stream. The caller (a single backfill loop) broadcasts once at the
+    end via :func:`_broadcast_dataset_change` if it cares.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE examples
+            SET embedding = $1::jsonb, embedding_model = $2, updated_at = now()
+            WHERE id = $3
+            """,
+            json.dumps(vector),
+            model,
+            example_id,
+        )
+    if result == "UPDATE 0":
+        raise ValueError(f"Example {example_id} not found")
+
+
+async def get_labeled_embeddings(
+    dataset_id: str,
+    *,
+    model: str | None = None,
+    labels: tuple[str, ...] = ("good", "bad"),
+) -> list[dict]:
+    """Fetch the rows the kNN scorer votes from: labeled, embedded, approved.
+
+    Returns a list of dicts with keys ``id``, ``input``, ``expected_output``,
+    ``label``, ``feature_area``, ``embedding`` (parsed to ``list[float]``),
+    and ``embedding_model``. Empty list is a legitimate result (a brand-new
+    dataset with no labels yet) — the kNN runtime helper treats it as
+    "skip this row, no signal available", which is correct behaviour.
+
+    The ``model`` filter is what prevents cross-provider matching: if you
+    embed half your corpus with voyage-3-lite and the other half with
+    text-embedding-3-small, the cosine values are meaningless across them.
+    Default (``None``) returns everything embedded — callers that care
+    pass the model their query vector was produced with.
+    """
+    pool = await get_pool()
+    label_list = list(labels)
+    async with pool.acquire() as conn:
+        # review_status = 'approved' keeps half-baked rows out of the
+        # voting pool. ``label != 'unlabeled'`` is implied by the ANY()
+        # filter but spelt explicitly as a defence against future label
+        # values like 'pending-review'.
+        if model is None:
+            rows = await conn.fetch(
+                """
+                SELECT id, input, expected_output, label, feature_area,
+                       embedding, embedding_model
+                FROM examples
+                WHERE dataset_id = $1
+                  AND embedding IS NOT NULL
+                  AND review_status = 'approved'
+                  AND label = ANY($2::text[])
+                """,
+                dataset_id,
+                label_list,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT id, input, expected_output, label, feature_area,
+                       embedding, embedding_model
+                FROM examples
+                WHERE dataset_id = $1
+                  AND embedding IS NOT NULL
+                  AND embedding_model = $2
+                  AND review_status = 'approved'
+                  AND label = ANY($3::text[])
+                """,
+                dataset_id,
+                model,
+                label_list,
+            )
+    parsed: list[dict] = []
+    for row in rows:
+        d = dict(row)
+        emb = d.get("embedding")
+        if isinstance(emb, str):
+            d["embedding"] = json.loads(emb)
+        parsed.append(d)
+    return parsed
+
+
+async def count_dataset_embedding_status(dataset_id: str) -> dict[str, int]:
+    """Quick stats for the backfill endpoint + UI: how many rows need work.
+
+    Returns ``{total, embedded, labeled, labeled_embedded}``. The frontend
+    uses these to decide whether the kNN scorer is even worth offering —
+    a dataset with zero ``labeled_embedded`` rows can't vote.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+              COUNT(*) AS total,
+              COUNT(*) FILTER (WHERE embedding IS NOT NULL) AS embedded,
+              COUNT(*) FILTER (WHERE label IN ('good', 'bad')) AS labeled,
+              COUNT(*) FILTER (WHERE embedding IS NOT NULL
+                              AND label IN ('good', 'bad')
+                              AND review_status = 'approved') AS labeled_embedded
+            FROM examples
+            WHERE dataset_id = $1
+            """,
+            dataset_id,
+        )
+    return {
+        "total": int(row["total"]),
+        "embedded": int(row["embedded"]),
+        "labeled": int(row["labeled"]),
+        "labeled_embedded": int(row["labeled_embedded"]),
+    }
 
 
 # --- Settings CRUD ---
