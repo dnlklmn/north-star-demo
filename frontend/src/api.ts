@@ -1161,6 +1161,61 @@ export async function exportDataset(datasetId: string): Promise<{ dataset_id: st
   return res.json()
 }
 
+// --- Embeddings (Tier 2 B1) ---
+//
+// These power the backfill button on the Scorers panel. Status is cheap
+// (one indexed aggregate COUNT) and gets polled while a backfill is
+// running; the backfill itself can be slow (one HTTP roundtrip per
+// batch of 128 to Voyage). Errors from the backend land here:
+//   - 400: VOYAGE_API_KEY missing — UI surfaces a hint instead of retrying
+//   - 502: provider returned a 4xx/5xx — UI shows the message, lets the
+//     user retry once the upstream recovers
+// Both shapes carry `detail` in the body, which apiFetch surfaces via
+// the error message.
+
+export interface EmbeddingStatus {
+  total: number
+  embedded: number
+  labeled: number
+  labeled_embedded: number
+}
+
+export async function getDatasetEmbeddingStatus(
+  datasetId: string,
+): Promise<{ dataset_id: string; status: EmbeddingStatus }> {
+  const res = await apiFetch(`${BASE}/datasets/${datasetId}/embedding-status`)
+  if (!res.ok) throw new Error(`Failed to fetch embedding status: ${res.status}`)
+  return res.json()
+}
+
+export async function embedDatasetExamples(
+  datasetId: string,
+): Promise<{
+  dataset_id: string
+  embedded: number
+  skipped: number
+  model: string
+  status: EmbeddingStatus
+}> {
+  const res = await apiFetch(`${BASE}/datasets/${datasetId}/embed-examples`, {
+    method: 'POST',
+  })
+  if (!res.ok) {
+    // Try to pull the FastAPI detail string out so the UI can show a
+    // useful message (especially "VOYAGE_API_KEY is not set..."). Fall
+    // back to the status code if the body isn't JSON.
+    let detail = ''
+    try {
+      const body = await res.json()
+      detail = body?.detail || ''
+    } catch {
+      /* body wasn't JSON */
+    }
+    throw new Error(detail || `Failed to embed examples: ${res.status}`)
+  }
+  return res.json()
+}
+
 // --- Settings API ---
 
 export async function getSettings(): Promise<Settings> {

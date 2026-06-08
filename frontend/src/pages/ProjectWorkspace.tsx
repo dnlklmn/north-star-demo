@@ -3404,6 +3404,7 @@ export default function ProjectWorkspace() {
                 seed={state.seed}
                 hasDataset={!!dataset}
                 sessionId={sessionId || ""}
+                datasetId={dataset?.id}
                 scorers={scorers}
                 onScorersChange={(newScorers) => {
                   setScorers(newScorers);
