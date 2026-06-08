@@ -4,7 +4,10 @@ import type { Seed, ScorerDef } from '../types'
 import {
   getBraintrustScorerPrompt,
   suggestScorerIdeas,
+  embedDatasetExamples,
+  getDatasetEmbeddingStatus,
   type ScorerIdea,
+  type EmbeddingStatus,
 } from '../api'
 import { AIIcon } from './ui/Icons'
 import PanelLayout from './PanelLayout'
@@ -16,6 +19,13 @@ interface Props {
   seed: Seed
   hasDataset: boolean
   sessionId: string
+  /** Active dataset id, when present. Required to fetch + populate
+   *  embeddings for kNN scorers — without it the kNN section header
+   *  shows no status badge (the panel doesn't know which dataset to
+   *  ask about). Optional because the Scorers panel is reachable in
+   *  states where no dataset exists yet (e.g. brand-new session,
+   *  read-only share view before the owner created one). */
+  datasetId?: string
   scorers?: ScorerDef[]
   onScorersChange?: (scorers: ScorerDef[]) => void
   onNavigateToEvaluate?: () => void
@@ -34,7 +44,7 @@ interface Props {
   canEdit?: boolean
 }
 
-export default function ScorersPanel({ seed, hasDataset: _hasDataset, sessionId, scorers: externalScorers, onScorersChange, onNavigateToEvaluate, externalGenerating, externalError, onGenerate, canEdit = true }: Props) {
+export default function ScorersPanel({ seed, hasDataset: _hasDataset, sessionId, datasetId, scorers: externalScorers, onScorersChange, onNavigateToEvaluate, externalGenerating, externalError, onGenerate, canEdit = true }: Props) {
   const [localScorers, setLocalScorers] = useState<ScorerDef[]>([])
   const scorers = externalScorers ?? localScorers
   // Memoized so callbacks that depend on it stay stable across renders.
@@ -68,6 +78,58 @@ export default function ScorersPanel({ seed, hasDataset: _hasDataset, sessionId,
   })()
   const [expandedScorer, setExpandedScorer] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+
+  // --- Embedding backfill (Tier 2 B1) ---
+  //
+  // The kNN scorer needs every dataset row to carry an embedding before it
+  // can vote. This local state powers the badge + button on the kNN section
+  // header: shows N/M embedded, surfaces a "Embed N rows" CTA when there's
+  // pending work, and disables it during an in-flight request.
+  //
+  // Status is fetched once when the panel mounts and re-fetched after a
+  // successful backfill. We deliberately do NOT poll — the backfill
+  // returns the fresh status in its response body, and other write paths
+  // (synthesize, manual add) don't yet populate embeddings, so the next
+  // user action that *would* change the count is another backfill.
+  const [embeddingStatus, setEmbeddingStatus] = useState<EmbeddingStatus | null>(null)
+  const [embeddingBusy, setEmbeddingBusy] = useState(false)
+  const [embeddingError, setEmbeddingError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!datasetId) return
+    let cancelled = false
+    getDatasetEmbeddingStatus(datasetId)
+      .then(res => {
+        if (!cancelled) setEmbeddingStatus(res.status)
+      })
+      .catch(err => {
+        // Status is a nice-to-have; don't bother the user with a banner
+        // if the lookup fails. The next refresh attempt is one button
+        // click away.
+        if (!cancelled) console.warn('Failed to fetch embedding status:', err)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [datasetId])
+
+  const handleBackfillEmbeddings = useCallback(async () => {
+    if (!datasetId || embeddingBusy) return
+    setEmbeddingBusy(true)
+    setEmbeddingError(null)
+    try {
+      const res = await embedDatasetExamples(datasetId)
+      setEmbeddingStatus(res.status)
+    } catch (err) {
+      // Surface the message in-place rather than the top-of-panel error
+      // banner so the user sees it next to the button that triggered it.
+      // Most likely shape: "VOYAGE_API_KEY is not set..." — actionable on
+      // the user side, doesn't deserve a top-level red alert.
+      setEmbeddingError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setEmbeddingBusy(false)
+    }
+  }, [datasetId, embeddingBusy])
 
   // Group scorers by scoring method so the user sees deterministic vs
   // judge at a glance without having to expand each card. Order is fixed
@@ -426,6 +488,59 @@ export default function ScorersPanel({ seed, hasDataset: _hasDataset, sessionId,
                     <span className="text-[10px] text-muted-foreground">
                       {group.scorers.length} · {group.subtitle}
                     </span>
+                    {/* kNN-only inline status: count of embedded rows +
+                        a backfill button when there's pending work. Sits
+                        next to the section header so the affordance lives
+                        with the scorers that need it; reusing the
+                        understated text style keeps it from competing
+                        with the scorer cards. Hidden when no datasetId
+                        — Scorers panel is reachable before any dataset
+                        exists (brand-new session, read-only share). */}
+                    {group.kind === 'knn' && datasetId && (
+                      <span className="ml-auto flex items-baseline gap-2 text-[10px] text-muted-foreground">
+                        {embeddingStatus ? (
+                          <span>
+                            {embeddingStatus.embedded}/{embeddingStatus.total} embedded
+                            {embeddingStatus.labeled_embedded > 0 && (
+                              <> · {embeddingStatus.labeled_embedded} labeled</>
+                            )}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground/60">checking…</span>
+                        )}
+                        {canEdit && embeddingStatus && embeddingStatus.embedded < embeddingStatus.total && (
+                          <button
+                            type="button"
+                            onClick={handleBackfillEmbeddings}
+                            disabled={embeddingBusy}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 border border-border bg-surface-raised hover:bg-muted/50 transition-colors disabled:opacity-60 disabled:cursor-wait"
+                            title={`Embed the ${embeddingStatus.total - embeddingStatus.embedded} pending row${embeddingStatus.total - embeddingStatus.embedded === 1 ? '' : 's'} so the kNN scorer has a complete pool to vote against.`}
+                          >
+                            {embeddingBusy ? (
+                              <>
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                                Embedding…
+                              </>
+                            ) : (
+                              <>
+                                Embed {embeddingStatus.total - embeddingStatus.embedded} row
+                                {embeddingStatus.total - embeddingStatus.embedded === 1 ? '' : 's'}
+                              </>
+                            )}
+                          </button>
+                        )}
+                        {embeddingError && (
+                          <span
+                            className="text-[10px] text-fg-error max-w-xs truncate"
+                            title={embeddingError}
+                          >
+                            {embeddingError.length > 60
+                              ? `${embeddingError.slice(0, 60)}…`
+                              : embeddingError}
+                          </span>
+                        )}
+                      </span>
+                    )}
                   </div>
                   {group.scorers.map(scorer => {
                     const isEnabled = scorer.enabled !== false
