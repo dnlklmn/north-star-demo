@@ -1780,7 +1780,29 @@ async def generate_scorers_endpoint(
     state, conversation = await _load_state(session_id)
     seed = state.seed.model_dump()
     agent_contract = _agent_contract_for_session(state)
-    scorers, call_meta = await call_generate_scorers(seed, agent_contract=agent_contract)
+
+    # Tier 2 B1: check whether the active dataset has a labeled+embedded pool
+    # large enough to make a kNN scorer informative. The threshold is set
+    # here (not in the prompt builder) because it's a product decision —
+    # "what does 'rich enough' mean?" — that may want to change without a
+    # prompt-engineering pass. 5 is the practical floor: below that a vote
+    # is essentially the label of the single nearest neighbor, which is
+    # neither robust nor more useful than the judge.
+    knn_available = False
+    knn_pool_size = 0
+    KNN_MIN_POOL = 5
+    dataset = await db.get_dataset_by_session(session_id)
+    if dataset is not None:
+        status = await db.count_dataset_embedding_status(dataset["id"])
+        knn_pool_size = status.get("labeled_embedded", 0)
+        knn_available = knn_pool_size >= KNN_MIN_POOL
+
+    scorers, call_meta = await call_generate_scorers(
+        seed,
+        agent_contract=agent_contract,
+        knn_available=knn_available,
+        knn_pool_size=knn_pool_size,
+    )
     # Backstop for the LLM occasionally forgetting `target_tag`. Each
     # scorer maps 1:1 to a seed entry; we can recover the gate from
     # the scorer name alone — no LLM judgment, just slug matching against

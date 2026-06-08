@@ -1524,6 +1524,8 @@ async def call_gap_analysis(seed: dict, dataset_stats: dict, examples: list[dict
 async def call_generate_scorers(
     seed: dict,
     agent_contract: str | None = None,
+    knn_available: bool = False,
+    knn_pool_size: int = 0,
 ) -> tuple[list[dict], list[dict]]:
     """Generate evaluation scorers from seed. Returns (scorers, call metadata list).
 
@@ -1531,9 +1533,20 @@ async def call_generate_scorers(
     scored operates under. See build_generate_scorers_prompt for why this
     matters — without it, scorers can be written with criteria the agent
     can never satisfy because the LLM has to guess what the agent does.
+
+    ``knn_available`` and ``knn_pool_size`` gate whether the LLM is told
+    about the kNN-against-labels scoring method (Tier 2 B1). True when the
+    active dataset has ≥5 labeled+embedded rows. Default False keeps the
+    pre-Tier-2 behaviour for any caller that hasn't been updated yet
+    (e.g. the run_eval CLI harness).
     """
     await _refresh_settings()
-    prompt = build_generate_scorers_prompt(seed, agent_contract=agent_contract)
+    prompt = build_generate_scorers_prompt(
+        seed,
+        agent_contract=agent_contract,
+        knn_available=knn_available,
+        knn_pool_size=knn_pool_size,
+    )
     text, meta = await _call_llm(prompt, max_tokens=8192)
     data = _extract_json(text)
     return data.get("scorers", []), [meta]

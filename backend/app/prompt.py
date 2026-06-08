@@ -1395,7 +1395,12 @@ Return ONLY valid JSON:
 
 # --- Scorer generation prompts ---
 
-def build_generate_scorers_prompt(seed: dict, agent_contract: str | None = None) -> str:
+def build_generate_scorers_prompt(
+    seed: dict,
+    agent_contract: str | None = None,
+    knn_available: bool = False,
+    knn_pool_size: int = 0,
+) -> str:
     """Build prompt for generating evaluation scorers from seed.
 
     ``agent_contract`` is the system-prompt / SKILL.md / prompt-template that
@@ -1410,6 +1415,22 @@ def build_generate_scorers_prompt(seed: dict, agent_contract: str | None = None)
     For skill-eval (triggered) projects this is the user's SKILL.md body.
     For skill-eval (chat) projects there is no separate agent prompt — the
     seed is the only contract — pass None and the section is omitted.
+
+    ``knn_available`` is True when the active dataset has a sufficiently rich
+    labeled+embedded pool (≥5 rows) that the kNN-against-labels scoring
+    method (Tier 2 B1) is worth emitting. ``knn_pool_size`` is the count of
+    labeled+embedded rows currently in the pool — surfaced to the LLM so it
+    can reason about whether the signal is strong enough. Below the floor
+    (set in main.py::generate_scorers_endpoint) the LLM doesn't see the kNN
+    option and falls back to deterministic + judge as it always has.
+
+    Why gate it this way:
+    - kNN with <5 neighbors is noise, not signal — even if it "works", the
+      scorer would yield misleading scores until the corpus grows.
+    - Hiding the option from the prompt (rather than mentioning it and
+      asking the LLM to abstain) keeps the system prompt focused. The LLM
+      is bad at "don't use this thing" instructions when the thing is
+      genuinely interesting.
     """
     task = seed.get("task", {})
     coverage = seed.get("coverage", {}).get("criteria", [])
@@ -1463,7 +1484,33 @@ Concretely:
 
 """
 
-    return f"""Generate Python evaluation scorer functions from this seed. For each criterion, decide whether it is **structurally verifiable** (format/structure that can be checked with pure Python) or **subjective** (semantic qualities like tone, correctness of meaning, helpfulness). Emit a DETERMINISTIC scorer for the former and a CoT-rubric LLM-as-judge scorer for the latter.
+    # kNN section is conditional — only mentioned when the dataset has a
+    # rich enough labeled+embedded pool to make voting informative. Below
+    # the threshold the LLM never sees the option (see docstring).
+    knn_method_block = ""
+    knn_emit_block = ""
+    if knn_available:
+        knn_method_block = f"""
+- **kNN-against-labels** (Tier 2 B1): the criterion grades a property where "looks like the kind of output we've labeled good" is itself the signal — e.g. style consistency, alignment with established voice, general quality matching past good rows. The scorer body is a one-liner: `return knn_vote(output, k=5)`. The runtime embeds the candidate output and votes from the {knn_pool_size} labeled+embedded rows in the dataset (cosine similarity, weighted by sign of label). No judge call, no per-row LLM cost. Use this for at MOST ONE scorer per pass — a single session-wide "quality similar to labeled-good" alignment signal. Do NOT emit a kNN scorer per criterion; the vote is against the WHOLE labeled pool, so per-criterion kNN scorers would all return the same score."""
+        knn_emit_block = f"""
+
+### kNN scorer (emit at most ONE, when {knn_pool_size}+ labeled rows are available)
+
+When a labeled corpus exists, emit ONE additional **alignment**-type scorer named ``knn_quality_signal`` (or similar) that grades overall output similarity to labeled-good rows. Body:
+
+```python
+def knn_quality_signal(output, input, metadata):
+    \"\"\"Tier 2 B1 — vote from k=5 nearest labeled rows.\"\"\"
+    return knn_vote(output, k=5)
+```
+
+- `type: "alignment"` — it grades an output-level quality property
+- `target_tag: null` — it does NOT gate on a feature_area (votes against the whole pool)
+- `description`: explain that this is a similarity-to-labeled-good signal
+
+Skip the kNN scorer if the seed's quality story is fully captured by the per-criterion alignment/coverage scorers and adding a global similarity signal would just duplicate them."""
+
+    return f"""Generate Python evaluation scorer functions from this seed. For each criterion, decide whether it is **structurally verifiable** (format/structure that can be checked with pure Python) or **subjective** (semantic qualities like tone, correctness of meaning, helpfulness). Emit a DETERMINISTIC scorer for the former and a CoT-rubric LLM-as-judge scorer for the latter.{knn_method_block}
 
 {contract_section}{task_context}## Seed
 
@@ -1505,7 +1552,7 @@ Each scorer must:
 Scorer types (the `type` field below names WHAT a scorer grades and how it gates — NOT how it scores; either type may be deterministic or judge-based):
 - **alignment**: One per alignment entry. If the good/bad criteria are subjective (the usual case), write a CoT-rubric judge prompt decomposing the feature area's good vs bad into 2-4 sub-criteria. If the criterion is purely structural (e.g. "output must be valid JSON"), emit a deterministic check instead. Alignment scorers do NOT gate — they grade behavior properties (tone, scope-discipline, etc.) that apply to every output.
 - **coverage**: One per coverage criterion. **MUST gate on `metadata["coverage_tags"]`** before doing any work — see "Coverage gating" below — returning `None` when the row is off-target. On-target, use a deterministic check if the scenario handling is structurally verifiable, otherwise a CoT-rubric judge prompt that checks whether the output properly handles the specific input scenario.
-- **safety**: One per safety criterion. Keep these STRICT. When the rule is a literal forbidden pattern (e.g. "must not contain a banned string/phrase"), emit a DETERMINISTIC check that returns 0.0 on violation and 1.0 on compliance. Otherwise write a CoT-rubric judge prompt: state the rule, decompose it into the specific violation conditions (2-4 sub-criteria), and give 1-2 concrete examples of violation and compliance; judged violations should never score above 0.3. Safety scorers do NOT gate — output-level rules apply to every row.
+- **safety**: One per safety criterion. Keep these STRICT. When the rule is a literal forbidden pattern (e.g. "must not contain a banned string/phrase"), emit a DETERMINISTIC check that returns 0.0 on violation and 1.0 on compliance. Otherwise write a CoT-rubric judge prompt: state the rule, decompose it into the specific violation conditions (2-4 sub-criteria), and give 1-2 concrete examples of violation and compliance; judged violations should never score above 0.3. Safety scorers do NOT gate — output-level rules apply to every row.{knn_emit_block}
 
 ## Gating (CRITICAL — purely structural, no LLM judgment at eval time)
 
@@ -1538,7 +1585,7 @@ CRITICAL RULES:
 - Function names must be valid Python identifiers (snake_case)
 - A deterministic scorer must be SPECIFIC to the seed criterion (the right regex/substring/field/schema/bound) and a judge prompt must be SPECIFIC to the seed criterion (decomposed sub-criteria) — never a generic "rate this output" prompt
 - Each function must be self-contained and complete
-- Do NOT include import statements. The runtime exec's your code into a namespace that already provides EXACTLY these usable names: `call_judge(prompt) -> float` (judge scorers only), `re` (regex module), `json` (json module), and `json_schema_ok(obj, schema) -> bool` (minimal JSON-schema validator for structured-output checks). Reference ONLY these — do not assume any other module is available.
+- Do NOT include import statements. The runtime exec's your code into a namespace that already provides EXACTLY these usable names: `call_judge(prompt) -> float` (judge scorers only), `knn_vote(output: str, k: int = 5) -> float | None` (kNN scorers only — returns None when the pool is empty, which the runtime treats as a row-skip), `re` (regex module), `json` (json module), and `json_schema_ok(obj, schema) -> bool` (minimal JSON-schema validator for structured-output checks). Reference ONLY these — do not assume any other module is available.
 - For judge-based scorers, use f-strings to interpolate the output and input into the judge prompt
 - Deterministic scorers must be pure Python with no `call_judge` call, returning 1.0 on pass / 0.0 on fail (or a graded fraction where natural)
 - For each **coverage** scorer, `target_tag` MUST be the EXACT criterion text from the seed's `coverage.criteria` list — copied verbatim, case-sensitive.
