@@ -236,10 +236,151 @@ def make_judge(client: anthropic.Anthropic, model: str) -> Callable[[str], float
     return call_judge
 
 
+def make_knn_voter(
+    labeled_pool: list[dict] | None,
+    *,
+    model: str | None = None,
+    default_k: int = 5,
+) -> Callable[..., float]:
+    """Build a ``knn_vote(output, k=5) -> float`` helper for scorer bodies.
+
+    Tier 2 B1 — the runtime side of the kNN-against-labels scoring method.
+    The voter:
+
+    1. Embeds the candidate ``output`` via the embeddings provider.
+    2. Computes cosine similarity against every row in ``labeled_pool``.
+    3. Picks the top-k by similarity.
+    4. Returns a weighted vote: ``good`` rows contribute +similarity,
+       ``bad`` rows contribute -similarity; the result is normalised into
+       ``[0, 1]`` (0.5 means neighbors are evenly split, 1.0 means every
+       neighbor is ``good`` with high similarity).
+
+    Parallels :func:`make_judge` in shape — exposes ``.last_response`` (a
+    JSON-serialisable summary of neighbors voted) and ``.last_parsed``
+    (the float that came out) so the compiled adapter can surface them
+    in per-row metadata for the UI and the future training corpus.
+
+    Pool of ``None`` or empty produces a voter that always returns
+    ``None`` (skip-the-row sentinel — same convention as a coverage
+    scorer that doesn't match): a kNN scorer with nothing to vote
+    against would otherwise hand out misleading 0.0 scores.
+
+    The pool is closed over the lifetime of the eval run, not refreshed
+    per-row. A new label landing mid-run intentionally does NOT change
+    votes for already-scored rows — that would make the run
+    irreproducible. The next eval run picks the updated pool up.
+    """
+    import json as _json
+
+    # Local import: avoids paying the httpx + module-load cost when an eval
+    # run has no kNN scorers, which is the common case during the transition.
+    from .embeddings import cosine_similarity, embed_texts
+
+    pool = labeled_pool or []
+
+    def knn_vote(output: str, k: int = default_k) -> float | None:
+        if not pool:
+            knn_vote.last_response = None  # type: ignore[attr-defined]
+            knn_vote.last_parsed = None  # type: ignore[attr-defined]
+            return None
+
+        text = (output or "").strip()
+        if not text:
+            # Empty output — record the skip but return 0 (not None), since
+            # an empty output IS the response under test and most "good"
+            # neighbors would NOT match it. 0 is the right floor here.
+            knn_vote.last_response = _json.dumps(  # type: ignore[attr-defined]
+                {"reason": "empty output", "k": k, "pool_size": len(pool)}
+            )
+            knn_vote.last_parsed = 0.0  # type: ignore[attr-defined]
+            return 0.0
+
+        # One embedding call per scorer invocation. The provider's in-process
+        # LRU dedupes when the same output text shows up in multiple scorers
+        # (common: a coverage and an alignment kNN scorer both look at the
+        # same row), so this is cheaper than it looks.
+        result = embed_texts([text], model=model)[0]
+        query_vec = result.vector
+
+        scored: list[tuple[float, dict]] = []
+        for row in pool:
+            row_vec = row.get("embedding")
+            if not isinstance(row_vec, list):
+                continue
+            try:
+                sim = cosine_similarity(query_vec, row_vec)
+            except ValueError:
+                # Dim mismatch — different provider in the pool than at
+                # query time. Silently skip the row; the model filter in
+                # ``get_labeled_embeddings`` SHOULD prevent this, but
+                # defence-in-depth keeps a single weird row from poisoning
+                # the whole vote.
+                continue
+            scored.append((sim, row))
+
+        if not scored:
+            knn_vote.last_response = _json.dumps(  # type: ignore[attr-defined]
+                {"reason": "no comparable embeddings in pool", "k": k, "pool_size": len(pool)}
+            )
+            knn_vote.last_parsed = None  # type: ignore[attr-defined]
+            return None
+
+        scored.sort(key=lambda t: t[0], reverse=True)
+        top = scored[: max(1, k)]
+
+        # Weighted vote: +sim for good, -sim for bad, 0 for anything else
+        # (which shouldn't happen given the pool filter, but tolerated).
+        # Map the signed sum into [0, 1] via ``(x + 1) / 2`` so 0.5 means
+        # neighbors are evenly weighted between good and bad — which the
+        # eval UI will read as "abstain" naturally without a special case.
+        weighted = 0.0
+        weight_total = 0.0
+        for sim, row in top:
+            label = (row.get("label") or "").strip().lower()
+            if label == "good":
+                weighted += sim
+            elif label == "bad":
+                weighted -= sim
+            weight_total += abs(sim)
+
+        if weight_total == 0.0:
+            score = 0.5
+        else:
+            normalised = weighted / weight_total  # [-1, 1]
+            score = max(0.0, min(1.0, (normalised + 1.0) / 2.0))
+
+        # Persist the neighbors for the eval-row UI + training corpus. We
+        # keep this LIGHT — top-k neighbors with sim + label + an input
+        # snippet — because this lands in ``scorer_metadata`` JSONB and the
+        # eval_runs table is already heavy.
+        knn_vote.last_response = _json.dumps(  # type: ignore[attr-defined]
+            {
+                "k": len(top),
+                "pool_size": len(pool),
+                "neighbors": [
+                    {
+                        "id": row.get("id"),
+                        "label": row.get("label"),
+                        "similarity": round(sim, 4),
+                        "input_snippet": (row.get("input") or "")[:160],
+                    }
+                    for sim, row in top
+                ],
+            }
+        )
+        knn_vote.last_parsed = score  # type: ignore[attr-defined]
+        return score
+
+    knn_vote.last_response = None  # type: ignore[attr-defined]
+    knn_vote.last_parsed = None  # type: ignore[attr-defined]
+    return knn_vote
+
+
 def compile_scorers(
     scorer_defs: list[dict],
     call_judge: Callable[[str], float],
     scorer_traces: dict[tuple[str, str], dict[str, Any]] | None = None,
+    knn_vote: Callable[..., float | None] | None = None,
 ) -> list[Callable[..., dict[str, Any]]]:
     """Execute each scorer's source code, wrap as Braintrust-shaped scorer.
 
@@ -301,6 +442,18 @@ def compile_scorers(
         module.re = re  # type: ignore[attr-defined]
         module.json = json  # type: ignore[attr-defined]
         module.json_schema_ok = json_schema_ok  # type: ignore[attr-defined]
+        # Tier 2 B1: kNN-against-labels helper. Always injected (even when
+        # the pool is empty, in which case it returns None for every call —
+        # which the adapter treats as a row-skip, matching the coverage
+        # gate behaviour). A None here ALSO maps to a no-op stand-in so a
+        # scorer that calls ``knn_vote`` without a pool fails the row
+        # gracefully instead of raising NameError.
+        if knn_vote is not None:
+            module.knn_vote = knn_vote  # type: ignore[attr-defined]
+        else:
+            def _no_knn(output, k=5):  # noqa: ARG001
+                return None
+            module.knn_vote = _no_knn  # type: ignore[attr-defined]
         try:
             exec(code, module.__dict__)
         except Exception as e:  # noqa: BLE001
@@ -333,6 +486,7 @@ def compile_scorers(
             _name=name,
             _desc=description,
             _judge=call_judge,
+            _knn=knn_vote,
             _takes_metadata=takes_metadata,
             _target_tag=target_tag,
             _scorer_type=scorer_type,
@@ -385,9 +539,12 @@ def compile_scorers(
                     _record_trace(skip_meta)
                     return {"name": _name, "score": None, "metadata": skip_meta}
 
-            # Reset judge side-channel so per-invocation state is fresh.
+            # Reset judge + kNN side-channels so per-invocation state is fresh.
             _judge.last_response = None  # type: ignore[attr-defined]
             _judge.last_parsed = None  # type: ignore[attr-defined]
+            if _knn is not None:
+                _knn.last_response = None  # type: ignore[attr-defined]
+                _knn.last_parsed = None  # type: ignore[attr-defined]
 
             try:
                 if _takes_metadata:
@@ -423,6 +580,15 @@ def compile_scorers(
                 score = 0.0
 
             metadata_out: dict[str, Any] = {"description": _desc}
+            # kNN trace lands first — when a scorer uses both knn_vote and
+            # call_judge (a future hybrid), both surfaces are captured.
+            if _knn is not None:
+                knn_text = getattr(_knn, "last_response", None)
+                knn_parsed = getattr(_knn, "last_parsed", None)
+                if knn_text:
+                    metadata_out["knn_response"] = knn_text
+                if knn_parsed is not None:
+                    metadata_out["knn_score"] = knn_parsed
             judge_text = getattr(_judge, "last_response", None)
             judge_parsed = getattr(_judge, "last_parsed", None)
             if judge_text:
@@ -713,6 +879,7 @@ def run_eval_sync(
     allow_bash: bool = False,
     max_iterations: int = agent_task.MAX_ITERATIONS_DEFAULT,
     sandbox_root: Any | None = None,
+    labeled_embeddings: list[dict] | None = None,
 ) -> EvalResult:
     """Synchronously run a Braintrust Eval. Blocks. Call via asyncio.to_thread.
 
@@ -778,13 +945,19 @@ def run_eval_sync(
     if routed_via_openrouter:
         judge_model_resolved = _resolve_model_for_openrouter(judge_model)
     call_judge = make_judge(judge_client, judge_model_resolved)
+    # Tier 2 B1: build the kNN voter ONCE per run, closed over a snapshot
+    # of the labeled pool. The pool is None when the caller didn't preload
+    # embeddings (older callers or kNN-less runs) — make_knn_voter handles
+    # that by always returning None for every call, which the adapter
+    # treats as a row-skip.
+    knn_vote = make_knn_voter(labeled_embeddings)
     # scorer_traces collects per-(row_id, scorer_name) judge metadata
     # (response text, parsed score, skip reason). Braintrust's per-row
     # results only expose scores as floats, so this is the only path the
     # judge's reasoning has to the UI — without it the user can never
     # answer "why did this scorer give 30%?" from the eval result alone.
     scorer_traces: dict[tuple[str, str], dict[str, Any]] = {}
-    scorers = compile_scorers(scorer_defs, call_judge, scorer_traces=scorer_traces)
+    scorers = compile_scorers(scorer_defs, call_judge, scorer_traces=scorer_traces, knn_vote=knn_vote)
     if not scorers:
         raise ValueError("No scorers compiled successfully. Check the Scorers tab.")
 

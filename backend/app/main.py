@@ -3523,6 +3523,133 @@ async def enrich_dataset(
     return {"generated": len(created), "examples": created, "stats": stats}
 
 
+@app.post("/datasets/{dataset_id}/embed-examples")
+async def embed_dataset_examples(
+    dataset_id: str,
+    access: Access = Depends(resolve_dataset_access),
+):
+    """Backfill embeddings for every example in the dataset.
+
+    Tier 2 B1 — populates the column the kNN-against-labels scorer reads
+    from. Idempotent: rows that already carry an embedding under the same
+    model are skipped (cheap cache hit if they're somehow re-presented).
+
+    We backfill the WHOLE dataset, not just the labeled subset, because:
+    1. The runtime kNN helper embeds the candidate output at scoring time
+       against the labeled pool only — so labeled rows are the minimum.
+    2. Coverage / Balance / Rot signals (Tier 2 B3) want the whole
+       distribution, including unlabeled and rejected rows, so embedding
+       everything now avoids a second backfill pass later.
+
+    Embedded rows count toward Voyage's $0.02/1M tokens — typical rows
+    are <500 tokens so a 500-row dataset costs single-digit cents.
+    """
+    require_writer(access)
+    dataset = await db.get_dataset(dataset_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    # Pull every row; the embed step itself decides which actually need a
+    # provider call (skipping rows where embedding_model already matches).
+    examples = await db.get_examples(dataset_id)
+
+    from .embeddings import DEFAULT_MODEL, embed_texts
+
+    model = DEFAULT_MODEL  # single-source: provider abstraction picks the impl
+
+    # The text we embed is ``input + expected_output`` — the kNN helper
+    # at scoring time embeds the candidate output against this. The
+    # combination keeps semantically-similar (input, output) pairs near
+    # each other in vector space; embedding output alone would let two
+    # identical responses to different prompts vote for each other.
+    pending: list[tuple[str, str]] = []
+    skipped = 0
+    for ex in examples:
+        existing_model = ex.get("embedding_model")
+        if existing_model == model and ex.get("embedding"):
+            skipped += 1
+            continue
+        text = _example_embedding_text(ex)
+        pending.append((ex["id"], text))
+
+    if not pending:
+        return {
+            "dataset_id": dataset_id,
+            "embedded": 0,
+            "skipped": skipped,
+            "model": model,
+            "status": await db.count_dataset_embedding_status(dataset_id),
+        }
+
+    import httpx  # local import — main.py imports httpx in-function elsewhere
+
+    try:
+        results = embed_texts([t for _, t in pending], model=model)
+    except RuntimeError as e:
+        # VOYAGE_API_KEY missing — surface a clean 4xx, not a 500.
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except httpx.HTTPStatusError as e:  # provider 4xx/5xx
+        body = e.response.text[:300] if e.response is not None else ""
+        raise HTTPException(status_code=502, detail=f"Embedding provider error: {body}") from e
+
+    embedded = 0
+    for (example_id, _), result in zip(pending, results, strict=True):
+        await db.set_example_embedding(example_id, result.vector, result.model)
+        embedded += 1
+
+    # Broadcast once at the end — the per-write broadcast suppression in
+    # set_example_embedding is the whole point: backfill can be hundreds
+    # of UPDATEs and we don't want hundreds of SSE messages.
+    await db._broadcast_dataset_change(dataset_id)
+
+    return {
+        "dataset_id": dataset_id,
+        "embedded": embedded,
+        "skipped": skipped,
+        "model": model,
+        "status": await db.count_dataset_embedding_status(dataset_id),
+    }
+
+
+def _example_embedding_text(ex: dict) -> str:
+    """Compose the text we embed for an example row.
+
+    Concatenates ``input`` and ``expected_output`` (when present) with a
+    clear separator. The separator matters less than consistency: as long
+    as backfill + the runtime kNN helper use the same composition, cosine
+    geometry is preserved. Centralised here so both sides agree.
+
+    Empty ``expected_output`` is fine — Voyage handles short inputs, and
+    the kNN reader's labeled rows mostly carry both fields.
+    """
+    inp = (ex.get("input") or "").strip()
+    out = (ex.get("expected_output") or "").strip()
+    if out:
+        return f"{inp}\n\n---\n\n{out}"
+    return inp
+
+
+@app.get("/datasets/{dataset_id}/embedding-status")
+async def dataset_embedding_status(
+    dataset_id: str,
+    access: Access = Depends(resolve_dataset_access),
+):
+    """Lightweight status check the UI polls before offering the kNN scorer.
+
+    Cheap aggregate — one indexed COUNT query. Frontend reads
+    ``labeled_embedded`` to decide whether a kNN scorer is even feasible
+    (zero → no voting pool, scorer would always abstain).
+    """
+    require_writer(access)
+    dataset = await db.get_dataset(dataset_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    return {
+        "dataset_id": dataset_id,
+        "status": await db.count_dataset_embedding_status(dataset_id),
+    }
+
+
 @app.post("/datasets/{dataset_id}/chat")
 async def dataset_chat(
     dataset_id: str,
@@ -3761,6 +3888,7 @@ async def _execute_eval_run(
     req: RunEvalRequest,
     prompt_target: str | None = None,
     prompt_body_template: str | None = None,
+    labeled_embeddings: list[dict] | None = None,
 ) -> None:
     """Background task: runs the blocking eval off the event loop.
 
@@ -3806,6 +3934,7 @@ async def _execute_eval_run(
             allow_bash=req.allow_bash,
             max_iterations=req.max_iterations or MAX_ITERATIONS_DEFAULT,
             sandbox_root=sandbox_root,
+            labeled_embeddings=labeled_embeddings,
         )
         # Braintrust returns Done even when every row's task threw — auth
         # errors against Anthropic, rate limits, etc. Surface that as 'failed'
@@ -3989,6 +4118,18 @@ async def run_eval_for_session(
         judge_model_used=judge_model_resolved,
     )
 
+    # Tier 2 B1: snapshot the labeled+embedded pool ONCE at run-start so
+    # the kNN voter has a fixed reference. Labels landing mid-run don't
+    # shift earlier rows' scores — that would make the run irreproducible.
+    # If no rows are eligible (no embeddings yet, no labels yet, or kNN
+    # scorers absent from the run), this is an empty list and the voter
+    # becomes a no-op. We always read from db.embeddings.DEFAULT_MODEL —
+    # the scorer module is single-provider for now.
+    from .embeddings import DEFAULT_MODEL as _EMB_MODEL
+    labeled_embeddings = await db.get_labeled_embeddings(
+        dataset["id"], model=_EMB_MODEL
+    )
+
     eval_task = asyncio.create_task(
         _execute_eval_run(
             run_id=run_id,
@@ -4005,6 +4146,7 @@ async def run_eval_for_session(
             # substitutes row snapshots into placeholders, so per-version
             # iteration in-app drives what scores.
             prompt_body_template=skill_body if is_prompt_eval else None,
+            labeled_embeddings=labeled_embeddings,
         )
     )
     _ACTIVE_EVAL_TASKS[run_id] = eval_task

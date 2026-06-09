@@ -10,7 +10,7 @@ import { AIIcon } from './ui/Icons'
 import PanelLayout from './PanelLayout'
 import SuggestionBox, { SuggestionCard } from './SuggestionBox'
 import { getAutoGenerateSuggestions } from '../utils/uiPrefs'
-import { isDeterministicScorer } from '../utils/scorerKind'
+import { classifyScorer } from '../utils/scorerKind'
 
 interface Props {
   seed: Seed
@@ -79,17 +79,30 @@ export default function ScorersPanel({ seed, hasDataset: _hasDataset, sessionId,
   // single "Judge" group as if nothing changed.
   const scorerGroups = useMemo(() => {
     const deterministic: ScorerDef[] = []
+    const knn: ScorerDef[] = []
     const judge: ScorerDef[] = []
     for (const s of scorers) {
-      if (isDeterministicScorer(s.code)) deterministic.push(s)
+      const kind = classifyScorer(s.code)
+      if (kind === 'deterministic') deterministic.push(s)
+      else if (kind === 'knn') knn.push(s)
       else judge.push(s)
     }
+    // Order: deterministic → kNN → judge. Cheapest-first matches the
+    // "what runs without LLM" affordance — the section header is the
+    // first thing the user sees, and deterministic-then-kNN keeps the
+    // "no per-row LLM" scorers grouped together.
     return [
       {
         kind: 'deterministic' as const,
         label: 'Deterministic',
         subtitle: 'pure Python, no LLM call',
         scorers: deterministic,
+      },
+      {
+        kind: 'knn' as const,
+        label: 'kNN (vs labels)',
+        subtitle: 'votes from k-nearest labeled rows',
+        scorers: knn,
       },
       {
         kind: 'judge' as const,

@@ -1792,14 +1792,23 @@ export default function EvaluatePanel({
                     showing a misleading "0/0" before the parent loads. */}
                 {scorers !== undefined && scorerKinds.total > 0 && (
                   <p className="text-[10px] text-fg-dim leading-snug">
+                    {/* Two notions matter:
+                          - judge count: drives whether the picker above
+                            is actually used by this run.
+                          - non-judge count (deterministic + kNN): cheap
+                            scorers that don't need the judge model.
+                        We lump them in the hint because the user's question
+                        is "is the model I picked going to affect anything?",
+                        not "how many of each species do I have?". The
+                        Scorers panel breaks it down per-kind. */}
                     {scorerKinds.judge === 0 ? (
                       <>
                         No judge scorers — model unused. All{' '}
-                        {scorerKinds.deterministic} scorer
-                        {scorerKinds.deterministic === 1 ? '' : 's'} are
-                        deterministic.
+                        {scorerKinds.total} scorer
+                        {scorerKinds.total === 1 ? '' : 's'} run without
+                        per-row LLM calls.
                       </>
-                    ) : scorerKinds.deterministic === 0 ? (
+                    ) : scorerKinds.deterministic + scorerKinds.knn === 0 ? (
                       <>
                         Grades all {scorerKinds.judge} scorer
                         {scorerKinds.judge === 1 ? '' : 's'}.
@@ -1808,9 +1817,16 @@ export default function EvaluatePanel({
                       <>
                         Grades {scorerKinds.judge} judge scorer
                         {scorerKinds.judge === 1 ? '' : 's'} ·{' '}
-                        {scorerKinds.deterministic} deterministic scorer
-                        {scorerKinds.deterministic === 1 ? '' : 's'} run
-                        without an LLM call
+                        {scorerKinds.deterministic + scorerKinds.knn} other
+                        scorer
+                        {scorerKinds.deterministic + scorerKinds.knn === 1
+                          ? ''
+                          : 's'}{' '}
+                        ({scorerKinds.deterministic} deterministic
+                        {scorerKinds.knn > 0
+                          ? `, ${scorerKinds.knn} kNN`
+                          : ''}
+                        ) run without LLM calls.
                       </>
                     )}
                   </p>
