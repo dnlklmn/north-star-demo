@@ -128,9 +128,9 @@ def main() -> None:
     else:
         parser.error("provide --session-id OR (--dataset-file + --scorers-file + --skill-file)")
 
+    # Optional — only used when EVAL_USE_BRAINTRUST=1 mirrors the run to a
+    # Braintrust dashboard. Eval runs are local by default.
     braintrust_key = os.environ.get("BRAINTRUST_API_KEY")
-    if not braintrust_key:
-        raise SystemExit("BRAINTRUST_API_KEY not set")
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise SystemExit("ANTHROPIC_API_KEY not set")
 

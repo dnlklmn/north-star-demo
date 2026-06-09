@@ -11,10 +11,13 @@ don't block the event loop.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
+import math
 import os
 import re
 import sys
+import threading
 import types
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -155,16 +158,45 @@ def json_schema_ok(obj: Any, schema: Any) -> bool:
         return False
 
 
-def make_judge(client: anthropic.Anthropic, model: str) -> Callable[[str], float]:
-    """Build a `call_judge(prompt) -> float` helper for scorer bodies to call.
+class _Judge:
+    """Callable `judge(prompt) -> float` with thread-local reasoning capture.
 
-    Returned callable also exposes `.last_response` and `.last_parsed` on itself,
-    so the scorer adapter can surface the judge's reasoning + extracted number in
-    the per-row metadata — essential for debugging 0% scores.
+    Preserves the historical API the scorer adapter relies on: call it as
+    ``judge(prompt) -> float`` and read ``judge.last_response`` /
+    ``judge.last_parsed`` afterward to surface the judge's reasoning + extracted
+    number in per-row metadata (essential for debugging 0% scores).
+
+    The two side-channel attributes are backed by ``threading.local()`` so the
+    local runner can score rows concurrently: each worker thread sees only the
+    reasoning from its own judge call. Without this, two rows judged at the same
+    time would clobber each other's ``last_response`` and the wrong reasoning
+    would get attached to a row. The scorer adapter resets these to ``None``
+    before each invocation and reads them after — that reset→call→read sequence
+    is now per-thread and therefore race-free.
     """
-    import re
 
-    def call_judge(prompt: str) -> float:
+    def __init__(self, client: anthropic.Anthropic, model: str):
+        self._client = client
+        self._model = model
+        self._tl = threading.local()
+
+    @property
+    def last_response(self) -> str | None:
+        return getattr(self._tl, "last_response", None)
+
+    @last_response.setter
+    def last_response(self, value: str | None) -> None:
+        self._tl.last_response = value
+
+    @property
+    def last_parsed(self) -> float | None:
+        return getattr(self._tl, "last_parsed", None)
+
+    @last_parsed.setter
+    def last_parsed(self, value: float | None) -> None:
+        self._tl.last_parsed = value
+
+    def __call__(self, prompt: str) -> float:
         # Mandate a single, parseable line shape per sub-criterion plus a
         # final SCORE: line. The first version of this framing asked for
         # "one line each" — which Haiku interpreted loosely, mixing
@@ -196,21 +228,21 @@ def make_judge(client: anthropic.Anthropic, model: str) -> Callable[[str], float
             "  SCORE: <average of weights, between 0.0 and 1.0>\n\n"
             "The SCORE: line MUST be the last line of your response. No prose after it."
         )
-        response = client.messages.create(
-            model=model,
+        response = self._client.messages.create(
+            model=self._model,
             max_tokens=512,
             temperature=0,
             messages=[{"role": "user", "content": framed}],
         )
         text = response.content[0].text if response.content else ""
-        call_judge.last_response = text  # type: ignore[attr-defined]
+        self.last_response = text
 
         # Preferred shape: "SCORE: 0.9" on its own line.
         match = re.search(r"SCORE\s*:\s*([0-9]*\.?[0-9]+)", text, re.IGNORECASE)
         if match:
             try:
                 value = max(0.0, min(1.0, float(match.group(1))))
-                call_judge.last_parsed = value  # type: ignore[attr-defined]
+                self.last_parsed = value
                 return value
             except ValueError:
                 pass
@@ -225,15 +257,22 @@ def make_judge(client: anthropic.Anthropic, model: str) -> Callable[[str], float
             except ValueError:
                 continue
             if 0.0 <= value <= 1.0:
-                call_judge.last_parsed = value  # type: ignore[attr-defined]
+                self.last_parsed = value
                 return value
 
-        call_judge.last_parsed = None  # type: ignore[attr-defined]
+        self.last_parsed = None
         return 0.0
 
-    call_judge.last_response = None  # type: ignore[attr-defined]
-    call_judge.last_parsed = None  # type: ignore[attr-defined]
-    return call_judge
+
+def make_judge(client: anthropic.Anthropic, model: str) -> Callable[[str], float]:
+    """Build a `call_judge(prompt) -> float` helper for scorer bodies to call.
+
+    Returns a `_Judge` instance, which is callable and also exposes thread-local
+    `.last_response` / `.last_parsed` so the scorer adapter can surface the
+    judge's reasoning + extracted number in per-row metadata, safely under the
+    local runner's concurrency.
+    """
+    return _Judge(client, model)
 
 
 def compile_scorers(
@@ -694,12 +733,118 @@ def _extract_summary(eval_handle: Any) -> tuple[str | None, str | None, dict[str
     return url, name, averages, per_row
 
 
+def _run_local(
+    rows: list[dict],
+    task: Callable[[Any], str],
+    scorers: list[Callable[..., dict[str, Any]]],
+    experiment_name: str | None,
+    max_workers: int,
+) -> tuple[str | None, str | None, dict[str, float], list[dict]]:
+    """Local replacement for ``braintrust.Eval()``: map the task over rows, run
+    each scorer, and aggregate — no external service, no API key.
+
+    Returns the same ``(url, name, averages, per_row)`` tuple shape that
+    ``_extract_summary`` produced, so ``run_eval_sync``'s downstream code (agent
+    trace attach, scorer_metadata attach, ``EvalResult`` build) is unchanged.
+    ``url`` is always ``None`` (there's no hosted dashboard); ``name`` is just the
+    caller-supplied ``experiment_name``.
+
+    Rows are processed with bounded concurrency via a thread pool. The work is
+    I/O-bound (Anthropic HTTP for the task + judge calls), so threads give real
+    speedup despite the GIL. The judge's reasoning side-channel is thread-local
+    (see ``_Judge``) and ``scorer_traces`` is keyed by distinct
+    ``(row_id, scorer_name)`` tuples, so concurrent scoring is race-free.
+    """
+    per_row: list[dict | None] = [None] * len(rows)
+
+    def _process(r: dict) -> dict:
+        # Braintrust handed the task whatever was stuffed into the row's "input"
+        # field (the cleaned dataset row dict); all three task modes expect that
+        # and derive their own row id from it. Mirror that exactly.
+        input_field = r.get("input")
+        metadata = r.get("metadata") or {}
+        expected = r.get("expected")
+
+        output: str | None = None
+        error: str | None = None
+        try:
+            output = task(input_field)
+        except Exception as e:  # noqa: BLE001
+            # A task failure errors the row; we don't fabricate scores for it,
+            # matching Braintrust's "errored row has no scores" behavior.
+            error = f"{type(e).__name__}: {e}"
+
+        scores: dict[str, float] = {}
+        if error is None:
+            for scorer in scorers:
+                try:
+                    res = scorer(output, expected, input_field, metadata)
+                except Exception as e:  # noqa: BLE001
+                    # The adapter already wraps scorer bodies in try/except, but
+                    # never let an unexpected adapter failure drop the whole row.
+                    print(
+                        f"[eval_runner] scorer raised on row {metadata.get('id')}: {e}",
+                        file=sys.stderr,
+                    )
+                    continue
+                if not isinstance(res, dict):
+                    continue
+                name = res.get("name")
+                score = res.get("score")
+                # None score = scorer opted out of this row (coverage gating).
+                # Exclude it so per-row averaging isn't polluted with 0%.
+                if (
+                    isinstance(name, str)
+                    and isinstance(score, (int, float))
+                    and not (isinstance(score, float) and math.isnan(score))
+                ):
+                    scores[name] = float(score)
+
+        return {
+            "input": input_field,
+            "output": output,
+            "expected": expected,
+            "scores": scores,
+            "error": error,
+            "metadata": metadata,
+        }
+
+    if max_workers <= 1 or len(rows) <= 1:
+        for i, r in enumerate(rows):
+            per_row[i] = _process(r)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_process, r): i for i, r in enumerate(rows)}
+            for fut in concurrent.futures.as_completed(futures):
+                per_row[futures[fut]] = fut.result()
+
+    final_per_row = [entry for entry in per_row if entry is not None]
+
+    # Per-scorer average = mean of the rows that actually scored (rows where the
+    # scorer opted out via None are already excluded above). Same math as the
+    # backfill in _extract_summary.
+    averages: dict[str, float] = {}
+    names_seen: set[str] = set()
+    for entry in final_per_row:
+        names_seen.update((entry.get("scores") or {}).keys())
+    for n in names_seen:
+        vals = [
+            float(entry["scores"][n])
+            for entry in final_per_row
+            if isinstance(entry.get("scores", {}).get(n), (int, float))
+        ]
+        if vals:
+            averages[n] = sum(vals) / len(vals)
+
+    return None, experiment_name, averages, final_per_row
+
+
 def run_eval_sync(
     *,
     skill_body: str,
     scorer_defs: list[dict],
     examples: list[dict],
-    braintrust_api_key: str,
+    braintrust_api_key: str | None = None,
     project: str,
     experiment_name: str | None = None,
     anthropic_api_key: str | None = None,
@@ -714,7 +859,18 @@ def run_eval_sync(
     max_iterations: int = agent_task.MAX_ITERATIONS_DEFAULT,
     sandbox_root: Any | None = None,
 ) -> EvalResult:
-    """Synchronously run a Braintrust Eval. Blocks. Call via asyncio.to_thread.
+    """Synchronously run an eval. Blocks. Call via asyncio.to_thread.
+
+    By default this runs a fully local loop (``_run_local``) — no external
+    service and no Braintrust API key required. Set ``EVAL_USE_BRAINTRUST=1``
+    (and provide ``braintrust_api_key``) to instead route through
+    ``braintrust.Eval()`` and get a hosted experiment dashboard URL; that legacy
+    path is kept intact behind the flag. See docs/eval-runner.md.
+
+    Note: the Braintrust *production tracing* in tools.py is a separate concern
+    (gated on ``BRAINTRUST_PROD_API_KEY``) and is unaffected by this function's
+    mode — except that the legacy path temporarily logs in with the user's key
+    and restores prod auth in a finally block.
 
     Two task modes:
       - skill mode (default): runs `skill_body` as system prompt against each
@@ -729,17 +885,25 @@ def run_eval_sync(
         raise ValueError("skill_body is empty — can't run the skill with no instructions.")
     if not scorer_defs:
         raise ValueError("No scorers provided. Generate them in the Scorers tab first.")
-    if not braintrust_api_key:
-        raise ValueError("braintrust_api_key is required.")
 
-    # Log into Braintrust for this process. ``force_login=True`` is needed
-    # because the prod-monitoring path (tools._ensure_braintrust_inited) has
-    # already logged in with BRAINTRUST_PROD_API_KEY. Without force_login the
-    # SDK warns and silently keeps the original auth, so the eval would write
-    # to the wrong account/project. We restore the prod auth + logger in a
-    # finally block below so background production tracing keeps flowing to
-    # north-star-prod after the eval completes.
-    braintrust.login(api_key=braintrust_api_key, force_login=True)
+    # Opt-in legacy path: only mirror the run to Braintrust when explicitly
+    # enabled AND a key is available. Otherwise we run fully local.
+    use_braintrust = os.environ.get("EVAL_USE_BRAINTRUST") == "1" and bool(braintrust_api_key)
+
+    if use_braintrust:
+        # Log into Braintrust for this process. ``force_login=True`` is needed
+        # because the prod-monitoring path (tools._ensure_braintrust_inited) has
+        # already logged in with BRAINTRUST_PROD_API_KEY. Without force_login the
+        # SDK warns and silently keeps the original auth, so the eval would write
+        # to the wrong account/project. We restore the prod auth + logger in a
+        # finally block below so background production tracing keeps flowing to
+        # north-star-prod after the eval completes.
+        braintrust.login(api_key=braintrust_api_key, force_login=True)
+
+    def _wrap(client: anthropic.Anthropic) -> anthropic.Anthropic:
+        # Only wrap for Braintrust trace logging on the legacy path; the local
+        # path uses plain clients so eval LLM calls aren't logged anywhere.
+        return braintrust.wrap_anthropic(client) if use_braintrust else client
 
     # Task client runs the skill under test. Always Claude — but the user may
     # have given us an OpenRouter key (`sk-or-...`), in which case we route
@@ -748,18 +912,18 @@ def run_eval_sync(
     # api.anthropic.com → 401 on every row.
     task_model = model
     if anthropic_api_key and anthropic_api_key.startswith("sk-or-"):
-        task_client = braintrust.wrap_anthropic(
+        task_client = _wrap(
             anthropic.Anthropic(api_key=anthropic_api_key, base_url=OPENROUTER_BASE_URL)
         )
         task_model = _resolve_model_for_openrouter(model)
     elif not anthropic_api_key and not os.environ.get("ANTHROPIC_API_KEY") and os.environ.get("OPENROUTER_API_KEY"):
         # Env-var fallback to OpenRouter (matches tools.get_client behavior).
-        task_client = braintrust.wrap_anthropic(
+        task_client = _wrap(
             anthropic.Anthropic(api_key=os.environ["OPENROUTER_API_KEY"], base_url=OPENROUTER_BASE_URL)
         )
         task_model = _resolve_model_for_openrouter(model)
     else:
-        task_client = braintrust.wrap_anthropic(
+        task_client = _wrap(
             anthropic.Anthropic(api_key=anthropic_api_key) if anthropic_api_key else anthropic.Anthropic()
         )
 
@@ -855,66 +1019,77 @@ def run_eval_sync(
     else:
         task = make_task(task_client, skill_body, task_model)
 
-    try:
-        handle = braintrust.Eval(
-            name=project,
-            experiment_name=experiment_name,
-            data=lambda: rows,
-            task=task,
-            scores=scorers,
+    if use_braintrust:
+        # Legacy path: mirror the run to Braintrust for the hosted dashboard.
+        try:
+            handle = braintrust.Eval(
+                name=project,
+                experiment_name=experiment_name,
+                data=lambda: rows,
+                task=task,
+                scores=scorers,
+            )
+            url, name, averages, per_row = _extract_summary(handle)
+        finally:
+            # Restore prod-monitoring auth + logger so production traces continue
+            # writing to north-star-prod after the eval. Without this, every LLM
+            # call after an eval would silently log to whichever Braintrust
+            # project the user's eval key writes to.
+            prod_key = os.environ.get("BRAINTRUST_PROD_API_KEY")
+            if prod_key:
+                try:
+                    braintrust.login(api_key=prod_key, force_login=True)
+                    braintrust.init_logger(
+                        project=os.environ.get("BRAINTRUST_PROD_PROJECT", "north-star-prod"),
+                    )
+                except Exception:
+                    pass  # never let restoration failure mask the eval result
+    else:
+        # Default path: run the eval entirely in-process, no external service.
+        try:
+            max_workers = max(1, int(os.environ.get("EVAL_MAX_CONCURRENCY", "5")))
+        except ValueError:
+            max_workers = 5
+        url, name, averages, per_row = _run_local(
+            rows, task, scorers, experiment_name, max_workers
         )
 
-        url, name, averages, per_row = _extract_summary(handle)
-        if agent_mode and agent_traces:
-            agent_task.attach_traces_to_per_row(per_row, agent_traces)
-        # Attach per-scorer judge traces collected by the adapter to each
-        # per-row entry, keyed by row id from metadata. Lets the UI show
-        # the judge's reasoning when the user clicks a score chip — same
-        # data we've always logged to Braintrust traces, just plumbed back
-        # to our own per_row payload too.
-        attached_count = 0
-        for entry in per_row:
-            row_id = (entry.get("metadata") or {}).get("id")
-            if not isinstance(row_id, str):
-                continue
-            sc_meta: dict[str, dict[str, Any]] = {}
-            for (rid, scorer_name), trace in scorer_traces.items():
-                if rid == row_id:
-                    sc_meta[scorer_name] = trace
-            if sc_meta:
-                entry["scorer_metadata"] = sc_meta
-                attached_count += 1
-        # Verifies on every run that scorer reasoning is being captured.
-        # If `attached_count=0` shows up in logs, the runner has fresh
-        # scores but no judge text — meaning the user's UI score chips
-        # will be disabled and the legacy-run hint will show. Most likely
-        # cause when this happens: the backend didn't reload to this code
-        # version. Restart uvicorn.
-        print(
-            f"[eval_runner] scorer_traces captured: {len(scorer_traces)} "
-            f"(scorer, row) pairs across {attached_count}/{len(per_row)} rows",
-            file=sys.stderr,
-        )
-        return EvalResult(
-            experiment_url=url,
-            experiment_name=name or experiment_name,
-            rows_total=len(examples),
-            rows_evaluated=len(rows),
-            scorer_averages=averages,
-            scorer_names=[s.__name__ for s in scorers],
-            per_row=per_row,
-        )
-    finally:
-        # Restore prod-monitoring auth + logger so production traces continue
-        # writing to north-star-prod after the eval. Without this, every LLM
-        # call after an eval would silently log to whichever Braintrust
-        # project the user's eval key writes to.
-        prod_key = os.environ.get("BRAINTRUST_PROD_API_KEY")
-        if prod_key:
-            try:
-                braintrust.login(api_key=prod_key, force_login=True)
-                braintrust.init_logger(
-                    project=os.environ.get("BRAINTRUST_PROD_PROJECT", "north-star-prod"),
-                )
-            except Exception:
-                pass  # never let restoration failure mask the eval result
+    if agent_mode and agent_traces:
+        agent_task.attach_traces_to_per_row(per_row, agent_traces)
+    # Attach per-scorer judge traces collected by the adapter to each
+    # per-row entry, keyed by row id from metadata. Lets the UI show
+    # the judge's reasoning when the user clicks a score chip — same
+    # data we've always logged to Braintrust traces, just plumbed back
+    # to our own per_row payload too.
+    attached_count = 0
+    for entry in per_row:
+        row_id = (entry.get("metadata") or {}).get("id")
+        if not isinstance(row_id, str):
+            continue
+        sc_meta: dict[str, dict[str, Any]] = {}
+        for (rid, scorer_name), trace in scorer_traces.items():
+            if rid == row_id:
+                sc_meta[scorer_name] = trace
+        if sc_meta:
+            entry["scorer_metadata"] = sc_meta
+            attached_count += 1
+    # Verifies on every run that scorer reasoning is being captured.
+    # If `attached_count=0` shows up in logs, the runner has fresh
+    # scores but no judge text — meaning the user's UI score chips
+    # will be disabled and the legacy-run hint will show. Most likely
+    # cause when this happens: the backend didn't reload to this code
+    # version. Restart uvicorn.
+    print(
+        f"[eval_runner] scorer_traces captured: {len(scorer_traces)} "
+        f"(scorer, row) pairs across {attached_count}/{len(per_row)} rows",
+        file=sys.stderr,
+    )
+    return EvalResult(
+        experiment_url=url,
+        experiment_name=name or experiment_name,
+        rows_total=len(examples),
+        rows_evaluated=len(rows),
+        scorer_averages=averages,
+        scorer_names=[s.__name__ for s in scorers],
+        per_row=per_row,
+    )

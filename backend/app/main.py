@@ -3756,7 +3756,7 @@ async def _execute_eval_run(
     skill_body: str,
     scorer_defs: list[dict],
     examples: list[dict],
-    braintrust_key: str,
+    braintrust_key: str | None,
     anthropic_key: str | None,
     req: RunEvalRequest,
     prompt_target: str | None = None,
@@ -3881,21 +3881,21 @@ async def run_eval_for_session(
     access: Access = Depends(resolve_access),
     _quota: None = Depends(enforce_quota),
 ):
-    """Trigger a Braintrust eval run for this session's dataset + scorers + skill.
+    """Trigger an eval run for this session's dataset + scorers + skill.
 
-    Braintrust API key is read from the X-Braintrust-Key header. Anthropic key
-    from X-Anthropic-Key (same pattern as other endpoints). Runs asynchronously
-    in a background task; poll GET /sessions/{id}/eval-runs/{run_id} for status.
+    Runs locally by default (no Braintrust key needed). The optional
+    X-Braintrust-Key header (or BRAINTRUST_API_KEY env) is only consulted when
+    EVAL_USE_BRAINTRUST=1 is set, to mirror the run to a Braintrust dashboard.
+    Anthropic key from X-Anthropic-Key (same pattern as other endpoints). Runs
+    asynchronously in a background task; poll
+    GET /sessions/{id}/eval-runs/{run_id} for status.
     """
     require_writer(access)
     import uuid as _uuid
 
+    # Optional: only used by the legacy Braintrust mirror (EVAL_USE_BRAINTRUST=1).
+    # Eval runs are local by default, so a missing key is not an error.
     braintrust_key = request.headers.get("x-braintrust-key") or os.environ.get("BRAINTRUST_API_KEY")
-    if not braintrust_key:
-        raise HTTPException(
-            status_code=400,
-            detail="Braintrust API key required. Add it in Settings or send X-Braintrust-Key header.",
-        )
 
     state, conversation = await _load_state(session_id)
     is_prompt_eval = state.kind == SessionKind.prompt
