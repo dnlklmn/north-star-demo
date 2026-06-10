@@ -65,7 +65,18 @@ def _build_judge_client(
     the caller's key or the default client env lookup.
     """
     is_openrouter = "/" in judge_model
-    if is_openrouter:
+    # Env fallback: no caller key and no ANTHROPIC_API_KEY, but OPENROUTER_API_KEY
+    # is set → route the judge through OpenRouter even for a bare ``claude-*`` id.
+    # The caller (run_eval_sync) independently remaps judge_model to its
+    # ``anthropic/...`` OpenRouter form under this same condition, so the client's
+    # base_url and the model id stay consistent. Without this, a bare claude judge
+    # id would build a keyless Anthropic client and 401 on every row.
+    env_openrouter_only = bool(
+        not anthropic_api_key
+        and not os.environ.get("ANTHROPIC_API_KEY")
+        and os.environ.get("OPENROUTER_API_KEY")
+    )
+    if is_openrouter or env_openrouter_only:
         key = anthropic_api_key if (anthropic_api_key and anthropic_api_key.startswith("sk-or-")) else os.environ.get("OPENROUTER_API_KEY")
         if not key:
             raise ValueError(

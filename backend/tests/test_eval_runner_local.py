@@ -13,7 +13,7 @@ where a ``None`` score means the scorer opted out of the row). They assert:
 
 from __future__ import annotations
 
-from app.eval_runner import _run_local
+from app.eval_runner import _build_judge_client, _run_local
 
 
 def _row(rid: str, prompt: str) -> dict:
@@ -103,3 +103,21 @@ def test_sequential_and_concurrent_agree():
     # Compare the per_row payloads (everything but ordering already asserted).
     assert seq[2] == conc[2]  # averages
     assert seq[3] == conc[3]  # per_row
+
+
+def test_judge_client_routes_to_openrouter_via_env(monkeypatch):
+    """With only OPENROUTER_API_KEY set, a bare claude-* judge id must build an
+    OpenRouter-pointed client (not a keyless Anthropic one). Regression guard for
+    the env-fallback routing fix."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    client = _build_judge_client("claude-sonnet-4-5-20250929", None)
+    assert "openrouter.ai" in str(client.base_url)
+
+
+def test_judge_client_prefers_anthropic_when_key_present(monkeypatch):
+    """When ANTHROPIC_API_KEY is set, a bare claude-* judge stays on Anthropic."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    client = _build_judge_client("claude-sonnet-4-5-20250929", None)
+    assert "anthropic.com" in str(client.base_url)
