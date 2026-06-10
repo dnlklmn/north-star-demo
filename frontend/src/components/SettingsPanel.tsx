@@ -255,9 +255,9 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                 )}
               </div>
 
-              {/* Braintrust API key — required to run evals */}
+              {/* Braintrust API key — optional; only used by the legacy dashboard mirror */}
               <div>
-                <label className="text-xs font-medium text-foreground block mb-1.5">Braintrust API key</label>
+                <label className="text-xs font-medium text-foreground block mb-1.5">Braintrust API key (optional)</label>
                 <div className="flex gap-1.5">
                   <div className="flex-1 relative">
                     <input
@@ -287,7 +287,7 @@ export default function SettingsPanel({ onClose }: SettingsPanelProps) {
                   </button>
                 </div>
                 <p className="text-[10px] text-muted-foreground mt-1.5">
-                  Required for running evals on the Evaluations tab. Stored locally and sent as X-Braintrust-Key with run requests.
+                  Optional. Evals run locally and need no key. Provide one only to mirror runs to a Braintrust dashboard (requires EVAL_USE_BRAINTRUST=1 on the backend). Stored locally and sent as X-Braintrust-Key.
                 </p>
               </div>
 

@@ -652,16 +652,19 @@ export async function runEval(
   sessionId: string,
   req: RunEvalRequest
 ): Promise<EvalRunSummary> {
+  // Eval runs are local by default — no key required. Only forward a Braintrust
+  // key if the user has set one (used solely by the optional dashboard mirror,
+  // gated server-side by EVAL_USE_BRAINTRUST).
   const braintrustKey = getBraintrustApiKey()
-  if (!braintrustKey) {
-    throw new Error('Braintrust API key required. Add it in the Evaluations tab.')
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
+  if (braintrustKey) {
+    headers['X-Braintrust-Key'] = braintrustKey
   }
   const res = await apiFetch(`${BASE}/sessions/${sessionId}/run-eval`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Braintrust-Key': braintrustKey,
-    },
+    headers,
     body: JSON.stringify(req),
   })
   if (!res.ok) {

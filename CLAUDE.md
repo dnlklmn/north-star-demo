@@ -30,6 +30,7 @@ backend/app/           FastAPI app
 - **Debounced reevaluation:** Seed edits trigger a 3-second debounce timer, then background re-validation via the agent.
 - **Optimistic UI updates:** Frontend updates state immediately, agent catches up asynchronously.
 - **Turn logging:** Every LLM interaction logged to `turns` table with full input/output/metadata for replay and judging.
+- **Eval runner:** Eval runs (Evaluate tab) execute locally in-process — no Braintrust key required (`backend/app/eval_runner.py`, `_run_local`). Braintrust is opt-in via `EVAL_USE_BRAINTRUST=1` for a hosted dashboard. The separate prod-tracing in `tools.py` (gated on `BRAINTRUST_PROD_API_KEY`) is unrelated. See `docs/eval-runner.md`.
 - **Judge-trace capture for training data:** Every eval run stores the full judge response (CoT reasoning + score) on `eval_runs.per_row[i].scorer_metadata[scorer_name].judge_response`. This is intentionally untruncated — it's the canonical capture surface for the future distilled house judge corpus. See `docs/tier3a-training-data-capture.md` for the staged plan.
 
 ## Commands
@@ -81,6 +82,8 @@ npx tsc --noEmit     # Type check
 | ANTHROPIC_API_KEY | No* | Claude API key (default) |
 | OPENROUTER_API_KEY | No* | OpenRouter API key (used only if `ANTHROPIC_API_KEY` is not set) |
 | MODEL_NAME | No | Defaults to claude-sonnet-4-20250514 |
+| EVAL_MAX_CONCURRENCY | No | Rows scored in parallel by the local eval runner (default 5) |
+| EVAL_USE_BRAINTRUST | No | Set to `1` to mirror eval runs to a Braintrust dashboard (needs a Braintrust key) |
 
 *One of `ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY` must be set. Anthropic takes priority when both are present.
 

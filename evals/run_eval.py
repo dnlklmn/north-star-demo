@@ -128,11 +128,15 @@ def main() -> None:
     else:
         parser.error("provide --session-id OR (--dataset-file + --scorers-file + --skill-file)")
 
+    # Optional — only used when EVAL_USE_BRAINTRUST=1 mirrors the run to a
+    # Braintrust dashboard. Eval runs are local by default.
     braintrust_key = os.environ.get("BRAINTRUST_API_KEY")
-    if not braintrust_key:
-        raise SystemExit("BRAINTRUST_API_KEY not set")
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise SystemExit("ANTHROPIC_API_KEY not set")
+    # One LLM provider key is required. Anthropic takes priority; OpenRouter is
+    # the fallback (run_eval_sync routes both the task and judge through
+    # OpenRouter's Anthropic-compatible endpoint when only OPENROUTER_API_KEY
+    # is set). Matches the precedence in tools.get_client / CLAUDE.md.
+    if not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("OPENROUTER_API_KEY"):
+        raise SystemExit("Set ANTHROPIC_API_KEY or OPENROUTER_API_KEY")
 
     print(
         f"Running eval in project '{args.project}' "
